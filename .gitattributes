@@ -1,0 +1,2 @@
+# GitHub の表示: .um は TypeScript として色分けする（文法が近いため。Linguist に UnifiedMozaic はまだない）。
+*.um linguist-language=TypeScript
