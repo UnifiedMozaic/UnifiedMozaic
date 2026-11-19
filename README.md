@@ -83,8 +83,7 @@ node src/cli.ts build examples/kernels.um --target host --emit-msl -o kernels   
 
 - [Language guide (Japanese)](docs/guide.ja.md) — syntax, ownership, kernels and buffers, GPU execution, threads, safety guarantees
 - [examples/](examples) — runnable programs; each one doubles as a test (`// expect:` lines)
-- [bench/](bench/README.md) — speed comparison with equivalent C code
-- [editors/vscode/](editors/vscode/README.md) — VS Code extension (syntax highlighting, type checking on save, build and run)
+- [vscode-extension](https://github.com/UnifiedMozaic/vscode-extension) — VS Code extension (syntax highlighting, type checking on save, build and run)
 - [SECURITY.md](SECURITY.md) — security policy and how to report a vulnerability
 
 ## Tests
@@ -103,9 +102,6 @@ src/        compiler: lexer → parser → checker → codegen (LLVM IR) → dri
 runtime/    native runtime (C), Metal runtime (Objective-C), wasm runtime and JS host
 examples/   sample programs (also tests)
 tests/      test runner and test cases
-bench/      benchmarks against C
-tools/      GPU test page generator and Metal measurement tools
-editors/    VS Code extension
 assets/     logo
 docs/       documentation
 ```

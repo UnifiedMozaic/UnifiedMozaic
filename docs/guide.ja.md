@@ -345,14 +345,6 @@ CPU の並列実行とスレッドについては、下の「スレッド」の 
 - `f16` / `f8` / `f4` / `f64`、64 ビットの整数、SIMD のベクトル、`Math.prefetch` は kernel では使えません。
 - GPU の仕事がシェーダのコンパイルや実行に失敗すると、プログラムは停止します（`panic: the GPU could not run a kernel (...)`）。
 
-### Mac でまとめて確かめる
-
-```sh
-sh tools/mac-check.sh
-```
-
-テスト一式（Metal での実行を含む）、ベンチマーク、生成した MSL の Metal コンパイラでの確認（Xcode がある場合）をまとめて行い、結果を `out/mac-check/report.txt` に書きます。外部とは通信しません。
-
 ## ブラウザでの GPU 実行（WebGPU、実験的）
 
 **この経路は実験的で、今後は保守しません。** 今後足す kernel の機能は CPU と Metal だけを対象にし、WGSL では対応しない（コンパイルエラーにする）ことがあります。
@@ -369,10 +361,8 @@ await exports.main();   // GPU が使える環境では Promise が返るので�
 - **dispatch のたびに Buffer を送り、書き込み先を読み戻します。** WebGPU では CPU と GPU のメモリが別だからです。小さい仕事や、CPU と頻繁に行き来する処理では、CPU の方が速くなります。
 - **`gpu.submit` は、その場で最後まで実行して券 0 を返します。**
 - **JSPI（WebAssembly の実行を一時停止して Promise を待つ機能）が必要です。** WebGPU の読み戻しは非同期でしか行えないためです。JSPI か WebGPU がない環境では GPU なしとして動き、`dispatch` は CPU で実行されます。デスクトップ版の Chrome / Edge 137 以降で使えます。
-- **確かめた範囲**: Android の Chrome 系ブラウザ（Adreno GPU）で一度実行し、3本のテストのうち2本が一致しました。残り1本は範囲外の小数→整数変換だけの不一致で、その修正は実機で再確認していません。8 / 16 ビットの整数の kernel は、Deno の WebGPU（`tools/wgsl/deno_run.mjs`）で CPU と一致することを確かめました。
+- **確かめた範囲**: Android の Chrome 系ブラウザ（Adreno GPU）で一度実行し、3本のテストのうち2本が一致しました。残り1本は範囲外の小数→整数変換だけの不一致で、その修正は実機で再確認していません。8 / 16 ビットの整数の kernel は、Deno の WebGPU で CPU と一致することを確かめました。
 - **生成される WGSL を見るには** `node src/cli.ts build x.um --emit-wgsl` とします。
-
-GPU 実行の確認には、`node tools/build-gpu-test.ts` が作るページ（`out/gpu-test.html`）をブラウザで開きます。同じ kernel を CPU と GPU で実行して結果を照合し、合否を表示します。
 
 ## MSL（Metal Shading Language）の出力
 
@@ -547,7 +537,7 @@ const e = table[slot * 4];        // 読むころには届いている
 
 ## 速度
 
-`node bench/run.ts` で、同じ計算を C で書いたものとの速度を比べられます（[bench/README.md](../bench/README.md)）。Linux x86_64 での計測では、多くの項目が C の `-O2` と同等です。添字アクセスの境界検査が残るループ（隣の要素を読むステンシル計算など）は、C より2〜6割ほど遅くなります。`for...of` と kernel には境界検査の分岐が入りません。
+同じ計算を C で書いたものと比べると（Linux x86_64 での計測）、多くの項目が C の `-O2` と同等です。添字アクセスの境界検査が残るループ（隣の要素を読むステンシル計算など）は、C より2〜6割ほど遅くなります。`for...of` と kernel には境界検査の分岐が入りません。
 
 ## テスト
 
@@ -572,13 +562,10 @@ src/wgsl.ts      kernel から WGSL（WebGPU。実験的）への変換
 src/driver.ts    clang の呼び出し
 src/cli.ts       コマンド
 runtime/         ネイティブ（native.c）、Metal（metal.m）、wasm（wasm_rt.c と host.mjs。WebGPU での実行を含む）のランタイム、標準の関数（prelude.um）
-tools/           GPU テスト用ページの生成、Mac での確認（mac-check.sh）、Metal の計測道具（tools/metal）、WGSL の確認（tools/wgsl）
-bench/           C との速度比較
 assets/logo/     ロゴ（SVG と PNG）
-editors/vscode/  VSCode 拡張（色分け・保存時の型検査・ビルドと実行）
 examples/        動くサンプル（テストを兼ねる）
 tests/           テストランナーと、エラー系・停止系・スレッド・Metal・MSL などのケース
 docs/            このガイド
 ```
 
-VSCode 拡張の入れ方は [editors/vscode/README.md](../editors/vscode/README.md) にあります。プロジェクト自体のセキュリティ方針は [SECURITY.md](../SECURITY.md) にあります。
+プロジェクト自体のセキュリティ方針は [SECURITY.md](../SECURITY.md) にあります。

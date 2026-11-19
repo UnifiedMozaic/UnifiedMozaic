@@ -83,8 +83,7 @@ node src/cli.ts build examples/kernels.um --target host --emit-msl -o kernels   
 
 - [言語ガイド](docs/guide.ja.md) — 文法、所有権、kernel と Buffer、GPU での実行、スレッド、安全性の保証
 - [examples/](examples) — 動くサンプル。どれもテストを兼ねます（`// expect:` の行）
-- [bench/](bench/README.md) — 同じ計算を C で書いたものとの速度の比較
-- [editors/vscode/](editors/vscode/README.md) — VSCode 拡張（色分け、保存時の型検査、ビルドと実行）
+- [vscode-extension](https://github.com/UnifiedMozaic/vscode-extension) — VSCode 拡張（色分け、保存時の型検査、ビルドと実行）
 - [SECURITY.md](SECURITY.md) — セキュリティ方針と、脆弱性の報告のしかた
 
 ## テスト
@@ -103,9 +102,6 @@ src/        コンパイラ: lexer → parser → checker → codegen（LLVM IR�
 runtime/    ネイティブ（C）・Metal（Objective-C）・wasm のランタイムと JS のホスト
 examples/   サンプル（テストを兼ねる）
 tests/      テストランナーとテストケース
-bench/      C との速度比較
-tools/      GPU テスト用ページの生成、Metal の計測の道具
-editors/    VSCode 拡張
 assets/     ロゴ
 docs/       説明書
 ```

@@ -8,8 +8,7 @@
 //                      （解放後使用・範囲外アクセス・二重解放・解放漏れを検出）。
 //                      arm64-macos はオブジェクト生成まで確認。
 //   tests/gpu/*.um     GPU（WebGPU）用のテスト。ここでは wasm32 向けにコンパイルして WGSL を生成し、
-//                      CPU だけで実行して `// expect:` と照合する。GPU での実行はブラウザで行う
-//                      （tools/build-gpu-test.ts が作るページ）。
+//                      CPU だけで実行して `// expect:` と照合する。GPU での実行はブラウザで行う。
 //   tests/msl/         MSL の出力を、Metal なしで確かめる。clang++ があれば: tests/gpu と examples の kernel の MSL を
 //                      スタブヘッダ（metal_stub.h）つきで C++14 として構文検査し、tests/msl/kernels.um の kernel の MSL を
 //                      C++ として実行して、CPU 実行（ネイティブ）とチェックサムを比べる。Metal コンパイラでの確認ではない。
