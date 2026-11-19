@@ -1,0 +1,6 @@
+// error: ts-feature
+export function main(): i32 {
+  try {
+    return 0;
+  }
+}

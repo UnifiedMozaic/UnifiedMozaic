@@ -1,0 +1,7 @@
+// error: arg-count
+// fill は値だけか、値と始まりと終わりの 3 つ。
+export function main(): i32 {
+  let xs = new Array<i32>(4);
+  xs.fill(0, 1);
+  return 0;
+}

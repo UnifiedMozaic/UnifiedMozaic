@@ -1,0 +1,6 @@
+// error: immutable
+export function main(): i32 {
+  const a = 1;
+  a = 2;
+  return a;
+}

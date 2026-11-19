@@ -1,0 +1,11 @@
+// error: kernel-type
+// kernel の中の固定長配列の要素に u16 は使えない。
+kernel function k(i: u32, out: mut Buffer<u16>): void {
+  let t: u16[4];
+  out[i] = t[i & 3];
+}
+export function main(): i32 {
+  let o = new Buffer<u16>(4);
+  dispatch(k, 4, mut o);
+  return 0;
+}

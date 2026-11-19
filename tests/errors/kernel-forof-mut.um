@@ -1,0 +1,4 @@
+// error: kernel-restriction
+kernel function k(i: u32, out: mut Buffer<f32>): void {
+  for (const v of out) { }
+}

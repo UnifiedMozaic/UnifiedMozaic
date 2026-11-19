@@ -1,0 +1,7 @@
+// x & 31 は [0,31] だが配列は 16。マスクの上限を取り違えて検査を消していないこと。
+// panic: index out of bounds (line 6)
+export function main(): i32 {
+  let a: i32[16];
+  let x: i32 = 20;
+  return a[x & 31];
+}

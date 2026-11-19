@@ -1,0 +1,6 @@
+// error: ts-feature
+struct P { x: i32; }
+export function main(): i32 {
+  const p = new P();
+  return 0;
+}

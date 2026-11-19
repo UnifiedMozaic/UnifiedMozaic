@@ -1,0 +1,5 @@
+// error: literal-range
+export function main(): i32 {
+  const x: u8 = 256;
+  return 0;
+}

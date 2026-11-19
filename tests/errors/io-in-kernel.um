@@ -1,0 +1,7 @@
+// error: kernel-restriction
+kernel function k(i: u32, out: mut Buffer<f32>): void {
+  out[i] = clock() as f32;
+}
+export function main(): i32 {
+  return 0;
+}

@@ -1,0 +1,10 @@
+// panic: index out of bounds (line 7)
+// 更新で大きく飛ぶ。範囲内の区間を出たら、検査つきに戻らなければならない。
+export function main(): i32 {
+  let xs: i32[] = [1, 2, 3, 4, 5, 6, 7, 8];
+  let sum = 0;
+  for (let i = 0; i < 100; i = i * 3 + 1) {
+    sum += xs[i];
+  }
+  return sum;
+}

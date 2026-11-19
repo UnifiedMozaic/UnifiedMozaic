@@ -1,0 +1,4 @@
+// error: move-out
+function leak(xs: i32[]): i32[] {
+  return xs;
+}

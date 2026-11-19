@@ -1,0 +1,18 @@
+// 持ち手の型は引数に書けない。
+function wait(h: Thread<i32>): void {
+  print(1);
+}
+
+function f(x: i32): i32 {
+  return x;
+}
+
+function g(xs: i32[]): i32 {
+  return xs[0];
+}
+
+export function main(): i32 {
+  return 0;
+}
+
+// error: thread

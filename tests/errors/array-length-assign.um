@@ -1,0 +1,6 @@
+// error: not-assignable
+export function main(): i32 {
+  let xs: i32[] = [1];
+  xs.length = 0;
+  return 0;
+}

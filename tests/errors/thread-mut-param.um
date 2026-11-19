@@ -1,0 +1,20 @@
+// mut の引数を持つ関数はスレッドで実行できない。
+function bump(x: mut i32[]): void {
+  x[0] = 1;
+}
+
+function f(x: i32): i32 {
+  return x;
+}
+
+function g(xs: i32[]): i32 {
+  return xs[0];
+}
+
+export function main(): i32 {
+  let xs: i32[] = [0];
+  const h = thread.spawn(bump, mut xs);
+  return 0;
+}
+
+// error: thread

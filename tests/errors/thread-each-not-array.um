@@ -1,0 +1,20 @@
+// spawnEach の2番目は own の配列。
+function w(k: u32): void {
+  print(k);
+}
+
+function f(x: i32): i32 {
+  return x;
+}
+
+function g(xs: i32[]): i32 {
+  return xs[0];
+}
+
+export function main(): i32 {
+  const ks: u32[] = [0, 1];
+  const g = thread.spawnEach(w, ks);
+  return 0;
+}
+
+// error: type-mismatch

@@ -1,0 +1,5 @@
+// error: syntax
+const N = 4;
+export function main(): i32 {
+  return N;
+}

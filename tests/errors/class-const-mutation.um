@@ -1,0 +1,10 @@
+// error: immutable
+class C {
+  n: i32 = 0;
+  inc(): void { this.n++; }
+}
+export function main(): i32 {
+  const c = new C();
+  c.inc();
+  return 0;
+}

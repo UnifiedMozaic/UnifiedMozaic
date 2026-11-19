@@ -1,0 +1,197 @@
+// 同じ kernel を CPU と GPU（Metal）で実行し、結果が一致することを確かめる。
+// 出力は、最初に GPU で計算した値（2）と、各 kernel の不一致の個数（0）。
+// expect: 2
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: 0
+
+struct Cell {
+  a: f32;
+  b: i32;
+  hist: u32[4];
+}
+
+struct Config {
+  scale: f32;
+  bias: i32;
+}
+
+kernel function arith(i: u32, out: mut Buffer<f32>, x: Buffer<f32>, y: Buffer<f32>, k: f32): void {
+  const v = x[i] * k + y[i] / (x[i] + 1.5) - Math.floor(y[i] * 0.5);
+  out[i] = Math.max(Math.min(v, 1000), -1000) + Math.abs(x[i] - y[i]) + Math.sqrt(Math.abs(y[i])) + Math.ceil(x[i] * 0.25);
+}
+
+kernel function ints(i: u32, out: mut Buffer<i32>, a: Buffer<i32>, b: Buffer<i32>): void {
+  const x = a[i];
+  const y = b[i];
+  let r = x / y + x % y;
+  r = r ^ (x << y) ^ (x >> y);
+  r = r + Math.abs(x) + Math.min(x, y) * 3 - Math.max(x, y);
+  r = r + Math.popcount(x) + Math.clz(x) + Math.ctz(y);
+  out[i] = r * 31 + (-x) + (~y);
+}
+
+kernel function maskshift(i: u32, out: mut Buffer<i32>, a: Buffer<i32>): void {
+  // マスクつきシフト。シフト量が 32 以上でも、CPU と GPU で同じ結果になる（32 で割った余り）。
+  const x = a[i] as u32;
+  const r = Math.shl(x, i) ^ Math.shr(x, i + 1) ^ Math.shl(x, i + 40) ^ Math.shr(x, 33 as u32) ^ Math.shl(x, 100 as i32);
+  out[i] = r as i32;
+}
+
+kernel function casts(i: u32, out: mut Buffer<i32>, f: Buffer<f32>): void {
+  const v = f[i];
+  out[i] = (v as i32) + ((v as u32) as i32) / 3 + (((i as f32) * 0.5) as i32) + ((v > 0) as i32);
+}
+
+kernel function fetch(src: Buffer<i32>, at: i32): i32 {
+  return src[at];
+}
+
+kernel function clamps(i: u32, out: mut Buffer<i32>, src: Buffer<i32>, empty: Buffer<i32>): void {
+  const signed = (i as i32) - 3;
+  out[i] = fetch(src, signed) + src[i + 2] * 2 + fetch(empty, 5) + (src.length as i32) + (empty.length as i32);
+}
+
+kernel function cells(i: u32, out: mut Buffer<Cell>, cfg: Config, on: bool): void {
+  let c = out[i];
+  c.a = c.a * cfg.scale + 1;
+  if (on) {
+    c.b = c.b + cfg.bias;
+  }
+  for (let k: u32 = 0; k < 4; k++) {
+    c.hist[k] = c.hist[k] + k + i;
+  }
+  out[i] = c;
+}
+
+kernel function move(i: u32, out: mut Buffer<vec3<f32>>, vel: Buffer<vec3<f32>>, m: mat3<f32>, dt: f32): void {
+  out[i] = mat3MulVec(m, out[i] + vel[i] * dt);
+}
+
+function diffI32(a: Buffer<i32>, b: Buffer<i32>): u32 {
+  let bad: u32 = 0;
+  for (let i: u32 = 0; i < a.length; i++) {
+    if (a[i] != b[i]) {
+      bad += 1;
+    }
+  }
+  return bad;
+}
+
+function diffF32(a: Buffer<f32>, b: Buffer<f32>): u32 {
+  let bad: u32 = 0;
+  for (let i: u32 = 0; i < a.length; i++) {
+    if (a[i] != b[i]) {
+      bad += 1;
+    }
+  }
+  return bad;
+}
+
+export function main(): i32 {
+  const n: u32 = 50000;
+  let seed: u32 = 12345;
+  let xs = new Buffer<f32>(n);
+  let ys = new Buffer<f32>(n);
+  let ia = new Buffer<i32>(n);
+  let ib = new Buffer<i32>(n);
+  let fs = new Buffer<f32>(n);
+  for (let i: u32 = 0; i < n; i++) {
+    seed = seed * 1664525 + 1013904223;
+    xs[i] = (((seed >> 8) % 2000) as f32) * 0.01 - 5;
+    seed = seed * 1664525 + 1013904223;
+    ys[i] = (((seed >> 8) % 3000) as f32) * 0.02 - 30;
+    seed = seed * 1664525 + 1013904223;
+    ia[i] = (seed as i32) / 1000;
+    seed = seed * 1664525 + 1013904223;
+    ib[i] = (((seed >> 8) % 41) as i32) - 20;
+    seed = seed * 1664525 + 1013904223;
+    fs[i] = (((seed >> 8) % 100000) as f32) * 97.5 - 4000000;
+  }
+  ia[0] = -2147483648;
+  ib[0] = -1;
+  ia[1] = 7;
+  ib[1] = 0;
+  fs[0] = 3000000000;
+  fs[1] = -3000000000;
+  fs[2] = 5000000000;
+
+  // GPU で実行する。使えなければここで停止する。
+  let probe = new Buffer<i32>(4);
+  let one: Buffer<f32> = [1, 2, 3, 4];
+  gpu.dispatch(casts, 4, mut probe, one);
+  print(probe[0]);
+
+  let fa = new Buffer<f32>(n);
+  let fb = new Buffer<f32>(n);
+  cpu.dispatch(arith, n, mut fa, xs, ys, 1.75);
+  gpu.dispatch(arith, n, mut fb, xs, ys, 1.75);
+  print(diffF32(fa, fb));
+
+  let a2 = new Buffer<i32>(n);
+  let b2 = new Buffer<i32>(n);
+  cpu.dispatch(ints, n, mut a2, ia, ib);
+  gpu.dispatch(ints, n, mut b2, ia, ib);
+  print(diffI32(a2, b2));
+
+  let a3 = new Buffer<i32>(n);
+  let b3 = new Buffer<i32>(n);
+  cpu.dispatch(casts, n, mut a3, fs);
+  gpu.dispatch(casts, n, mut b3, fs);
+  print(diffI32(a3, b3));
+
+  let as5 = new Buffer<i32>(n);
+  let bs5 = new Buffer<i32>(n);
+  cpu.dispatch(maskshift, n, mut as5, ia);
+  gpu.dispatch(maskshift, n, mut bs5, ia);
+  print(diffI32(as5, bs5));
+
+  const small: Buffer<i32> = [10, 20, 30, 40, 50];
+  const empty = new Buffer<i32>(0);
+  let a4 = new Buffer<i32>(64);
+  let b4 = new Buffer<i32>(64);
+  cpu.dispatch(clamps, 64, mut a4, small, empty);
+  gpu.dispatch(clamps, 64, mut b4, small, empty);
+  print(diffI32(a4, b4));
+
+  let ca = new Buffer<Cell>(1000);
+  let cb = new Buffer<Cell>(1000);
+  const cfg: Config = { scale: 1.5, bias: 7 };
+  for (let round = 0; round < 3; round++) {
+    cpu.dispatch(cells, 1000, mut ca, cfg, round % 2 == 0);
+    gpu.dispatch(cells, 1000, mut cb, cfg, round % 2 == 0);
+  }
+  let badCells: u32 = 0;
+  for (let i: u32 = 0; i < 1000; i++) {
+    if (ca[i].a != cb[i].a || ca[i].b != cb[i].b || ca[i].hist[3] != cb[i].hist[3] || ca[i].hist[0] != cb[i].hist[0]) {
+      badCells += 1;
+    }
+  }
+  print(badCells);
+
+  let pa = new Buffer<vec3<f32>>(n);
+  let pb = new Buffer<vec3<f32>>(n);
+  let vel = new Buffer<vec3<f32>>(n);
+  for (let i: u32 = 0; i < n; i++) {
+    vel[i] = vec3(xs[i], ys[i], 1);
+  }
+  let m: mat3<f32> = mat3Identity();
+  m.m[1] = 0.5;
+  m.m[5] = -0.25;
+  for (let step = 0; step < 4; step++) {
+    cpu.dispatch(move, n, mut pa, vel, m, 0.125);
+    gpu.dispatch(move, n, mut pb, vel, m, 0.125);
+  }
+  let badPos: u32 = 0;
+  for (let i: u32 = 0; i < n; i++) {
+    if (pa[i].x != pb[i].x || pa[i].y != pb[i].y || pa[i].z != pb[i].z) {
+      badPos += 1;
+    }
+  }
+  print(badPos);
+  return 0;
+}

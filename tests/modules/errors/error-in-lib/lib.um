@@ -1,0 +1,4 @@
+export function broken(): i32 {
+  const x: f64 = 1.5;
+  return x;
+}

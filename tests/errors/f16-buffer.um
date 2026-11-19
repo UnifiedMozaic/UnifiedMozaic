@@ -1,0 +1,5 @@
+// error: kernel-type
+export function main(): i32 {
+  let b = new Buffer<f16>(4);
+  return 0;
+}

@@ -1,0 +1,11 @@
+// error: kernel-type
+// kernel の中の i8 は読み書きと比較と変換だけ。計算は as i32 で広げてから。
+kernel function k(i: u32, out: mut Buffer<i8>, a: Buffer<i8>): void {
+  out[i] = a[i] + a[i];
+}
+export function main(): i32 {
+  let o = new Buffer<i8>(4);
+  let a = new Buffer<i8>(4);
+  dispatch(k, 4, mut o, a);
+  return 0;
+}

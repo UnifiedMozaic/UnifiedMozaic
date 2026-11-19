@@ -1,0 +1,23 @@
+// メソッドは直接起動できない。
+class C {
+  v: i32 = 1;
+  get(): i32 {
+    return this.v;
+  }
+}
+
+function f(x: i32): i32 {
+  return x;
+}
+
+function g(xs: i32[]): i32 {
+  return xs[0];
+}
+
+export function main(): i32 {
+  const c = new C();
+  const h = thread.spawn(c.get);
+  return 0;
+}
+
+// error: type-mismatch

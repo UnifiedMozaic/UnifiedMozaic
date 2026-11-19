@@ -1,0 +1,6 @@
+// error: use-after-move
+export function main(): i32 {
+  const a: i32[] = [1, 2];
+  const b = a;
+  return a[0] + b[0];
+}

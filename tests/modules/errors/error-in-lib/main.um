@@ -1,0 +1,4 @@
+// error: type-mismatch
+// file: lib.um
+import { broken } from "./lib.um";
+export function main(): i32 { return broken(); }

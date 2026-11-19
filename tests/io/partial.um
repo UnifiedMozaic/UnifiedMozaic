@@ -1,0 +1,12 @@
+// 行の途中まで（改行がまだ）しか届いていない間、inputReady() は false。
+// true になったあとの readLine() は待たずに戻る（相手は "sto" を書き、1秒おいて "p\n" を書く）。
+// expect: true
+// expect: stop
+export function main(): i32 {
+  while (!inputReady()) { }
+  const t = clock();
+  const line = readLine();
+  print(clock() - t < 0.5);
+  if (line != null) { print(line); }
+  return 0;
+}

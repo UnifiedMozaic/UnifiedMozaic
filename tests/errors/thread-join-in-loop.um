@@ -1,0 +1,14 @@
+// join は持ち手を使い切るので、ループの中で同じ持ち手を join できない。
+function f(x: i32): i32 {
+  return x;
+}
+
+export function main(): i32 {
+  const h = thread.spawn(f, 1);
+  for (let i = 0; i < 2; i++) {
+    print(thread.join(h));
+  }
+  return 0;
+}
+
+// error: move-in-loop

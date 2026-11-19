@@ -1,0 +1,5 @@
+// error: kernel-type
+export function main(): i32 {
+  const flags = new Buffer<bool>(4);
+  return 0;
+}

@@ -1,0 +1,5 @@
+// error: unknown-type
+class Dot implements Nothing {
+  x: f64 = 0;
+}
+export function main(): i32 { return 0; }

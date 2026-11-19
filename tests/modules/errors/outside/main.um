@@ -1,0 +1,3 @@
+// error: import-path
+import { x } from "../not-imported/lib.um";
+export function main(): i32 { return 0; }

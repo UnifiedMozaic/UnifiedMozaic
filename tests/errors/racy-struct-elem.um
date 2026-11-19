@@ -1,0 +1,6 @@
+// error: kernel-type
+struct P { x: f32; y: f32; }
+export function main(): i32 {
+  let b = new RacyBuffer<P>(4);
+  return 0;
+}

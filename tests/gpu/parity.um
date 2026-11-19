@@ -1,0 +1,316 @@
+// CPU と GPU で同じ kernel を実行し、結果が一致することを確かめる。
+// main(0) は両方とも CPU で実行する（Node でのテスト用）。main(1) は片方を GPU で実行する（ブラウザ用）。
+// どちらも出力は同じになるはず: 各 kernel の不一致の個数（0）と、CPU 側の結果のチェックサム。
+// expect: 0
+// expect: 0
+// expect: 78161896458
+// expect: 0
+// expect: 2173608374440
+// expect: 0
+// expect: -1032642618
+// expect: 0
+// expect: 9760
+// expect: 0
+// expect: 102700
+// expect: 0
+// expect: 14167
+// expect: 0
+// expect: -2459350
+
+struct Cell {
+  a: f32;
+  b: i32;
+  hist: u32[4];
+}
+
+struct Config {
+  scale: f32;
+  bias: i32;
+  flag: u32;
+  table: i32[4];
+}
+
+kernel function arith(i: u32, out: mut Buffer<f32>, x: Buffer<f32>, y: Buffer<f32>, k: f32): void {
+  const v = x[i] * k + y[i] / (x[i] + 1.5) - Math.floor(y[i] * 0.5);
+  out[i] = Math.max(Math.min(v, 1000), -1000) + Math.abs(x[i] - y[i]) + Math.sqrt(Math.abs(y[i])) + Math.ceil(x[i] * 0.25);
+}
+
+kernel function ints(i: u32, out: mut Buffer<i32>, a: Buffer<i32>, b: Buffer<i32>): void {
+  const x = a[i];
+  const y = b[i];
+  let r = x / y + x % y;
+  r = r ^ (x << y) ^ (x >> y);
+  r = r + Math.abs(x) + Math.min(x, y) * 3 - Math.max(x, y);
+  r = r + Math.popcount(x) + Math.clz(x) + Math.ctz(y);
+  out[i] = r * 31 + (-x) + (~y);
+}
+
+kernel function uints(i: u32, out: mut Buffer<u32>, a: Buffer<u32>): void {
+  const x = a[i];
+  let r = -x;
+  r = r + x / (i % 3) + x % (i % 5);
+  r = r ^ (x << i) ^ (x >> (i + 30));
+  // マスクつきシフト（シフト量が 32 以上でもビット幅で割った余りにする）。
+  r = r ^ Math.shl(x, i + 40) ^ Math.shr(x, i + 33) ^ Math.shl(x, 64 as u32);
+  out[i] = r + Math.popcount(x) + Math.clz(x) + Math.ctz(x) + Math.min(x, i) + Math.max(x, 7);
+}
+
+kernel function casts(i: u32, out: mut Buffer<i32>, f: Buffer<f32>): void {
+  const v = f[i];
+  out[i] = (v as i32) + ((v as u32) as i32) / 3 + (((i as f32) * 0.5) as i32) + ((v > 0) as i32);
+}
+
+kernel function fetch(src: Buffer<i32>, at: i32): i32 {
+  return src[at];
+}
+
+kernel function clamps(i: u32, out: mut Buffer<i32>, src: Buffer<i32>, empty: Buffer<i32>): void {
+  const signed = (i as i32) - 3;
+  out[i] = fetch(src, signed) + src[i + 2] * 2 + fetch(empty, 5) + (src.length as i32) + (empty.length as i32);
+}
+
+kernel function cells(i: u32, out: mut Buffer<Cell>, cfg: Config, on: bool): void {
+  let c = out[i];
+  c.a = c.a * cfg.scale + 1;
+  if (on) {
+    c.b = c.b + cfg.bias + cfg.table[i % 4] + cfg.table[i + 100];
+  }
+  for (let k: u32 = 0; k < 4; k++) {
+    c.hist[k] = c.hist[k] + k * cfg.flag + i;
+  }
+  let total: u32 = 0;
+  for (const h of c.hist) {
+    total += h;
+  }
+  c.hist[3] = total;
+  out[i] = c;
+}
+
+kernel function collatz(i: u32, steps: mut Buffer<u32>): void {
+  let n = i + 1;
+  let count: u32 = 0;
+  while (true) {
+    if (n == 1) {
+      break;
+    }
+    if (n % 2 == 0) {
+      n = n / 2;
+      count++;
+      continue;
+    }
+    n = 3 * n + 1;
+    count++;
+  }
+  steps[i] = count;
+}
+
+kernel function sums(i: u32, out: mut Buffer<i32>, src: Buffer<i32>): void {
+  let s = 0;
+  for (const v of src) {
+    s += v * ((i as i32) + 1);
+  }
+  out[i] = s;
+}
+
+// 決まった並びの乱数（線形合同法）。
+class Rng {
+  state: u32;
+
+  constructor(seed: u32) {
+    this.state = seed;
+  }
+
+  next(): u32 {
+    this.state = this.state * 1664525 + 1013904223;
+    return this.state;
+  }
+}
+
+function close(a: f32, b: f32): bool {
+  const scale = Math.max(Math.max(Math.abs(a), Math.abs(b)), 1);
+  return Math.abs(a - b) <= scale * 0.0001;
+}
+
+function diffI32(a: Buffer<i32>, b: Buffer<i32>): i32 {
+  let n = 0;
+  for (let i: u32 = 0; i < a.length; i++) {
+    if (a[i] != b[i]) {
+      n++;
+    }
+  }
+  return n;
+}
+
+function diffU32(a: Buffer<u32>, b: Buffer<u32>): i32 {
+  let n = 0;
+  for (let i: u32 = 0; i < a.length; i++) {
+    if (a[i] != b[i]) {
+      n++;
+    }
+  }
+  return n;
+}
+
+function sumI32(a: Buffer<i32>): i64 {
+  let s: i64 = 0;
+  for (const v of a) {
+    s += v as i64;
+  }
+  return s;
+}
+
+function sumU32(a: Buffer<u32>): u64 {
+  let s: u64 = 0;
+  for (const v of a) {
+    s += v as u64;
+  }
+  return s;
+}
+
+export function main(useGpu: i32): i32 {
+  const n: u32 = 1000;
+  let rng = new Rng(12345);
+
+  let xs = new Buffer<f32>(n);
+  let ys = new Buffer<f32>(n);
+  let ia = new Buffer<i32>(n);
+  let ib = new Buffer<i32>(n);
+  let ua = new Buffer<u32>(n);
+  let fs = new Buffer<f32>(n);
+  for (let i: u32 = 0; i < n; i++) {
+    xs[i] = ((rng.next() % 2000) as f32) * 0.01 - 5;
+    ys[i] = ((rng.next() % 3000) as f32) * 0.02 - 30;
+    ia[i] = (rng.next() as i32) / 1000;
+    ib[i] = ((rng.next() % 41) as i32) - 20;
+    ua[i] = rng.next();
+    fs[i] = ((rng.next() % 100000) as f32) * 97.5 - 4000000;
+  }
+  // 端の値: ゼロ除算、最小値 / -1、範囲外の変換
+  ia[0] = -2147483648;
+  ib[0] = -1;
+  ia[1] = 7;
+  ib[1] = 0;
+  fs[0] = 3000000000;
+  fs[1] = -3000000000;
+  fs[2] = 5000000000;
+
+  // 1. 浮動小数点
+  let fa = new Buffer<f32>(n);
+  let fb = new Buffer<f32>(n);
+  cpu.dispatch(arith, n, mut fa, xs, ys, 1.75);
+  if (useGpu != 0) {
+    gpu.dispatch(arith, n, mut fb, xs, ys, 1.75);
+  } else {
+    cpu.dispatch(arith, n, mut fb, xs, ys, 1.75);
+  }
+  let bad = 0;
+  for (let i: u32 = 0; i < n; i++) {
+    if (!close(fa[i], fb[i])) {
+      bad++;
+    }
+  }
+  print(bad);
+
+  // 2. 符号つき整数
+  let a2 = new Buffer<i32>(n);
+  let b2 = new Buffer<i32>(n);
+  cpu.dispatch(ints, n, mut a2, ia, ib);
+  if (useGpu != 0) {
+    gpu.dispatch(ints, n, mut b2, ia, ib);
+  } else {
+    cpu.dispatch(ints, n, mut b2, ia, ib);
+  }
+  print(diffI32(a2, b2));
+  print(sumI32(a2));
+
+  // 3. 符号なし整数
+  let a3 = new Buffer<u32>(n);
+  let b3 = new Buffer<u32>(n);
+  cpu.dispatch(uints, n, mut a3, ua);
+  if (useGpu != 0) {
+    gpu.dispatch(uints, n, mut b3, ua);
+  } else {
+    cpu.dispatch(uints, n, mut b3, ua);
+  }
+  print(diffU32(a3, b3));
+  print(sumU32(a3));
+
+  // 4. 型の変換（範囲外は飽和）
+  let a4 = new Buffer<i32>(n);
+  let b4 = new Buffer<i32>(n);
+  cpu.dispatch(casts, n, mut a4, fs);
+  if (useGpu != 0) {
+    gpu.dispatch(casts, n, mut b4, fs);
+  } else {
+    cpu.dispatch(casts, n, mut b4, fs);
+  }
+  print(diffI32(a4, b4));
+  print(sumI32(a4));
+
+  // 5. 範囲外の添字と空の Buffer
+  const small: Buffer<i32> = [10, 20, 30, 40, 50];
+  const empty = new Buffer<i32>(0);
+  let a5 = new Buffer<i32>(64);
+  let b5 = new Buffer<i32>(64);
+  cpu.dispatch(clamps, 64, mut a5, small, empty);
+  if (useGpu != 0) {
+    gpu.dispatch(clamps, 64, mut b5, small, empty);
+  } else {
+    cpu.dispatch(clamps, 64, mut b5, small, empty);
+  }
+  print(diffI32(a5, b5));
+  print(sumI32(a5));
+
+  // 6. struct の要素、struct と bool の引数、固定長配列
+  const cfg: Config = { scale: 0.5, bias: 3, flag: 2, table: [1, -2, 3, -4] };
+  let a6 = new Buffer<Cell>(200);
+  let b6 = new Buffer<Cell>(200);
+  for (let i: u32 = 0; i < 200; i++) {
+    const cell: Cell = { a: (i as f32) * 0.5, b: (i as i32) - 100, hist: [i, 1, 2, 3] };
+    a6[i] = cell;
+    b6[i] = cell;
+  }
+  cpu.dispatch(cells, 200, mut a6, cfg, true);
+  if (useGpu != 0) {
+    gpu.dispatch(cells, 200, mut b6, cfg, true);
+  } else {
+    cpu.dispatch(cells, 200, mut b6, cfg, true);
+  }
+  let bad6 = 0;
+  let sum6: i64 = 0;
+  for (let i: u32 = 0; i < 200; i++) {
+    const p = a6[i];
+    const q = b6[i];
+    if (!close(p.a, q.a) || p.b != q.b || p.hist[0] != q.hist[0] || p.hist[3] != q.hist[3]) {
+      bad6++;
+    }
+    sum6 += (p.b as i64) + (p.hist[3] as i64);
+  }
+  print(bad6);
+  print(sum6);
+
+  // 7. ループ、break、continue
+  let a7 = new Buffer<u32>(300);
+  let b7 = new Buffer<u32>(300);
+  cpu.dispatch(collatz, 300, mut a7);
+  if (useGpu != 0) {
+    gpu.dispatch(collatz, 300, mut b7);
+  } else {
+    cpu.dispatch(collatz, 300, mut b7);
+  }
+  print(diffU32(a7, b7));
+  print(sumU32(a7));
+
+  // 8. Buffer 全体の反復
+  let a8 = new Buffer<i32>(100);
+  let b8 = new Buffer<i32>(100);
+  cpu.dispatch(sums, 100, mut a8, ib);
+  if (useGpu != 0) {
+    gpu.dispatch(sums, 100, mut b8, ib);
+  } else {
+    cpu.dispatch(sums, 100, mut b8, ib);
+  }
+  print(diffI32(a8, b8));
+  print(sumI32(a8));
+  return 0;
+}

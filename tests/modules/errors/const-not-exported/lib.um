@@ -1,0 +1,2 @@
+const SECRET: i32 = 9;
+export const SIZE: i32 = SECRET * 2;

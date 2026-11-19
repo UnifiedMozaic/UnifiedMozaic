@@ -1,0 +1,51 @@
+// RacyBuffer を GPU（Metal）で使う。複数のスレッドが同じ要素に同時に書いても、メモリは壊れず、
+// 範囲外の添字は最後の要素に切り詰められる。数え上げは取りこぼしがありうるので、範囲だけ確かめる。
+// expect: true
+// expect: true
+// expect: 4096
+// expect: 7
+// expect: true
+
+kernel function mark(i: u32, seen: mut RacyBuffer<u32>, data: Buffer<u32>): void {
+  seen[data[i] % 64] = 1;
+}
+kernel function count(i: u32, hist: mut RacyBuffer<u32>, data: Buffer<u32>): void {
+  const bin = data[i] % 8;
+  hist[bin] = hist[bin] + 1;
+}
+kernel function wild(i: u32, out: mut RacyBuffer<f32>): void {
+  out[i * 1000003] = 7;
+}
+export function main(): i32 {
+  const n: u32 = 200000;
+  let data = new Buffer<u32>(n);
+  for (let i: u32 = 0; i < n; i++) {
+    data[i] = i * 2654435761;
+  }
+  let seen = new RacyBuffer<u32>(64);
+  gpu.dispatch(mark, n, mut seen, data);
+  let marked: u32 = 0;
+  for (let b: u32 = 0; b < 64; b++) {
+    marked += seen[b];
+  }
+  print(marked == 64);
+  let hist = new RacyBuffer<u32>(8);
+  gpu.dispatch(count, n, mut hist, data);
+  let total: u32 = 0;
+  for (const h of hist) {
+    total += h;
+  }
+  print(total > 0 && total <= n);
+  let out = new RacyBuffer<f32>(4096);
+  gpu.dispatch(wild, 100000, mut out);
+  print(out.length);
+  print(out[4095]);
+  let fine = true;
+  for (const v of out) {
+    if (v != 0 && v != 7) {
+      fine = false;
+    }
+  }
+  print(fine);
+  return 0;
+}

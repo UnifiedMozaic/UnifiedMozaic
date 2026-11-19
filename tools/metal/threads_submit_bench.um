@@ -1,0 +1,102 @@
+// 複数のスレッドから gpu.submit / gpu.wait を回したときの手間と処理量（調査用。テストではない）。
+// 各スレッドが自分の Buffer で「IN_FLIGHT 件預けて、古い順に受け取っては次を投げる」を回す。
+// 評価は tools/metal/async_bench.um と同じ重さ（B 局面 × 64 回の積和）。
+//   UM_METAL=1 node src/cli.ts build tools/metal/threads_submit_bench.um --target host -o out/tsb && out/tsb
+kernel function score(i: u32, out: mut RacyBuffer<i32>, pos: RacyBuffer<i32>, w: RacyBuffer<i32>, bias: i32): void {
+  let acc = bias;
+  for (let k: u32 = 0; k < 64; k++) {
+    acc = acc + pos[i * 64 + k] * w[k] + ((acc >> 3) ^ (k as i32));
+  }
+  out[i] = acc;
+}
+
+const IN_FLIGHT: u32 = 4;
+
+struct Lane {
+  pos: RacyBuffer<i32>[];
+  out: RacyBuffer<i32>[];
+}
+
+function lane(l: own Lane, w: RacyBuffer<i32>, b: u32, rounds: u32): u64 {
+  let tickets: u64[] = [0, 0, 0, 0];
+  let sum: u64 = 0;
+  for (let r: u32 = 0; r < rounds; r++) {
+    const s = r % IN_FLIGHT;
+    gpu.wait(tickets[s]);
+    sum += l.out[s][0] as u64;
+    l.pos[s][(r * 7) % (b * 64)] = r as i32;
+    tickets[s] = gpu.submit(score, b, mut l.out[s], l.pos[s], w, r as i32);
+  }
+  for (let s: u32 = 0; s < IN_FLIGHT; s++) {
+    gpu.wait(tickets[s]);
+  }
+  return sum;
+}
+
+// 投げるだけの手間: 1回 submit して、すぐ wait せずに次の枠へ（IN_FLIGHT 件ごとにまとめて待つ）。
+function submitOnly(l: own Lane, w: RacyBuffer<i32>, b: u32, rounds: u32): f64 {
+  let tickets: u64[] = [0, 0, 0, 0];
+  let spent = 0.0;
+  for (let r: u32 = 0; r < rounds; r++) {
+    const s = r % IN_FLIGHT;
+    if (s == 0) {
+      for (let k: u32 = 0; k < IN_FLIGHT; k++) {
+        gpu.wait(tickets[k]);
+      }
+    }
+    const t0 = clock();
+    tickets[s] = gpu.submit(score, b, mut l.out[s], l.pos[s], w, r as i32);
+    spent += clock() - t0;
+  }
+  for (let s: u32 = 0; s < IN_FLIGHT; s++) {
+    gpu.wait(tickets[s]);
+  }
+  return spent / (rounds as f64);
+}
+
+function lanes(n: u32, b: u32): Lane[] {
+  let ls: Lane[] = [];
+  for (let k: u32 = 0; k < n; k++) {
+    let l: Lane = { pos: [], out: [] };
+    for (let s: u32 = 0; s < IN_FLIGHT; s++) {
+      l.pos.push(new RacyBuffer<i32>(b * 64));
+      l.out.push(new RacyBuffer<i32>(b));
+    }
+    ls.push(l);
+  }
+  return ls;
+}
+
+export function main(): i32 {
+  const w = new RacyBuffer<i32>(64);
+  for (let k: u32 = 0; k < 64; k++) {
+    w[k] = (k as i32) - 31;
+  }
+  const sizes: u32[] = [32, 512];
+  const counts: u32[] = [1, 2, 4, 8, 16];
+  for (const b of sizes) {
+    for (const n of counts) {
+      const rounds: u32 = 20000 / n;
+      let ls = lanes(n, b);
+      const t0 = clock();
+      {
+        const g = thread.spawnEach(lane, own ls, w, b, rounds);
+        thread.join(g);
+      }
+      const dt = clock() - t0;
+      const jobs = (rounds * n) as f64;
+      print(`B=${b} threads=${n}: ${jobs / dt} submits/s, ${dt / jobs * 1e6} us per submit+result, ${jobs * (b as f64) / dt / 1e6} M positions/s`);
+    }
+    for (const n of counts) {
+      let ls = lanes(n, b);
+      const g = thread.spawnEach(submitOnly, own ls, w, b, 4000);
+      const per = thread.join(g);
+      let avg = 0.0;
+      for (const p of per) {
+        avg += p;
+      }
+      print(`B=${b} threads=${n}: gpu.submit call ${avg / (n as f64) * 1e6} us`);
+    }
+  }
+  return 0;
+}

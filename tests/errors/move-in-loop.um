@@ -1,0 +1,9 @@
+// error: move-in-loop
+function take(xs: own i32[]): usize { return xs.length; }
+export function main(): i32 {
+  const a: i32[] = [1, 2];
+  for (let i = 0; i < 3; i++) {
+    take(own a);
+  }
+  return 0;
+}

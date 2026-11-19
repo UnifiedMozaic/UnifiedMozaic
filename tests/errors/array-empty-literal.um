@@ -1,0 +1,5 @@
+// error: needs-type
+export function main(): i32 {
+  let xs = [];
+  return 0;
+}

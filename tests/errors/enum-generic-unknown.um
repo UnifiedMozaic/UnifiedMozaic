@@ -1,0 +1,5 @@
+// error: needs-type
+export function main(): i32 {
+  const r = Result.Ok(1);
+  return 0;
+}

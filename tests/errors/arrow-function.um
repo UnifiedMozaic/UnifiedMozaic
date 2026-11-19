@@ -1,0 +1,5 @@
+// error: not-implemented
+export function main(): i32 {
+  const double = (x: i32): i32 => x * 2;
+  return double(2);
+}

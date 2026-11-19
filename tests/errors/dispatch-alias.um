@@ -1,0 +1,7 @@
+// error: exclusive-borrow
+kernel function k(i: u32, out: mut Buffer<f32>, src: Buffer<f32>): void { out[i] = src[i]; }
+export function main(): i32 {
+  let b = new Buffer<f32>(4);
+  dispatch(k, 4, mut b, b);
+  return 0;
+}

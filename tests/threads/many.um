@@ -1,0 +1,28 @@
+// 256 本を同時に起動する（上限ちょうど）。
+function id(k: u32, base: u32): u32 {
+  return k * 2 + base;
+}
+
+export function main(): i32 {
+  let ks: u32[] = [];
+  for (let k: u32 = 0; k < 256; k++) {
+    ks.push(k);
+  }
+  const g = thread.spawnEach(id, own ks, 1);
+  const rs = thread.join(g);
+  let sum: u64 = 0;
+  for (const r of rs) {
+    sum += r as u64;
+  }
+  print(rs.length);
+  print(sum);
+  // 空の配列なら何も起動しない。
+  const none: u32[] = [];
+  const e = thread.spawnEach(id, own none, 1);
+  print(thread.join(e).length);
+  return 0;
+}
+
+// expect: 256
+// expect: 65536
+// expect: 0

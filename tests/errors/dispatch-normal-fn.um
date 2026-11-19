@@ -1,0 +1,6 @@
+// error: type-mismatch
+function f(i: u32): void { }
+export function main(): i32 {
+  dispatch(f, 4);
+  return 0;
+}

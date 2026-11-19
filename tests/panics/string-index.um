@@ -1,0 +1,5 @@
+// panic: index out of bounds (line 4)
+export function main(): i32 {
+  const s = "abc";
+  return s[3] as i32;
+}

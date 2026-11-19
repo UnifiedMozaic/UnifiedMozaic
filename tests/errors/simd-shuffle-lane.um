@@ -1,0 +1,7 @@
+// error: type-mismatch
+// shuffle のレーンの番号は 0 から 2×レーン数 - 1 までの整数のリテラル。
+export function main(): i32 {
+  const a: i32x4 = [1, 2, 3, 4];
+  const b = Simd.shuffle(a, a, [0, 1, 2, 8]);
+  return b[0];
+}

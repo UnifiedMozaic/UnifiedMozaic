@@ -1,0 +1,10 @@
+// error: unreachable
+enum Shape { Circle(r: f32), Empty }
+export function main(): i32 {
+  const s = Shape.Empty;
+  match (s) {
+    _ => {}
+    Shape.Empty => {}
+  }
+  return 0;
+}

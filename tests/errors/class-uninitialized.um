@@ -1,0 +1,11 @@
+// error: uninitialized
+class C {
+  a: i32;
+  b: i32;
+  constructor() {
+    this.a = 1;
+    if (this.a > 0) {
+      this.b = 2;
+    }
+  }
+}

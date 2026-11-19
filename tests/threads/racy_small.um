@@ -1,0 +1,49 @@
+// RacyBuffer<u8> / <i16> を複数のスレッドから同時に書く。隣どうしの要素を別のスレッドが書いても混ざらない。
+// アトミック演算（fetchAdd、compareExchange）も 8 / 16 ビットで使える（ラップする）。
+// expect: 0
+// expect: 4000
+// expect: 160
+// expect: 1
+// expect: 7
+
+function writer(r8: RacyBuffer<u8>, r16: RacyBuffer<i16>, cnt: RacyBuffer<u16>, who: u32): i32 {
+  for (let round = 0; round < 1000; round++) {
+    for (let i: u32 = who; i < r8.length as u32; i += 4) {
+      r8[i] = (who * 40 + 1) as u8;
+      r16[i] = ((who as i32) * -1000 - 7) as i16;
+    }
+    cnt.fetchAdd(0, 1 as u16);
+  }
+  return 0;
+}
+
+export function main(): i32 {
+  let r8 = new RacyBuffer<u8>(103);
+  let r16 = new RacyBuffer<i16>(103);
+  let cnt = new RacyBuffer<u16>(1);
+  {
+    const a = thread.spawn(writer, r8, r16, cnt, 0 as u32);
+    const b = thread.spawn(writer, r8, r16, cnt, 1 as u32);
+    const c = thread.spawn(writer, r8, r16, cnt, 2 as u32);
+    const d = thread.spawn(writer, r8, r16, cnt, 3 as u32);
+  }
+  let bad = 0;
+  for (let i = 0; i < r8.length; i++) {
+    const who = (i % 4) as u32;
+    if (r8[i] != (who * 40 + 1) as u8 || r16[i] != ((who as i32) * -1000 - 7) as i16) { bad++; }
+  }
+  print(bad);
+  print(cnt.load(0) as i32);
+  // ラップ: 250 + 10 = 260 → 4。fetchAdd は前の値を返す。
+  let w = new RacyBuffer<u8>(2);
+  w[0] = 250 as u8;
+  const before = w.fetchAdd(0, 10 as u8);
+  print((before as i32) - 90 + (w[0] as i32) - 4);
+  // compareExchange: 一致したときだけ入れ替え、前の値を返す。
+  let h = new RacyBuffer<i16>(1);
+  h.store(0, -2 as i16);
+  const old = h.compareExchange(0, -2 as i16, 7 as i16);
+  print(old == (-2 as i16) ? 1 : 0);
+  print(h.load(0) as i32);
+  return 0;
+}

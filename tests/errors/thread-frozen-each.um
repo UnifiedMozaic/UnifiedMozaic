@@ -1,0 +1,14 @@
+// spawnEach に貸した共有の引数も、ブロックの終わりまで書き換えられない。
+function e(k: u32, xs: i32[]): i32 {
+  return xs[0];
+}
+
+export function main(): i32 {
+  let xs: i32[] = [1];
+  const ks: u32[] = [0];
+  const g = thread.spawnEach(e, own ks, xs);
+  xs.push(2);
+  return 0;
+}
+
+// error: exclusive-borrow

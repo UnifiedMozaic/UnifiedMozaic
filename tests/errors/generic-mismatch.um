@@ -1,0 +1,11 @@
+// error: type-mismatch
+function larger<T>(a: T, b: T): T {
+  if (a > b) { return a; }
+  return b;
+}
+export function main(): i32 {
+  const x: i32 = 1;
+  const y: f64 = 2;
+  print(larger(x, y));
+  return 0;
+}

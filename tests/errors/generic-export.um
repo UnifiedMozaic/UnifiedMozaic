@@ -1,0 +1,5 @@
+// error: not-implemented
+export function id<T>(x: T): T {
+  return x;
+}
+export function main(): i32 { return 0; }

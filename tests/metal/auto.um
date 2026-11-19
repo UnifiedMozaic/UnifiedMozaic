@@ -1,0 +1,51 @@
+// 実行先を自動で選ぶ dispatch。ランタイムは CPU と GPU の両方で試して速いほうを選ぶので、
+// 途中で実行先が切り替わる。どちらで実行しても結果が cpu.dispatch と同じになることを確かめる。
+// expect: 0
+// expect: 0
+
+// 1要素あたりの計算が重い kernel（GPU が有利）。
+kernel function heavy(i: u32, out: mut Buffer<f32>, x: Buffer<f32>): void {
+  let v = x[i];
+  for (let k: u32 = 0; k < 200; k++) {
+    v = Math.sqrt(v * v + 1.5) * 0.75 + (k as f32) * 0.001;
+  }
+  out[i] = v;
+}
+
+// 1要素あたりの計算が軽い kernel（CPU が有利）。
+kernel function light(i: u32, out: mut Buffer<i32>, x: Buffer<i32>): void {
+  out[i] = out[i] * 3 + x[i];
+}
+
+export function main(): i32 {
+  const n: u32 = 200000;
+  let xs = new Buffer<f32>(n);
+  let ks = new Buffer<i32>(n);
+  for (let i: u32 = 0; i < n; i++) {
+    xs[i] = ((i % 977) as f32) * 0.37 - 100;
+    ks[i] = (i as i32) * 7 - 12345;
+  }
+  let fa = new Buffer<f32>(n);
+  let fb = new Buffer<f32>(n);
+  let ia = new Buffer<i32>(n);
+  let ib = new Buffer<i32>(n);
+  let badF: u32 = 0;
+  let badI: u32 = 0;
+  for (let round = 0; round < 12; round++) {
+    cpu.dispatch(heavy, n, mut fa, xs);
+    dispatch(heavy, n, mut fb, xs);
+    cpu.dispatch(light, n, mut ia, ks);
+    dispatch(light, n, mut ib, ks);
+    for (let i: u32 = 0; i < n; i++) {
+      if (fa[i] != fb[i]) {
+        badF += 1;
+      }
+      if (ia[i] != ib[i]) {
+        badI += 1;
+      }
+    }
+  }
+  print(badF);
+  print(badI);
+  return 0;
+}

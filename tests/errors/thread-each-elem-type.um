@@ -1,0 +1,20 @@
+// 関数の最初の引数が要素の型と合わない。
+function w(k: i32): void {
+  print(k);
+}
+
+function f(x: i32): i32 {
+  return x;
+}
+
+function g(xs: i32[]): i32 {
+  return xs[0];
+}
+
+export function main(): i32 {
+  const ks: u32[] = [0, 1];
+  const g = thread.spawnEach(w, own ks);
+  return 0;
+}
+
+// error: type-mismatch

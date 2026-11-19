@@ -1,0 +1,5 @@
+// error: immutable
+kernel function k(i: u32, out: mut Buffer<f32>): void {
+  i = 0;
+  out[i] = 1;
+}

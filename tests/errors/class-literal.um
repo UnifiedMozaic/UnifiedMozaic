@@ -1,0 +1,8 @@
+// error: type-mismatch
+class C {
+  n: i32 = 0;
+}
+export function main(): i32 {
+  const c: C = { n: 1 };
+  return 0;
+}

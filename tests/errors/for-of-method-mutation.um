@@ -1,0 +1,10 @@
+// error: exclusive-borrow
+class Bag {
+  items: i32[] = [];
+  add(v: i32): void { this.items.push(v); }
+  double(): void {
+    for (const v of this.items) {
+      this.add(v);
+    }
+  }
+}

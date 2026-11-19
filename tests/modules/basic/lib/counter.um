@@ -1,0 +1,15 @@
+export class Counter {
+  private sum: i32;
+
+  constructor() {
+    this.sum = 0;
+  }
+
+  add(n: i32): void {
+    this.sum += n;
+  }
+
+  total(): i32 {
+    return this.sum;
+  }
+}

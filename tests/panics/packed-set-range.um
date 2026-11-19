@@ -1,0 +1,7 @@
+// panic: index out of bounds (line 24)
+// 行番号は runtime/prelude.um の中の行（packed2Set の書き込み）。prelude を編集したら直すこと。
+export function main(): i32 {
+  let w = new Buffer<u32>(packed2Words(16));
+  packed2Set(mut w, 16, 1);
+  return 0;
+}

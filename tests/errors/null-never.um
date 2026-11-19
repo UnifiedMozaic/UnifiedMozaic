@@ -1,0 +1,8 @@
+// error: type-mismatch
+export function main(): i32 {
+  const v = 3;
+  if (v == null) {
+    return 1;
+  }
+  return 0;
+}

@@ -1,0 +1,12 @@
+// error: type-mismatch
+function larger<T>(a: T, b: T): T {
+  if (a > b) { return a; }
+  return b;
+}
+struct P { x: i32; }
+export function main(): i32 {
+  const p: P = { x: 1 };
+  const q: P = { x: 2 };
+  print(larger(p, q).x);
+  return 0;
+}

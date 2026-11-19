@@ -1,0 +1,8 @@
+// error: type-mismatch
+// Simd.dot は i8x16 どうしの内積（i16x8 には mulAddWide を使う）。
+export function main(): i32 {
+  const acc: i32x4 = Simd.splat(0);
+  const a: i16x8 = Simd.splat(1);
+  const r = Simd.dot(acc, a, a);
+  return r[0];
+}

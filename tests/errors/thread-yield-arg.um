@@ -1,0 +1,7 @@
+// thread.yield は引数を取らない。
+export function main(): i32 {
+  thread.yield(1);
+  return 0;
+}
+
+// error: arg-count

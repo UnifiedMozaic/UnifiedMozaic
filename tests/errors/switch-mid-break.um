@@ -1,0 +1,13 @@
+// error: not-implemented
+export function main(): i32 {
+  let n = 0;
+  switch (n) {
+    case 0:
+      if (n == 0) {
+        break;
+      }
+      n = 1;
+      break;
+  }
+  return n;
+}

@@ -1,0 +1,6 @@
+// error: immutable
+export function main(): i32 {
+  const xs: i32[2] = [1, 2];
+  for (const x of xs) { x = 3; }
+  return 0;
+}

@@ -1,0 +1,8 @@
+// panic: index out of bounds (line 6)
+// 負の添字。
+export function main(): i32 {
+  let xs = new Array<f32>(8);
+  const v: f32x4 = Simd.splat(1.5);
+  Simd.store(mut xs, -1, v);
+  return 0;
+}

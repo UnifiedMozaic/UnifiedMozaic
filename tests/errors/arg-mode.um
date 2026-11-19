@@ -1,0 +1,10 @@
+// error: arg-mode
+struct P { x: i32; }
+function f(p: mut P): void {
+  p.x = 1;
+}
+export function main(): i32 {
+  let p: P = { x: 0 };
+  f(p);
+  return 0;
+}

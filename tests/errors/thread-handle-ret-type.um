@@ -1,0 +1,11 @@
+// Thread<R> の R は関数の戻り値の型と同じでなければならない。
+function f(x: i32): string {
+  return "a";
+}
+
+export function main(): i32 {
+  const h: Thread<i32> = thread.spawn(f, 1);
+  return 0;
+}
+
+// error: type-mismatch

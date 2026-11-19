@@ -1,0 +1,16 @@
+// 持ち手は移動できない。
+function f(x: i32): i32 {
+  return x;
+}
+
+function g(xs: i32[]): i32 {
+  return xs[0];
+}
+
+export function main(): i32 {
+  const h = thread.spawn(f, 1);
+  const h2 = h;
+  return 0;
+}
+
+// error: thread

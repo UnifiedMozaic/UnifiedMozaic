@@ -1,0 +1,2 @@
+export const SIZE: i32 = 9;
+export const DEPTH: i32 = 4;

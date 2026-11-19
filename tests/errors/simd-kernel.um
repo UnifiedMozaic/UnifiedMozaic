@@ -1,0 +1,13 @@
+// error: kernel-restriction
+// SIMD のベクトルは CPU だけ。kernel の中では使えない。
+kernel function k(i: u32, out: mut Buffer<i32>, a: Buffer<i32>): void {
+  const v: i32x4 = [1, 2, 3, 4];
+  const w = Simd.add(v, v);
+  out[i] = w[0];
+}
+export function main(): i32 {
+  let o = new Buffer<i32>(4);
+  let a = new Buffer<i32>(4);
+  dispatch(k, 4, mut o, a);
+  return 0;
+}

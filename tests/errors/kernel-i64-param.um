@@ -1,0 +1,4 @@
+// error: kernel-type
+kernel function k(i: u32, out: mut Buffer<f32>, big: i64): void {
+  out[i] = 1;
+}

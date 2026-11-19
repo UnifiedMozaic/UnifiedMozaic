@@ -1,0 +1,49 @@
+// RacyBuffer の clone() は、ほかのスレッドが要素を書いている最中でも要素ごとに不可分に読む（memcpy ではない）。
+// 書き手は 3 の倍数だけを書くので、写しのどの要素も 3 の倍数になる。ThreadSanitizer でも試す。
+function writer(k: u32, b: RacyBuffer<u64>, stop: RacyBuffer<u32>): u32 {
+  let i: u32 = 0;
+  while (stop.load(0) == 0) {
+    b[i % 64] = (i as u64) * 3;
+    i++;
+  }
+  return k;
+}
+
+function reader(b: RacyBuffer<u64>, stop: RacyBuffer<u32>): u32 {
+  let bad: u32 = 0;
+  for (let i: u32 = 0; i < 2000; i++) {
+    const c = b.clone();
+    if (c.length != 64) bad++;
+    for (const v of c) {
+      if (v % 3 != 0) bad++;
+    }
+  }
+  stop.store(0, 1);
+  return bad;
+}
+
+export function main(): i32 {
+  // 1 スレッドでは、ふつうの写しと同じ値になる。
+  const a = new RacyBuffer<u64>(4);
+  for (let i: u32 = 0; i < 4; i++) {
+    a[i] = (i as u64) * 10 + 1;
+  }
+  const ac = a.clone();
+  a[0] = 99;
+  print(ac[0] + ac[1] + ac[2] + ac[3]);
+  print(a[0]);
+
+  const b = new RacyBuffer<u64>(64);
+  const stop = new RacyBuffer<u32>(1);
+  {
+    const h1 = thread.spawn(writer, 0, b, stop);
+    const h2 = thread.spawn(writer, 1, b, stop);
+    const r = thread.spawn(reader, b, stop);
+    print(thread.join(r));
+  }
+  return 0;
+}
+
+// expect: 64
+// expect: 99
+// expect: 0

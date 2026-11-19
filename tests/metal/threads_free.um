@@ -1,0 +1,42 @@
+// 預けたまま Buffer を手放す（解放の前に GPU の仕事の終わりを待つ）あいだに、ほかのスレッドも提出を続ける。
+// expect: 0
+
+kernel function fillk(i: u32, out: mut RacyBuffer<u32>, seed: u32): void {
+  let x = i + seed;
+  for (let k: u32 = 0; k < 200; k++) {
+    x = x * 1664525 + 1013904223;
+  }
+  out[i] = x;
+}
+
+function churn(k: u32, rounds: u32): u32 {
+  let bad: u32 = 0;
+  for (let r: u32 = 0; r < rounds; r++) {
+    // 毎回作って、預けたまま（待たずに）手放す回と、待ってから確かめる回を混ぜる。
+    let b = new RacyBuffer<u32>(4096);
+    const t = gpu.submit(fillk, 4096, mut b, k + r);
+    if (r % 3 == 0) {
+      gpu.wait(t);
+      let c = new RacyBuffer<u32>(4096);
+      cpu.dispatch(fillk, 4096, mut c, k + r);
+      for (let i: u32 = 0; i < 4096; i += 31) {
+        if (b[i] != c[i]) {
+          bad += 1;
+        }
+      }
+    }
+  }
+  return bad;
+}
+
+export function main(): i32 {
+  let ks: u32[] = [0, 1, 2, 3, 4, 5];
+  const g = thread.spawnEach(churn, own ks, 300);
+  const bads = thread.join(g);
+  let bad: u32 = 0;
+  for (const b of bads) {
+    bad += b;
+  }
+  print(bad);
+  return 0;
+}

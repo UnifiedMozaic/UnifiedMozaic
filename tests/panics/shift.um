@@ -1,0 +1,5 @@
+// panic: shift amount too large (line 4)
+export function main(): i32 {
+  let s = 32;
+  return 1 << s;
+}

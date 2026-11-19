@@ -1,0 +1,26 @@
+// f64[] 上の1次元3点ステンシルを、2本の配列を交互に使って繰り返す。
+function step(src: f64[], dst: mut f64[]): void {
+  const n = src.length;
+  for (let i: usize = 1; i < n - 1; i++) {
+    dst[i] = (src[i - 1] + 2.0 * src[i] + src[i + 1]) * 0.25;
+  }
+}
+
+export function main(): i32 {
+  const n: usize = 1048576;
+  let a = new Array<f64>(n);
+  let b = new Array<f64>(n);
+  for (let i: usize = 0; i < n; i++) {
+    a[i] = ((i * 7919) % 1000) as f64;
+  }
+  for (let t = 0; t < 200; t++) {
+    step(a, mut b);
+    step(b, mut a);
+  }
+  let sum: f64 = 0;
+  for (let i: usize = 0; i < n; i++) {
+    sum += a[i];
+  }
+  print(sum as u64);
+  return 0;
+}

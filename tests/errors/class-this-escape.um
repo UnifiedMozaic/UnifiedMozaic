@@ -1,0 +1,10 @@
+// error: uninitialized
+class C {
+  a: i32;
+  b: i32;
+  constructor() {
+    this.a = 1;
+    this.b = this.sum();
+  }
+  sum(): i32 { return this.a + this.b; }
+}

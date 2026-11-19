@@ -1,0 +1,6 @@
+// error: immutable
+export function main(): i32 {
+  const xs: i32[] = [1];
+  xs.push(2);
+  return 0;
+}

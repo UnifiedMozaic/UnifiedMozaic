@@ -1,0 +1,21 @@
+// spawnEach の共有の引数に own は渡せない。
+function w(k: u32, xs: own i32[]): void {
+  print(xs.length);
+}
+
+function f(x: i32): i32 {
+  return x;
+}
+
+function g(xs: i32[]): i32 {
+  return xs[0];
+}
+
+export function main(): i32 {
+  const ks: u32[] = [0, 1];
+  const xs: i32[] = [1];
+  const g = thread.spawnEach(w, own ks, own xs);
+  return 0;
+}
+
+// error: thread

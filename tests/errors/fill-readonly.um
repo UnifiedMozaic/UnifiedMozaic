@@ -1,0 +1,10 @@
+// error: immutable
+// 読み取り借用の配列は fill で書き換えられない（RacyBuffer は書ける）。
+function f(xs: i32[]): void {
+  xs.fill(0);
+}
+export function main(): i32 {
+  let xs = new Array<i32>(4);
+  f(xs);
+  return 0;
+}

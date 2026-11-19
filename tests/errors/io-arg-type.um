@@ -1,0 +1,20 @@
+// error: type-mismatch
+// error: arg-count
+// error: type-mismatch
+// error: arg-mode
+function a(): bool {
+  return readFile(1) == null;
+}
+function b(): bool {
+  return readLine("prompt") == null;
+}
+function c(): string {
+  return stringFromBytes("abc");
+}
+function d(): bool {
+  let data: u8[] = [1];
+  return writeFile("x.bin", mut data);
+}
+export function main(): i32 {
+  return 0;
+}

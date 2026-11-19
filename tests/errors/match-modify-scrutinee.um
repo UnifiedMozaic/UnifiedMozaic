@@ -1,0 +1,13 @@
+// error: exclusive-borrow
+enum Message { Text(body: string), Quit }
+export function main(): i32 {
+  let m = Message.Text("abc");
+  match (m) {
+    Message.Text(body) => {
+      m = Message.Quit;
+      print(body);
+    }
+    Message.Quit => {}
+  }
+  return 0;
+}

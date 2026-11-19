@@ -1,0 +1,6 @@
+// error: not-imported
+import { make } from "./lib.um";
+export function main(): i32 {
+  const p: Point = make();
+  return p.x;
+}

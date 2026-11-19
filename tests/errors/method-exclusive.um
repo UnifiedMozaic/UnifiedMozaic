@@ -1,0 +1,12 @@
+// error: exclusive-borrow
+struct V { x: i32; }
+class C {
+  v: V;
+  constructor() { this.v = { x: 0 }; }
+  absorb(o: V): void { this.v.x += o.x; }
+}
+export function main(): i32 {
+  let c = new C();
+  c.absorb(c.v);
+  return 0;
+}

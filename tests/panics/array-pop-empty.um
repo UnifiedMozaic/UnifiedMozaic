@@ -1,0 +1,5 @@
+// panic: pop from an empty array (line 4)
+export function main(): i32 {
+  let xs: i32[] = [];
+  return xs.pop();
+}

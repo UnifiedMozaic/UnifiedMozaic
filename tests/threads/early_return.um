@@ -1,0 +1,36 @@
+// return / break / continue でブロックを抜けても、持ち手は合流する（借りた変数より先に）。
+function sum(xs: i32[]): i32 {
+  let s = 0;
+  for (const x of xs) {
+    s += x;
+  }
+  return s;
+}
+
+function find(xs: i32[], want: i32): i32 {
+  for (let i = 0; i < 10; i++) {
+    let ys: i32[] = [i, i, i];
+    const h = thread.spawn(sum, ys);
+    if (i == want) {
+      return i;
+    }
+    if (i % 2 == 0) {
+      continue;
+    }
+    if (i > 7) {
+      break;
+    }
+  }
+  const h2 = thread.spawn(sum, xs);
+  return thread.join(h2);
+}
+
+export function main(): i32 {
+  const xs: i32[] = [1, 2, 3];
+  print(find(xs, 4));
+  print(find(xs, 100));
+  return 0;
+}
+
+// expect: 4
+// expect: 6

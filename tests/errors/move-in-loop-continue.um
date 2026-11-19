@@ -1,0 +1,15 @@
+// error: move-in-loop
+function take(xs: own i32[]): i32 { return 1; }
+export function main(): i32 {
+  let a: i32[] = [1];
+  let i = 0;
+  while (i < 3) {
+    i++;
+    take(own a);
+    if (i == 1) {
+      continue;
+    }
+    a = [2];
+  }
+  return 0;
+}

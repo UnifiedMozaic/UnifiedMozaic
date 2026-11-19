@@ -1,0 +1,6 @@
+// error: recursive-struct
+struct Node<T> { value: T; next: Node<T>; }
+export function main(): i32 {
+  let xs: Node<i32>[] = [];
+  return 0;
+}

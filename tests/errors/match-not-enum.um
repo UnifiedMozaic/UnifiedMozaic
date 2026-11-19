@@ -1,0 +1,10 @@
+// error: type-mismatch
+enum Shape { Empty, Full }
+export function main(): i32 {
+  const n = 3;
+  match (n) {
+    Shape.Empty => {}
+    _ => {}
+  }
+  return 0;
+}

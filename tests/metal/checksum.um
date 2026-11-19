@@ -1,0 +1,123 @@
+// 検算による完了の確認（runtime/metal.m）が、古い出力を通さないことを確かめる。
+// 以前の検算値は語ごとの値の和（語について線形）で、次の2つの出力が同じ検算値になった。
+// GPU の書き込みが CPU から見え始める途中で、古い出力のまま今回の検算値と一致すると、誤った結果を受け取る。
+//   - 2 語の出力 (0, 0) と (1, 1)（0 ^ 1 が 0x9E3779B1 のビットの中にある。評価関数の出力などでありうる形）
+//   - 偶数番目と奇数番目の語の組を入れ替えた2つの模様（pat。64 語ごとの和が同じ）
+// 2つを交互に書かせて、そのたびに結果を読む。以前の式では 2 万回に十数〜数十回の誤りが出た（Apple M4）。
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: 0
+
+kernel function two(i: u32, out: mut RacyBuffer<i32>, v: i32): void {
+  out[i] = v;
+}
+
+kernel function twoPlain(i: u32, out: mut Buffer<i32>, v: i32): void {
+  out[i] = v;
+}
+
+// phase 0 と 1 で、組 (c(2m), c(2m+1) ^ K) と (c(2m) ^ K, c(2m+1)) を入れ替える。c(j) = j * 2654435761。
+kernel function pat(i: u32, out: mut RacyBuffer<u32>, phase: u32): void {
+  let c = i * 2654435761;
+  if ((i & 1) == phase) {
+    out[i] = c;
+  } else {
+    out[i] = c ^ 0x5bd1e995;
+  }
+}
+
+function patWrong(out: RacyBuffer<u32>, n: u32, phase: u32): u32 {
+  for (let i: u32 = 0; i < n; i++) {
+    let want = i * 2654435761;
+    if ((i & 1) != phase) {
+      want = want ^ 0x5bd1e995;
+    }
+    if (out[i] != want) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+export function main(): i32 {
+  const rounds: u32 = 20000;
+
+  // 1. gpu.submit → gpu.wait、2 語。
+  let o2 = new RacyBuffer<i32>(2);
+  let bad: u32 = 0;
+  for (let r: u32 = 0; r < rounds; r++) {
+    const v = (r & 1) as i32;
+    const t = gpu.submit(two, 2, mut o2, v);
+    gpu.wait(t);
+    if (o2[0] != v || o2[1] != v) {
+      bad += 1;
+    }
+  }
+  print(bad);
+
+  // 2. gpu.submit → gpu.ready を見続ける、2 語。
+  bad = 0;
+  for (let r: u32 = 0; r < rounds; r++) {
+    const v = (r & 1) as i32;
+    const t = gpu.submit(two, 2, mut o2, v);
+    while (!gpu.ready(t)) {
+    }
+    if (o2[0] != v || o2[1] != v) {
+      bad += 1;
+    }
+  }
+  print(bad);
+
+  // 3. gpu.submit → gpu.wait、256 語（64 語のまとまり 4 つ）。
+  let o = new RacyBuffer<u32>(256);
+  bad = 0;
+  for (let r: u32 = 0; r < rounds; r++) {
+    const t = gpu.submit(pat, 256, mut o, r & 1);
+    gpu.wait(t);
+    bad += patWrong(o, 256, r & 1);
+  }
+  print(bad);
+
+  // 4. 2件を預けたまま、古い順に受け取る（別々の出力に、同じ形の値を交互に）。
+  let o3 = new RacyBuffer<i32>(2);
+  bad = 0;
+  let ta = gpu.submit(two, 2, mut o2, 0);
+  for (let r: u32 = 1; r < rounds; r++) {
+    const v = (r & 1) as i32;
+    let tb: u64 = 0;
+    if ((r & 1) == 1) {
+      tb = gpu.submit(two, 2, mut o3, v);
+    } else {
+      tb = gpu.submit(two, 2, mut o2, v);
+    }
+    gpu.wait(ta);
+    const w = ((r - 1) & 1) as i32;
+    if ((r & 1) == 1) {
+      if (o2[0] != w || o2[1] != w) {
+        bad += 1;
+      }
+    } else {
+      if (o3[0] != w || o3[1] != w) {
+        bad += 1;
+      }
+    }
+    ta = tb;
+  }
+  gpu.wait(ta);
+  print(bad);
+
+  // 5. 常駐の経路（同じ形の gpu.dispatch を繰り返す）、2 語。
+  let p = new Buffer<i32>(2);
+  bad = 0;
+  for (let r: u32 = 0; r < rounds; r++) {
+    const v = (r & 1) as i32;
+    gpu.dispatch(twoPlain, 2, mut p, v);
+    if (p[0] != v || p[1] != v) {
+      bad += 1;
+    }
+  }
+  print(bad);
+  return 0;
+}

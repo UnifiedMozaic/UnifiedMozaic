@@ -1,0 +1,6 @@
+// error: enum-access
+enum Shape { Circle(r: f32), Empty }
+export function main(): i32 {
+  const s = Shape.Circle(1);
+  return s.Circle__r as i32;
+}

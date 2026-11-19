@@ -1,0 +1,12 @@
+// error: duplicate
+// error: duplicate
+// error: duplicate
+const size: i32 = 1;
+function size(): i32 { return 2; }
+const Point: i32 = 3;
+struct Point { x: i32; }
+const twice: i32 = 4;
+const twice: i32 = 5;
+export function main(): i32 {
+  return 0;
+}

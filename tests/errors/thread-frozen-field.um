@@ -1,0 +1,22 @@
+// 貸したフィールドも書き換えられない。
+struct P {
+  xs: i32[];
+  n: i32;
+}
+
+function f(x: i32): i32 {
+  return x;
+}
+
+function g(xs: i32[]): i32 {
+  return xs[0];
+}
+
+export function main(): i32 {
+  let p: P = { xs: [1], n: 0 };
+  const h = thread.spawn(g, p.xs);
+  p.xs[0] = 5;
+  return 0;
+}
+
+// error: exclusive-borrow

@@ -1,0 +1,10 @@
+// error: type-mismatch
+function find(): i32 | null { return null; }
+export function main(): i32 {
+  const v = find();
+  if (v != null) {
+    return v;
+  } else {
+    return v + 1;
+  }
+}

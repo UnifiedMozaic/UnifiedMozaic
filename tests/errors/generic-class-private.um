@@ -1,0 +1,9 @@
+// error: private
+class Box<T> {
+  private v: T;
+  constructor(v: T) { this.v = v; }
+}
+export function main(): i32 {
+  const b = new Box<i32>(1);
+  return b.v;
+}

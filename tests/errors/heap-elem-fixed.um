@@ -1,0 +1,5 @@
+// error: not-implemented
+export function main(): i32 {
+  let words: string[2] = ["a", "b"];
+  return 0;
+}

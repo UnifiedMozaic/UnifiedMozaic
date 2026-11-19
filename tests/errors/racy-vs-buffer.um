@@ -1,0 +1,9 @@
+// error: type-mismatch
+kernel function k(i: u32, out: mut RacyBuffer<i32>): void {
+  out[0] = 1;
+}
+export function main(): i32 {
+  let b = new Buffer<i32>(4);
+  dispatch(k, 4, mut b);
+  return 0;
+}

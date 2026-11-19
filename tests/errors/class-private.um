@@ -1,0 +1,12 @@
+// error: private
+// error: private
+class C {
+  private n: i32 = 0;
+  private secret(): i32 { return this.n; }
+}
+function f(c: C): i32 {
+  return c.n;
+}
+function g(c: C): i32 {
+  return c.secret();
+}

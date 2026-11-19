@@ -1,0 +1,8 @@
+// error: kernel-restriction
+const INF: f32 = 1.0 / 0.0;
+kernel function k(i: u32, out: mut Buffer<f32>): void {
+  out[i] = INF;
+}
+export function main(): i32 {
+  return 0;
+}

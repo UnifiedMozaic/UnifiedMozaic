@@ -1,0 +1,9 @@
+// error: move-out
+export function main(): i32 {
+  let words: string[] = ["a"];
+  let other: string[] = [];
+  for (const w of words) {
+    other.push(w);
+  }
+  return 0;
+}

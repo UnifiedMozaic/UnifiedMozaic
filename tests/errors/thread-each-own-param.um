@@ -1,0 +1,16 @@
+// spawnEach の要素がコピーできない型なら、関数は最初の引数を own で受け取る。
+struct W {
+  xs: i32[];
+}
+
+function w(a: W): i32 {
+  return a.xs.length as i32;
+}
+
+export function main(): i32 {
+  let ws: W[] = [{ xs: [] }];
+  const g = thread.spawnEach(w, own ws);
+  return 0;
+}
+
+// error: type-mismatch

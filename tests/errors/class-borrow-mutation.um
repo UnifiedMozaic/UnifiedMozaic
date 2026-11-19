@@ -1,0 +1,9 @@
+// error: immutable
+class C {
+  n: i32 = 0;
+  inc(): void { this.n++; }
+  twice(): void { this.inc(); this.inc(); }
+}
+function f(c: C): void {
+  c.twice();
+}

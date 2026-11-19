@@ -1,0 +1,7 @@
+// error: type-mismatch
+// error: literal-range
+const N: i32 = 1.5;
+const B: u8 = 300;
+export function main(): i32 {
+  return 0;
+}

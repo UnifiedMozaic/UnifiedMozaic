@@ -1,0 +1,6 @@
+// error: const-expr
+const N: i32 = width + 1;
+export function main(): i32 {
+  const width = 3;
+  return N + width;
+}

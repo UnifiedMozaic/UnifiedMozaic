@@ -1,0 +1,5 @@
+// error: import-name
+import { SIZE, SECRET } from "./lib.um";
+export function main(): i32 {
+  return SIZE + SECRET;
+}

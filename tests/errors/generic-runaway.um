@@ -1,0 +1,10 @@
+// error: too-many-instances
+function grow<T>(xs: T[], n: i32): i32 {
+  if (n == 0) { return 0; }
+  let outer: T[][] = [];
+  return grow(outer, n - 1);
+}
+export function main(): i32 {
+  const xs: i32[] = [];
+  return grow(xs, 3);
+}

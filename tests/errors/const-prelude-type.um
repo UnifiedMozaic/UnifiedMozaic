@@ -1,0 +1,8 @@
+// error: duplicate
+// error: duplicate
+// 標準の型と同じ名前の定数は作れない。
+const vec3: i32 = 1;
+const Result: i32 = 2;
+export function main(): i32 {
+  return 0;
+}

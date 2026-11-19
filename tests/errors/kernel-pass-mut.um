@@ -1,0 +1,5 @@
+// error: kernel-restriction
+kernel function inner(i: u32, out: mut Buffer<f32>): void { out[i] = 1; }
+kernel function outer(i: u32, out: mut Buffer<f32>): void {
+  inner(i, mut out);
+}

@@ -1,0 +1,2 @@
+// 生成した MSL の #include <metal_stdlib> を、スタブに向ける。
+#include "metal_stub.h"

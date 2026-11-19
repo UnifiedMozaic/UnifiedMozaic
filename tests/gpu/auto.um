@@ -1,0 +1,26 @@
+// 実行先の自動判断。要素数がしきい値（既定 4096）以上なら GPU、未満なら CPU で実行される。
+// どちらで実行しても結果は同じ。GPU がない環境ではすべて CPU になる。
+// expect: 4950
+// expect: 49995000
+kernel function ramp(i: u32, out: mut Buffer<u32>): void {
+  out[i] = i;
+}
+
+function total(xs: Buffer<u32>): u64 {
+  let s: u64 = 0;
+  for (const v of xs) {
+    s += v as u64;
+  }
+  return s;
+}
+
+export function main(useGpu: i32): i32 {
+  let small = new Buffer<u32>(100);
+  dispatch(ramp, small.length, mut small);
+  print(total(small));
+
+  let large = new Buffer<u32>(10000);
+  dispatch(ramp, large.length, mut large);
+  print(total(large));
+  return 0;
+}

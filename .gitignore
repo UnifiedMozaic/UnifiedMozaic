@@ -1,0 +1,7 @@
+*.ll
+*.o
+*.wasm
+.DS_Store
+/out/
+node_modules/
+out/

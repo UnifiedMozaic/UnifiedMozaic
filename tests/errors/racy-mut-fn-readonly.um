@@ -1,0 +1,24 @@
+// 普通の関数の mut RacyBuffer には、読み取り借用の RacyBuffer を渡せない。
+function fill(b: mut RacyBuffer<u32>): void {
+  b[0] = 1;
+}
+
+function use(b: RacyBuffer<u32>): void {
+  fill(mut b);
+}
+
+function f(x: i32): i32 {
+  return x;
+}
+
+function g(xs: i32[]): i32 {
+  return xs[0];
+}
+
+export function main(): i32 {
+  const b = new RacyBuffer<u32>(1);
+  use(b);
+  return 0;
+}
+
+// error: immutable

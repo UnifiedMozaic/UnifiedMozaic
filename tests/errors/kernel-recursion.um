@@ -1,0 +1,4 @@
+// error: kernel-restriction
+// error: kernel-restriction
+kernel function a(x: i32): i32 { return b(x); }
+kernel function b(x: i32): i32 { return a(x); }

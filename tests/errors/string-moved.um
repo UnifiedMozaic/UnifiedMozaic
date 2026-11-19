@@ -1,0 +1,7 @@
+// error: use-after-move
+export function main(): i32 {
+  const a = "abc";
+  const b = a;
+  print(a);
+  return 0;
+}

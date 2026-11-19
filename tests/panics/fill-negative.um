@@ -1,0 +1,7 @@
+// panic: index out of bounds (line 5)
+// fill の始まりが負。
+export function main(): i32 {
+  let xs = new Buffer<u16>(4);
+  xs.fill(1 as u16, -1, 2);
+  return xs[0] as i32;
+}

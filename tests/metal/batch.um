@@ -1,0 +1,61 @@
+// 続けて書いた dispatch は、GPU では1回の提出にまとめて実行される。
+// 前の kernel が書いた Buffer を次の kernel が読む並びでも、書かれた順に実行されることを確かめる。
+// expect: 0
+// expect: 0
+
+kernel function step(i: u32, out: mut Buffer<u32>, src: Buffer<u32>): void {
+  let left = i;
+  if (i > 0) {
+    left = i - 1;
+  }
+  out[i] = src[left] * 1664525 + src[i] + src[i + 1] * 3 + 1013904223;
+}
+
+kernel function mix(i: u32, y: mut Buffer<u32>, x: Buffer<u32>, k: u32): void {
+  y[i] = (y[i] ^ (x[i] >> 3)) + k;
+}
+
+export function main(): i32 {
+  const n: u32 = 1048576;
+  let a = new Buffer<u32>(n);
+  let b = new Buffer<u32>(n);
+  let c = new Buffer<u32>(n);
+  let d = new Buffer<u32>(n);
+  for (let i: u32 = 0; i < n; i++) {
+    a[i] = i * 2654435761;
+    c[i] = a[i];
+  }
+  for (let t = 0; t < 20; t++) {
+    gpu.dispatch(step, n, mut b, a);
+    gpu.dispatch(step, n, mut a, b);
+    gpu.dispatch(mix, n, mut a, b, 7);
+    cpu.dispatch(step, n, mut d, c);
+    cpu.dispatch(step, n, mut c, d);
+    cpu.dispatch(mix, n, mut c, d, 7);
+  }
+  let bad: u32 = 0;
+  for (let i: u32 = 0; i < n; i++) {
+    if (a[i] != c[i]) {
+      bad += 1;
+    }
+  }
+  print(bad);
+
+  // 自動判断でも同じ（途中で実行先が CPU と GPU のあいだで切り替わる）。
+  for (let t = 0; t < 20; t++) {
+    dispatch(step, n, mut b, a);
+    dispatch(step, n, mut a, b);
+    dispatch(mix, n, mut a, b, 7);
+    cpu.dispatch(step, n, mut d, c);
+    cpu.dispatch(step, n, mut c, d);
+    cpu.dispatch(mix, n, mut c, d, 7);
+  }
+  bad = 0;
+  for (let i: u32 = 0; i < n; i++) {
+    if (a[i] != c[i]) {
+      bad += 1;
+    }
+  }
+  print(bad);
+  return 0;
+}

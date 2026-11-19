@@ -1,0 +1,8 @@
+// for (i<200) だが配列は 100。ループ変数の範囲を取り違えて検査を消していないこと。
+// panic: index out of bounds (line 6)
+export function main(): i32 {
+  let a: i32[100];
+  let s: i32 = 0;
+  for (let i = 0; i < 200; i++) { s += a[i]; }
+  return s;
+}

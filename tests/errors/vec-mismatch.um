@@ -1,0 +1,7 @@
+// error: type-mismatch
+export function main(): i32 {
+  const a = vec3(1, 2, 3);
+  const b = vec2(1, 2);
+  const c = a + b;
+  return 0;
+}

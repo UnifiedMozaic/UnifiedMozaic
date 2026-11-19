@@ -1,0 +1,18 @@
+// 凍結は join のあともブロックの終わりまで続く。
+function f(x: i32): i32 {
+  return x;
+}
+
+function g(xs: i32[]): i32 {
+  return xs[0];
+}
+
+export function main(): i32 {
+  let xs: i32[] = [1];
+  const h = thread.spawn(g, xs);
+  print(thread.join(h));
+  xs.push(2);
+  return 0;
+}
+
+// error: exclusive-borrow

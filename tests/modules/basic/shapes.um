@@ -1,0 +1,13 @@
+import { square } from "./lib/math.um";
+
+export enum Shape {
+  Circle(r: i32),
+  Empty,
+}
+
+export function describe(s: Shape): string {
+  match (s) {
+    Shape.Circle(r) => return `circle ${square(r) * 3}`,
+    Shape.Empty => return "empty",
+  }
+}

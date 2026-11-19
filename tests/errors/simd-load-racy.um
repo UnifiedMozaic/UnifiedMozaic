@@ -1,0 +1,7 @@
+// error: type-mismatch
+// RacyBuffer はベクトルでまとめて読めない（要素ごとに読む）。
+export function main(): i32 {
+  let r = new RacyBuffer<i32>(8);
+  const v = Simd.load(r, 0);
+  return v[0];
+}

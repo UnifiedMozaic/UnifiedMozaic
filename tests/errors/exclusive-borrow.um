@@ -1,0 +1,10 @@
+// error: exclusive-borrow
+struct P { x: i32; }
+function f(a: mut P, b: P): void {
+  a.x = b.x;
+}
+export function main(): i32 {
+  let p: P = { x: 0 };
+  f(mut p, p);
+  return 0;
+}

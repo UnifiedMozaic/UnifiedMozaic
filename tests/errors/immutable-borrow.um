@@ -1,0 +1,5 @@
+// error: immutable
+struct P { x: i32; }
+function f(p: P): void {
+  p.x = 1;
+}

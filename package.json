@@ -1,0 +1,17 @@
+{
+  "name": "unifiedmozaic",
+  "version": "0.1.0",
+  "description": "UnifiedMozaic: a TypeScript-flavored language that compiles to native code and WebAssembly, with CPU and GPU in one source",
+  "license": "MIT OR Apache-2.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "bin": {
+    "um": "src/cli.ts"
+  },
+  "scripts": {
+    "test": "node tests/run.ts"
+  }
+}

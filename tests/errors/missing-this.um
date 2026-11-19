@@ -1,0 +1,5 @@
+// error: unknown-name
+class C {
+  n: i32 = 0;
+  get(): i32 { return n; }
+}

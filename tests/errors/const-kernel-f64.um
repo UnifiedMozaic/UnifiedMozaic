@@ -1,0 +1,8 @@
+// error: kernel-type
+const SCALE: f64 = 0.5;
+kernel function k(i: u32, out: mut Buffer<f32>): void {
+  out[i] = SCALE as f32;
+}
+export function main(): i32 {
+  return 0;
+}

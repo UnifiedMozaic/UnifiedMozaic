@@ -1,0 +1,4 @@
+// error: not-implemented
+interface Shape { area(): f64; }
+function f(s: Shape): f64 { return s.area(); }
+export function main(): i32 { return 0; }

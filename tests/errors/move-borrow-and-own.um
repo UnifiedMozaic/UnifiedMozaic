@@ -1,0 +1,6 @@
+// error: use-after-move
+function both(xs: i32[], ys: own i32[]): i32 { return xs[0]; }
+export function main(): i32 {
+  const a: i32[] = [1, 2];
+  return both(a, own a);
+}

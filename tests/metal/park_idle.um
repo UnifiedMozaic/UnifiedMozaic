@@ -1,0 +1,65 @@
+// 常駐（待機 kernel）の片付け。形 B を待機させたあと、B を使わずに GPU をほかの使い方で使い続け、そのあと B に戻る。
+// 1つ目は別の形 A の gpu.dispatch、2つ目は gpu.submit / gpu.wait を、Metal が待機を打ち切る長さ（約 3〜6 秒）より長く続ける。
+// どちらも GPU を起こしておくスレッドが休まないので、以前は B の待機が片付かず、B に戻ると
+// panic（Caused GPU Timeout Error）で止まっていた。結果がすべて正しく、止まらずに終わることを確かめる。
+// expect: 0
+// expect: 0
+
+kernel function pa(i: u32, out: mut Buffer<i32>, v: i32): void {
+  out[i] = v + (i as i32);
+}
+
+kernel function pb(i: u32, out: mut Buffer<i32>, v: i32): void {
+  out[i] = v * 2 + (i as i32);
+}
+
+kernel function ps(i: u32, out: mut RacyBuffer<i32>, v: i32): void {
+  out[i] = v - (i as i32);
+}
+
+// B を何度も呼んで待機させる。誤った結果の数を返す。
+function runB(qb: mut Buffer<i32>): u32 {
+  let bad: u32 = 0;
+  for (let r: u32 = 0; r < 2000; r++) {
+    gpu.dispatch(pb, 32, mut qb, r as i32);
+    if (qb[3] != (r as i32) * 2 + 3) {
+      bad += 1;
+    }
+  }
+  return bad;
+}
+
+export function main(): i32 {
+  let qa = new Buffer<i32>(32);
+  let qb = new Buffer<i32>(32);
+  let o = new RacyBuffer<i32>(32);
+  const seconds = 7.0;
+
+  let bad = runB(mut qb);
+  let r: u32 = 0;
+  let t0 = clock();
+  while (clock() - t0 < seconds) {
+    gpu.dispatch(pa, 32, mut qa, r as i32);
+    if (qa[3] != (r as i32) + 3) {
+      bad += 1;
+    }
+    r++;
+  }
+  bad += runB(mut qb);
+  print(bad);
+
+  bad = 0;
+  r = 0;
+  t0 = clock();
+  while (clock() - t0 < seconds) {
+    const t = gpu.submit(ps, 32, mut o, r as i32);
+    gpu.wait(t);
+    if (o[3] != (r as i32) - 3) {
+      bad += 1;
+    }
+    r++;
+  }
+  bad += runB(mut qb);
+  print(bad);
+  return 0;
+}

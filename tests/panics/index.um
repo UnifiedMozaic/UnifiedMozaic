@@ -1,0 +1,6 @@
+// panic: index out of bounds (line 5)
+export function main(): i32 {
+  const xs: i32[3] = [1, 2, 3];
+  let i = 3;
+  return xs[i];
+}

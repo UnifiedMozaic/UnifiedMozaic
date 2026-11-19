@@ -1,0 +1,7 @@
+// error: type-mismatch
+// 先読みの添字は整数。
+export function main(): i32 {
+  let a = new Array<i32>(8);
+  Math.prefetch(a, 1.5);
+  return a[0];
+}

@@ -1,0 +1,7 @@
+// panic: dispatch count exceeds the length of a written Buffer (line 5)
+kernel function k(i: u32, out: mut Buffer<f32>): void { out[i] = 1; }
+export function main(): i32 {
+  let b = new Buffer<f32>(4);
+  dispatch(k, 5, mut b);
+  return 0;
+}

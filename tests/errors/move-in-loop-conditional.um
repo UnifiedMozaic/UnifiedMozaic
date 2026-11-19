@@ -1,0 +1,11 @@
+// error: move-in-loop
+export function main(): i32 {
+  let a: i32[] = [1];
+  for (let g = 0; g < 3; g++) {
+    const t = a;
+    if (g == 1) {
+      a = t;
+    }
+  }
+  return 0;
+}

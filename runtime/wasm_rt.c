@@ -1,0 +1,309 @@
+// UnifiedMozaic の wasm 用の最小Cランタイム。
+// LLVMは構造体や配列のコピー・初期化を memcpy / memset / memmove の呼び出しに変えることがある。
+// wasm では libc をリンクしないので、ここで提供する。-fno-builtin でコンパイルすること
+// （そうしないと、このループ自体が memset 呼び出しに置き換えられて無限再帰になる）。
+
+typedef __SIZE_TYPE__ size_t;
+
+#include "f16.h"
+#include "smallfloat.h"
+
+// wasm では、LLVM は f16 の値を f32 として持ち回り、メモリとの出し入れのときにこれらを呼ぶ。
+// f16 は16ビットの整数として受け渡される。
+float __extendhfsf2(uint16_t h) {
+  union { uint32_t bits; float value; } u = {.bits = um_h2f(h)};
+  return u.value;
+}
+
+uint16_t __truncdfhf2(double x) {
+  union { double value; uint64_t bits; } u = {.value = x};
+  return um_d2h(u.bits);
+}
+
+uint16_t __truncsfhf2(float x) {
+  return __truncdfhf2((double)x); // f32 から f64 への変換は正確
+}
+
+void *memset(void *dst, int c, size_t n) {
+  unsigned char *d = dst;
+  for (size_t i = 0; i < n; i++) d[i] = (unsigned char)c;
+  return dst;
+}
+
+void *memcpy(void *restrict dst, const void *restrict src, size_t n) {
+  unsigned char *d = dst;
+  const unsigned char *s = src;
+  for (size_t i = 0; i < n; i++) d[i] = s[i];
+  return dst;
+}
+
+void *memmove(void *dst, const void *src, size_t n) {
+  unsigned char *d = dst;
+  const unsigned char *s = src;
+  if (d < s) {
+    for (size_t i = 0; i < n; i++) d[i] = s[i];
+  } else {
+    for (size_t i = n; i > 0; i--) d[i - 1] = s[i - 1];
+  }
+  return dst;
+}
+
+// ---- ヒープ ----
+// 2のべき乗のサイズ別に空きリストを持つ、単純なアロケータ。
+// 各ブロックは 16 バイトのヘッダ（サイズクラス）+ 本体。本体は 16 バイト境界に揃う。
+// 隣り合う空きの結合はしない（単純さを優先。断片化は後の段階で改善する）。
+
+__attribute__((import_module("env"), import_name("um_panic"))) _Noreturn void um_panic(int code, int line);
+
+extern unsigned char __heap_base;
+
+#define UM_PAGE 65536ull
+#define UM_HEADER 16
+#define UM_CLASSES 28 /* 本体の最大は 16 << 27 = 2GiB */
+
+static size_t heap_top;
+static void *free_lists[UM_CLASSES];
+
+static size_t class_bytes(int c) { return (size_t)16 << c; }
+
+static size_t checked_bytes(size_t count, size_t elem_size) {
+  size_t bytes;
+  if (__builtin_mul_overflow(count, elem_size, &bytes)) um_panic(5, 0);
+  return bytes;
+}
+
+static void *alloc_bytes(size_t bytes) {
+  int c = 0;
+  while (class_bytes(c) < bytes) {
+    c++;
+    if (c >= UM_CLASSES) um_panic(5, 0);
+  }
+  if (free_lists[c]) {
+    void *p = free_lists[c];
+    free_lists[c] = *(void **)p;
+    return p;
+  }
+  if (heap_top == 0) heap_top = ((size_t)&__heap_base + 15) & ~(size_t)15;
+  // 32ビットのアドレス空間を超えないことを 64ビットで確かめる。
+  unsigned long long end = (unsigned long long)heap_top + UM_HEADER + class_bytes(c);
+  unsigned long long have = (unsigned long long)__builtin_wasm_memory_size(0) * UM_PAGE;
+  if (end > 0xFFFFFFFFull) um_panic(5, 0);
+  if (end > have) {
+    unsigned long long pages = (end - have + UM_PAGE - 1) / UM_PAGE;
+    if (__builtin_wasm_memory_grow(0, (size_t)pages) == (size_t)-1) um_panic(5, 0);
+  }
+  size_t *header = (size_t *)heap_top;
+  header[0] = (size_t)c;
+  heap_top = (size_t)end;
+  return (unsigned char *)header + UM_HEADER;
+}
+
+static int class_of(void *p) { return (int)*(size_t *)((unsigned char *)p - UM_HEADER); }
+
+void *um_alloc(size_t count, size_t elem_size) {
+  size_t bytes = checked_bytes(count, elem_size);
+  return bytes == 0 ? 0 : alloc_bytes(bytes);
+}
+
+void *um_alloc_zeroed(size_t count, size_t elem_size) {
+  size_t bytes = checked_bytes(count, elem_size);
+  if (bytes == 0) return 0;
+  // 空きリストから再利用したブロックには前の内容が残っているので、必ず消す。
+  return memset(alloc_bytes(bytes), 0, bytes);
+}
+
+void um_free(void *p) {
+  if (!p) return;
+  int c = class_of(p);
+  *(void **)p = free_lists[c];
+  free_lists[c] = p;
+}
+
+// 伸ばした後の容量（空なら4、それ以外は2倍）。runtime/native.c と同じ。
+size_t um_grow_cap(size_t cap) {
+  size_t next;
+  if (cap == 0) return 4;
+  if (__builtin_mul_overflow(cap, (size_t)2, &next)) um_panic(5, 0);
+  return next;
+}
+
+// 要素の領域を new_cap 個ぶんに広げ、新しい場所を返す。使っている len 個の要素を写す。
+void *um_grow_data(void *data, size_t len, size_t new_cap, size_t elem_size) {
+  void *p = alloc_bytes(checked_bytes(new_cap, elem_size));
+  if (data) {
+    memcpy(p, data, checked_bytes(len, elem_size));
+    um_free(data);
+  }
+  return p;
+}
+
+// ---- 文字列 ----
+// 文字列は UTF-8 のバイト列。長さ 0 のときデータの場所は 0 でよい。
+
+_Noreturn void um_panic(int code, int line) __attribute__((import_module("env"), import_name("um_panic")));
+// f64 を JavaScript と同じ表記で buf（80 バイト以上）に書き、文字数を返す。ホスト側が持つ。
+int um_fmt_f64(double v, char *buf) __attribute__((import_module("env"), import_name("um_fmt_f64")));
+
+char *um_str_concat(const char *a, size_t alen, const char *b, size_t blen) {
+  if (alen > (size_t)-1 - blen) um_panic(5, 0);
+  char *out = um_alloc(alen + blen, 1);
+  if (alen > 0) memcpy(out, a, alen);
+  if (blen > 0) memcpy(out + alen, b, blen);
+  return out;
+}
+
+int um_str_eq(const char *a, size_t alen, const char *b, size_t blen) {
+  if (alen != blen) return 0;
+  for (size_t i = 0; i < alen; i++) {
+    if (a[i] != b[i]) return 0;
+  }
+  return 1;
+}
+
+static char *str_from(const char *text, size_t n, size_t *len) {
+  *len = n;
+  char *out = um_alloc(n, 1);
+  if (n > 0) memcpy(out, text, n);
+  return out;
+}
+
+char *um_str_from_u64(uint64_t v, size_t *len) {
+  char buf[24];
+  size_t n = 0;
+  do {
+    buf[sizeof buf - 1 - n++] = (char)('0' + v % 10);
+    v /= 10;
+  } while (v != 0);
+  return str_from(buf + sizeof buf - n, n, len);
+}
+
+char *um_str_from_i64(int64_t v, size_t *len) {
+  if (v >= 0) return um_str_from_u64((uint64_t)v, len);
+  char buf[24];
+  size_t n = 0;
+  uint64_t u = 0 - (uint64_t)v; // 最小値でもあふれない
+  do {
+    buf[sizeof buf - 1 - n++] = (char)('0' + u % 10);
+    u /= 10;
+  } while (u != 0);
+  buf[sizeof buf - 1 - n++] = '-';
+  return str_from(buf + sizeof buf - n, n, len);
+}
+
+char *um_str_from_f64(double v, size_t *len) {
+  char buf[80];
+  int n = um_fmt_f64(v, buf);
+  return str_from(buf, n < 0 || n > 80 ? 0 : (size_t)n, len);
+}
+
+// ---- 入出力（readLine / inputReady / clock / readFile / writeFile） ----
+// wasm の中からは入出力ができないので、すべてホスト（runtime/host.mjs）に頼む。
+// 長さの分からないデータ（1行、ファイルの中身）は2段階で受け取る:
+// まずホストがデータを用意して長さを返し、こちらが領域を確保してから、ホストがそこへ写す。
+
+// 次の1行を用意して、そのバイト数を返す。入力がなければ（または終わっていれば）-1。
+int um_host_line(void) __attribute__((import_module("env"), import_name("um_host_line")));
+// ファイルの中身を用意して、そのバイト数を返す。読めなければ -1。
+int um_host_read_file(const char *path, size_t plen) __attribute__((import_module("env"), import_name("um_host_read_file")));
+// 直前に用意したデータを dst へ写す（用意したバイト数ぶん）。
+void um_host_take(unsigned char *dst) __attribute__((import_module("env"), import_name("um_host_take")));
+int um_host_input_ready(void) __attribute__((import_module("env"), import_name("um_host_input_ready")));
+double um_host_clock(void) __attribute__((import_module("env"), import_name("um_host_clock")));
+int um_host_write_file(const char *path, size_t plen, const unsigned char *data, size_t len)
+    __attribute__((import_module("env"), import_name("um_host_write_file")));
+
+// ホストが用意した n バイトを、新しく確保した領域に受け取る。n が負なら「なし」（0 を返す）。
+static int take_pending(int n, unsigned char **out, size_t *len) {
+  *out = 0;
+  *len = 0;
+  if (n < 0) return 0;
+  if (n > 0) {
+    unsigned char *p = um_alloc((size_t)n, 1);
+    um_host_take(p);
+    *out = p;
+    *len = (size_t)n;
+  }
+  return 1;
+}
+
+int um_read_line(unsigned char **out, size_t *len) { return take_pending(um_host_line(), out, len); }
+
+int um_input_ready(void) { return um_host_input_ready() != 0; }
+
+double um_clock(void) { return um_host_clock(); }
+
+int um_read_file(const char *path, size_t plen, unsigned char **out, size_t *len) {
+  return take_pending(um_host_read_file(path, plen), out, len);
+}
+
+int um_write_file(const char *path, size_t plen, const unsigned char *data, size_t len) {
+  return um_host_write_file(path, plen, data, len) != 0;
+}
+
+// ---- スレッド ----
+// wasm32 にはスレッドがないので、thread.spawn / spawnEach は控えておくだけにし、合流の時点（thread.join か
+// ブロックの終わりの自動の合流）でその場で最後まで実行する（spawnEach は要素の順）。起動の時点で実行しないのは、
+// 「止める合図が立つまで回る」補助スレッドが、合図を立てる側より先に走ると終わらなくなるため。
+// 型検査の凍結により、合流までに貸した値は変わらないので、結果はネイティブで同じ順に実行した場合と同じ。
+typedef void (*um_thread_fn)(void *block);
+typedef struct {
+  um_thread_fn fn;
+  char *blocks;
+  size_t size, n;
+} um_thread_set;
+
+static int um_in_thread;  // スレッドの関数を実行している深さ（readLine / inputReady を止めるため）
+
+void *um_thread_start(um_thread_fn fn, char *blocks, size_t size, size_t n, int line) {
+  (void)line;
+  um_thread_set *set = um_alloc(1, sizeof(um_thread_set));
+  set->fn = fn;
+  set->blocks = blocks;
+  set->size = size;
+  set->n = n;
+  return set;
+}
+
+void um_thread_join(void *h) {
+  um_thread_set *set = h;
+  um_in_thread++;
+  for (size_t k = 0; k < set->n; k++) set->fn(set->blocks + k * set->size);
+  um_in_thread--;
+  um_free(set);
+}
+
+int um_thread_cpus(void) { return 1; }
+
+// wasm32 にはほかのスレッドがないので、何もしない。
+void um_thread_yield(void) {}
+
+int um_is_main(void) { return um_in_thread == 0; }
+
+// xs.fill(v, start, end): 要素 [a, b) を、ビット列 bits の下位 size バイトにする。
+// wasm32 にはスレッドがないので、RacyBuffer（racy）も普通に書く。
+void um_fill(void *data, size_t a, size_t b, int32_t size, uint64_t bits, int32_t racy) {
+  (void)racy;
+  if (a >= b) return;
+  switch (size) {
+    case 1: {
+      unsigned char *d = data;
+      for (size_t i = a; i < b; i++) d[i] = (unsigned char)bits;
+      return;
+    }
+    case 2: {
+      uint16_t *d = data;
+      for (size_t i = a; i < b; i++) d[i] = (uint16_t)bits;
+      return;
+    }
+    case 4: {
+      uint32_t *d = data;
+      for (size_t i = a; i < b; i++) d[i] = (uint32_t)bits;
+      return;
+    }
+    default: {
+      uint64_t *d = data;
+      for (size_t i = a; i < b; i++) d[i] = bits;
+      return;
+    }
+  }
+}

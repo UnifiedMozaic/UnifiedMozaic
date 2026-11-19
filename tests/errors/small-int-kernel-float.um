@@ -1,0 +1,11 @@
+// error: kernel-type
+// kernel の中で f32 から u8 へ直接は変換できない（32 ビットの整数を経由する）。
+kernel function k(i: u32, out: mut Buffer<u8>, f: Buffer<f32>): void {
+  out[i] = f[i] as u8;
+}
+export function main(): i32 {
+  let o = new Buffer<u8>(4);
+  let f = new Buffer<f32>(4);
+  dispatch(k, 4, mut o, f);
+  return 0;
+}

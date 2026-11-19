@@ -1,0 +1,7 @@
+// error: type-mismatch
+// 固定長配列はレジスタやスタックにあるので、先読みの対象にならない。
+export function main(): i32 {
+  let a: i32[8];
+  Math.prefetch(a, 3);
+  return a[0];
+}

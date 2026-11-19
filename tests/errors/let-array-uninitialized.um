@@ -1,0 +1,5 @@
+// error: uninitialized
+export function main(): i32 {
+  let xs: i32[];
+  return 0;
+}

@@ -1,0 +1,13 @@
+// スレッドの中で停止すると、プログラム全体が止まる（メッセージは1回）。
+function boom(xs: i32[], i: i32): i32 {
+  return xs[i];
+}
+
+export function main(): i32 {
+  const xs: i32[] = [1, 2, 3];
+  const h = thread.spawn(boom, xs, 7);
+  print(thread.join(h));
+  return 0;
+}
+
+// panic: index out of bounds (line 3)

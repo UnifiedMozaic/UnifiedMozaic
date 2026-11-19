@@ -1,0 +1,9 @@
+// error: needs-type
+function make<T>(n: i32): T[] {
+  let out: T[] = [];
+  return out;
+}
+export function main(): i32 {
+  const xs = make(3);
+  return 0;
+}

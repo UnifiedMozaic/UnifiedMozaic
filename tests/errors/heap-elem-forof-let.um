@@ -1,0 +1,8 @@
+// error: not-assignable
+export function main(): i32 {
+  let words: string[] = ["a"];
+  for (let w of words) {
+    print(w);
+  }
+  return 0;
+}

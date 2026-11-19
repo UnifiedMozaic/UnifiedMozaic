@@ -1,0 +1,6 @@
+// error: unknown-method
+export function main(): i32 {
+  let s = "abc";
+  s.push(65);
+  return 0;
+}

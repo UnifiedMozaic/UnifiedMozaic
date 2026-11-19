@@ -1,0 +1,6 @@
+// error: type-mismatch
+export function main(): i32 {
+  const a: f4 = 1;
+  const b: f8 = a;
+  return 0;
+}

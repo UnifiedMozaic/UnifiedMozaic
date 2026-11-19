@@ -1,0 +1,6 @@
+// error: move-out
+export function main(): i32 {
+  let words: string[] = ["a", "b"];
+  const w = words[0];
+  return 0;
+}

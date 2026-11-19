@@ -1,0 +1,6 @@
+// error: unknown-variant
+enum Shape { Circle(r: f32), Empty }
+export function main(): i32 {
+  const s = Shape.Square(1);
+  return 0;
+}

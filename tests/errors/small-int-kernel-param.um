@@ -1,0 +1,10 @@
+// error: kernel-type
+// dispatch する kernel の値の引数に i8 は使えない（GPU へは 4 バイト単位で渡す）。
+kernel function k(i: u32, out: mut Buffer<i8>, v: i8): void {
+  out[i] = v;
+}
+export function main(): i32 {
+  let o = new Buffer<i8>(4);
+  dispatch(k, 4, mut o, 3 as i8);
+  return 0;
+}

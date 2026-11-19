@@ -1,0 +1,10 @@
+// kernel の中では、読むだけの RacyBuffer の引数の要素に書けない（kernel の外では書ける）。
+kernel function bad(i: u32, b: RacyBuffer<u32>): void {
+  b[i] = 1;
+}
+
+export function main(): i32 {
+  return 0;
+}
+
+// error: immutable

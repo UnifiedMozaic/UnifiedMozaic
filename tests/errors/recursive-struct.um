@@ -1,0 +1,2 @@
+// error: recursive-struct
+struct Node { next: Node; v: i32; }

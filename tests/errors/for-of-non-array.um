@@ -1,0 +1,6 @@
+// error: type-mismatch
+export function main(): i32 {
+  const n = 3;
+  for (const x of n) { }
+  return 0;
+}

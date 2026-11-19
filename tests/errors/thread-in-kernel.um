@@ -1,0 +1,20 @@
+// kernel の中では thread.* を使えない。
+kernel function k(i: u32, out: mut Buffer<u32>): void {
+  out[i] = thread.cpus();
+}
+
+function f(x: i32): i32 {
+  return x;
+}
+
+function g(xs: i32[]): i32 {
+  return xs[0];
+}
+
+export function main(): i32 {
+  let b = new Buffer<u32>(4);
+  dispatch(k, 4, mut b);
+  return 0;
+}
+
+// error: kernel-restriction

@@ -1,0 +1,6 @@
+// error: arg-count
+enum Shape { Circle(r: f32), Empty }
+export function main(): i32 {
+  const s = Shape.Circle();
+  return 0;
+}

@@ -1,0 +1,58 @@
+// 64 スレッドが、重い kernel を待たずに投げ続ける（gpu.submit を 1 スレッドあたり 400 回）。GPU が追いつかないと、
+// ためた命令が 32 件ごとに提出され、終わっていない命令が Metal のキューの上限（64 個）に達する。そのとき
+// 新しい命令を作る呼び出しは、先の命令が終わるまで待つ。以前は um_async_lock を持ったまま待ち、完了の処理が
+// 同じ鍵を待つので、止まったままになった（runtime/metal.m の um_gpu_submit_inner）。
+// 最後の結果は CPU で実行した結果と同じ。直す前のランタイムでは、この検査は終わらなかった。
+// expect: 0
+
+kernel function heavy(i: u32, out: mut RacyBuffer<i32>, inp: RacyBuffer<i32>, rounds: u32): void {
+  let acc = inp[i];
+  for (let k: u32 = 0; k < rounds; k++) {
+    acc = acc * 1103515245 + 12345 + (k as i32);
+    acc = acc ^ (acc >> 13);
+  }
+  out[i] = acc;
+}
+
+struct Lane {
+  id: u32;
+  inp: RacyBuffer<i32>;
+  out: RacyBuffer<i32>;
+}
+
+function lane(l: own Lane, jobs: u32): u32 {
+  for (let i: u32 = 0; i < l.inp.length; i++) {
+    l.inp[i] = ((i * 2654435761 + l.id * 40503) >> 5) as i32;
+  }
+  let last: u64 = 0;
+  for (let j: u32 = 0; j < jobs; j++) {
+    last = gpu.submit(heavy, l.out.length, mut l.out, l.inp, 256 + (j & 7));
+  }
+  gpu.wait(last);
+  let check = new RacyBuffer<i32>(l.out.length);
+  cpu.dispatch(heavy, check.length, mut check, l.inp, 256 + ((jobs - 1) & 7));
+  let bad: u32 = 0;
+  for (let i: u32 = 0; i < check.length; i++) {
+    if (check[i] != l.out[i]) {
+      bad += 1;
+    }
+  }
+  return bad;
+}
+
+export function main(): i32 {
+  let lanes: Lane[] = [];
+  for (let k: u32 = 0; k < 64; k++) {
+    lanes.push({ id: k, inp: new RacyBuffer<i32>(16384), out: new RacyBuffer<i32>(16384) });
+  }
+  let bad: u32 = 0;
+  {
+    const g = thread.spawnEach(lane, own lanes, 400);
+    const r = thread.join(g);
+    for (const b of r) {
+      bad += b;
+    }
+  }
+  print(bad);
+  return 0;
+}

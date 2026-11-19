@@ -1,0 +1,48 @@
+// スレッドの中で確保・解放する。戻り値（ヒープを持つ値）は合流した側へ移る。自動の合流では戻り値を解放する。
+struct Out {
+  name: string;
+  parts: string[];
+}
+
+function build(k: u32, prefix: string, n: i32): Out {
+  let parts: string[] = [];
+  for (let i = 0; i < n; i++) {
+    parts.push(`${prefix}${k}.${i}`);
+    if (parts.length > 50) {
+      parts.pop();
+    }
+  }
+  return { name: `t${k}`, parts };
+}
+
+function keep(xs: own string[]): string[] {
+  xs.push("end");
+  return xs;
+}
+
+export function main(): i32 {
+  const prefix = "p";
+  let total: usize = 0;
+  for (let round = 0; round < 20; round++) {
+    let ks: u32[] = [0, 1, 2, 3, 4, 5, 6, 7];
+    const g = thread.spawnEach(build, own ks, prefix, 200);
+    if (round % 2 == 0) {
+      const outs = thread.join(g);
+      for (const o of outs) {
+        total += o.parts.length;
+      }
+    }
+    // 奇数の回は合流しない: 周回の終わりで自動で合流し、戻り値を解放する。
+  }
+  print(total);
+  let xs: string[] = ["a", "b"];
+  const h = thread.spawn(keep, own xs);
+  const ys = thread.join(h);
+  print(ys[2]);
+  // 合流しないまま return しても、合流して戻り値を解放する。
+  const lost = thread.spawn(keep, own ys);
+  return 0;
+}
+
+// expect: 4000
+// expect: end

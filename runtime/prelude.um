@@ -1,0 +1,355 @@
+// UnifiedMozaic の標準の関数。すべてのプログラムに自動で含まれる。
+// 同じ名前の関数をプログラムが定義した場合は、プログラムの方が使われる。
+
+// ---- 詰めた小さい整数 ----
+// 小さい整数を u32 のワードに隙間なく並べた列を、Buffer<u32> の上で読み書きする。
+// BitNet のような、重みが -1 / 0 / +1 のモデルのための道具。
+// 読む関数は kernel なので、CPU でも GPU でも使える。書く関数は CPU 専用
+// （1つのワードに複数の要素が入るので、並列に書くと壊れるため）。
+
+// count 個の2ビット要素を入れるのに必要なワード数。
+kernel function packed2Words(count: u32): u32 {
+  return count / 16 + ((count % 16 + 15) / 16);
+}
+
+// index 番目の2ビット要素を、符号つき（-2 〜 1）で読む。
+kernel function packed2Get(words: Buffer<u32>, index: u32): i32 {
+  const bits = (words[index / 16] >> ((index % 16) * 2)) & 3;
+  return ((bits ^ 2) as i32) - 2;
+}
+
+// index 番目の2ビット要素に value（下位2ビット）を書く。範囲外の index は停止する。
+function packed2Set(words: mut Buffer<u32>, index: u32, value: i32): void {
+  const shift = (index % 16) * 2;
+  const cleared = words[index / 16] & ~((3 as u32) << shift);
+  words[index / 16] = cleared | (((value as u32) & 3) << shift);
+}
+
+// count 個の1ビット要素を入れるのに必要なワード数。
+kernel function packed1Words(count: u32): u32 {
+  return count / 32 + ((count % 32 + 31) / 32);
+}
+
+// index 番目のビット（0 か 1）を読む。
+kernel function packed1Get(words: Buffer<u32>, index: u32): u32 {
+  return (words[index / 32] >> (index % 32)) & 1;
+}
+
+// index 番目のビットに value の最下位ビットを書く。範囲外の index は停止する。
+function packed1Set(words: mut Buffer<u32>, index: u32, value: u32): void {
+  const shift = index % 32;
+  const cleared = words[index / 32] & ~((1 as u32) << shift);
+  words[index / 32] = cleared | ((value & 1) << shift);
+}
+
+// 3値（-1 / 0 / +1）の重み count 個と、入力 x の積和を返す。
+// 重みは words の first 番目の要素から並び、x は xFirst 番目から読む。
+// 掛け算は使わず、重みが +1 なら足し、-1 なら引く。
+kernel function ternaryDot(words: Buffer<u32>, first: u32, x: Buffer<i32>, xFirst: u32, count: u32): i32 {
+  let sum = 0;
+  for (let j: u32 = 0; j < count; j++) {
+    const index = first + j;
+    const bits = (words[index / 16] >> ((index % 16) * 2)) & 3;
+    const v = x[xFirst + j];
+    // bits: 01 = +1、11 = -1、00 = 0。下位ビットが立っていれば非ゼロ、上位ビットが符号。
+    const mag = (bits & 1) as i32;
+    const neg = ((bits >> 1) & 1) as i32;
+    sum += (v ^ (-neg)) * mag + (neg & mag);
+  }
+  return sum;
+}
+
+// ---- ベクトル ----
+// vec2<T> / vec3<T> / vec4<T> は、同じ型の数を並べた struct。
+// `a + b`、`a - b`、`a * b`、`a / b`（成分ごと）、`a * k`、`k * a`、`a / k`（数との積と商）、`-a` と書ける。
+// これらの演算子は、下の関数の呼び出しに置き換えられる。関数は kernel なので GPU でも使える。
+
+struct vec2<T> {
+  x: T;
+  y: T;
+}
+
+// vec2(x, y) で作る。
+kernel function vec2<T>(x: T, y: T): vec2<T> {
+  return { x: x, y: y };
+}
+
+kernel function vec2Add<T>(a: vec2<T>, b: vec2<T>): vec2<T> {
+  return { x: a.x + b.x, y: a.y + b.y };
+}
+
+kernel function vec2Sub<T>(a: vec2<T>, b: vec2<T>): vec2<T> {
+  return { x: a.x - b.x, y: a.y - b.y };
+}
+
+kernel function vec2Mul<T>(a: vec2<T>, b: vec2<T>): vec2<T> {
+  return { x: a.x * b.x, y: a.y * b.y };
+}
+
+kernel function vec2Div<T>(a: vec2<T>, b: vec2<T>): vec2<T> {
+  return { x: a.x / b.x, y: a.y / b.y };
+}
+
+kernel function vec2Scale<T>(a: vec2<T>, k: T): vec2<T> {
+  return { x: a.x * k, y: a.y * k };
+}
+
+kernel function vec2DivBy<T>(a: vec2<T>, k: T): vec2<T> {
+  return { x: a.x / k, y: a.y / k };
+}
+
+kernel function vec2Neg<T>(a: vec2<T>): vec2<T> {
+  return { x: -a.x, y: -a.y };
+}
+
+// 内積。
+kernel function vec2Dot<T>(a: vec2<T>, b: vec2<T>): T {
+  return a.x * b.x + a.y * b.y;
+}
+
+// 長さ。
+kernel function vec2Length(a: vec2<f32>): f32 {
+  return Math.sqrt(a.x * a.x + a.y * a.y);
+}
+
+struct vec3<T> {
+  x: T;
+  y: T;
+  z: T;
+}
+
+// vec3(x, y, z) で作る。
+kernel function vec3<T>(x: T, y: T, z: T): vec3<T> {
+  return { x: x, y: y, z: z };
+}
+
+kernel function vec3Add<T>(a: vec3<T>, b: vec3<T>): vec3<T> {
+  return { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z };
+}
+
+kernel function vec3Sub<T>(a: vec3<T>, b: vec3<T>): vec3<T> {
+  return { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z };
+}
+
+kernel function vec3Mul<T>(a: vec3<T>, b: vec3<T>): vec3<T> {
+  return { x: a.x * b.x, y: a.y * b.y, z: a.z * b.z };
+}
+
+kernel function vec3Div<T>(a: vec3<T>, b: vec3<T>): vec3<T> {
+  return { x: a.x / b.x, y: a.y / b.y, z: a.z / b.z };
+}
+
+kernel function vec3Scale<T>(a: vec3<T>, k: T): vec3<T> {
+  return { x: a.x * k, y: a.y * k, z: a.z * k };
+}
+
+kernel function vec3DivBy<T>(a: vec3<T>, k: T): vec3<T> {
+  return { x: a.x / k, y: a.y / k, z: a.z / k };
+}
+
+kernel function vec3Neg<T>(a: vec3<T>): vec3<T> {
+  return { x: -a.x, y: -a.y, z: -a.z };
+}
+
+// 内積。
+kernel function vec3Dot<T>(a: vec3<T>, b: vec3<T>): T {
+  return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+// 長さ。
+kernel function vec3Length(a: vec3<f32>): f32 {
+  return Math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
+}
+
+struct vec4<T> {
+  x: T;
+  y: T;
+  z: T;
+  w: T;
+}
+
+// vec4(x, y, z, w) で作る。
+kernel function vec4<T>(x: T, y: T, z: T, w: T): vec4<T> {
+  return { x: x, y: y, z: z, w: w };
+}
+
+kernel function vec4Add<T>(a: vec4<T>, b: vec4<T>): vec4<T> {
+  return { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z, w: a.w + b.w };
+}
+
+kernel function vec4Sub<T>(a: vec4<T>, b: vec4<T>): vec4<T> {
+  return { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z, w: a.w - b.w };
+}
+
+kernel function vec4Mul<T>(a: vec4<T>, b: vec4<T>): vec4<T> {
+  return { x: a.x * b.x, y: a.y * b.y, z: a.z * b.z, w: a.w * b.w };
+}
+
+kernel function vec4Div<T>(a: vec4<T>, b: vec4<T>): vec4<T> {
+  return { x: a.x / b.x, y: a.y / b.y, z: a.z / b.z, w: a.w / b.w };
+}
+
+kernel function vec4Scale<T>(a: vec4<T>, k: T): vec4<T> {
+  return { x: a.x * k, y: a.y * k, z: a.z * k, w: a.w * k };
+}
+
+kernel function vec4DivBy<T>(a: vec4<T>, k: T): vec4<T> {
+  return { x: a.x / k, y: a.y / k, z: a.z / k, w: a.w / k };
+}
+
+kernel function vec4Neg<T>(a: vec4<T>): vec4<T> {
+  return { x: -a.x, y: -a.y, z: -a.z, w: -a.w };
+}
+
+// 内積。
+kernel function vec4Dot<T>(a: vec4<T>, b: vec4<T>): T {
+  return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+}
+
+// 長さ。
+kernel function vec4Length(a: vec4<f32>): f32 {
+  return Math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z + a.w * a.w);
+}
+
+// ---- 成功か失敗か ----
+// 失敗しうる処理の結果。Result.Ok(値) か Result.Err(理由) のどちらか。match で取り出す。
+enum Result<T, E> {
+  Ok(value: T),
+  Err(error: E),
+}
+
+// ---- 行列 ----
+// mat2<T> / mat3<T> / mat4<T> は正方行列。要素は m に行ごとに並ぶ（m[行 * N + 列]）。
+// 演算子はなく、関数で計算する。関数は kernel なので GPU でも使える。
+
+struct mat2<T> {
+  m: T[4];
+}
+
+// 単位行列。型は使う場所から決まる（`const m: mat2<f32> = mat2Identity();`）。
+kernel function mat2Identity<T>(): mat2<T> {
+  let out: mat2<T>;
+  for (let i: u32 = 0; i < 2; i++) {
+    out.m[i * 2 + i] = 1;
+  }
+  return out;
+}
+
+// 行列の積 a × b。
+kernel function mat2Mul<T>(a: mat2<T>, b: mat2<T>): mat2<T> {
+  let out: mat2<T>;
+  for (let r: u32 = 0; r < 2; r++) {
+    for (let c: u32 = 0; c < 2; c++) {
+      let sum: T = 0;
+      for (let k: u32 = 0; k < 2; k++) {
+        sum += a.m[r * 2 + k] * b.m[k * 2 + c];
+      }
+      out.m[r * 2 + c] = sum;
+    }
+  }
+  return out;
+}
+
+// 行列とベクトルの積 a × v。
+kernel function mat2MulVec<T>(a: mat2<T>, v: vec2<T>): vec2<T> {
+  return { x: a.m[0] * v.x + a.m[1] * v.y, y: a.m[2] * v.x + a.m[3] * v.y };
+}
+
+// 転置。
+kernel function mat2Transpose<T>(a: mat2<T>): mat2<T> {
+  let out: mat2<T>;
+  for (let r: u32 = 0; r < 2; r++) {
+    for (let c: u32 = 0; c < 2; c++) {
+      out.m[c * 2 + r] = a.m[r * 2 + c];
+    }
+  }
+  return out;
+}
+
+struct mat3<T> {
+  m: T[9];
+}
+
+// 単位行列。型は使う場所から決まる（`const m: mat3<f32> = mat3Identity();`）。
+kernel function mat3Identity<T>(): mat3<T> {
+  let out: mat3<T>;
+  for (let i: u32 = 0; i < 3; i++) {
+    out.m[i * 3 + i] = 1;
+  }
+  return out;
+}
+
+// 行列の積 a × b。
+kernel function mat3Mul<T>(a: mat3<T>, b: mat3<T>): mat3<T> {
+  let out: mat3<T>;
+  for (let r: u32 = 0; r < 3; r++) {
+    for (let c: u32 = 0; c < 3; c++) {
+      let sum: T = 0;
+      for (let k: u32 = 0; k < 3; k++) {
+        sum += a.m[r * 3 + k] * b.m[k * 3 + c];
+      }
+      out.m[r * 3 + c] = sum;
+    }
+  }
+  return out;
+}
+
+// 行列とベクトルの積 a × v。
+kernel function mat3MulVec<T>(a: mat3<T>, v: vec3<T>): vec3<T> {
+  return { x: a.m[0] * v.x + a.m[1] * v.y + a.m[2] * v.z, y: a.m[3] * v.x + a.m[4] * v.y + a.m[5] * v.z, z: a.m[6] * v.x + a.m[7] * v.y + a.m[8] * v.z };
+}
+
+// 転置。
+kernel function mat3Transpose<T>(a: mat3<T>): mat3<T> {
+  let out: mat3<T>;
+  for (let r: u32 = 0; r < 3; r++) {
+    for (let c: u32 = 0; c < 3; c++) {
+      out.m[c * 3 + r] = a.m[r * 3 + c];
+    }
+  }
+  return out;
+}
+
+struct mat4<T> {
+  m: T[16];
+}
+
+// 単位行列。型は使う場所から決まる（`const m: mat4<f32> = mat4Identity();`）。
+kernel function mat4Identity<T>(): mat4<T> {
+  let out: mat4<T>;
+  for (let i: u32 = 0; i < 4; i++) {
+    out.m[i * 4 + i] = 1;
+  }
+  return out;
+}
+
+// 行列の積 a × b。
+kernel function mat4Mul<T>(a: mat4<T>, b: mat4<T>): mat4<T> {
+  let out: mat4<T>;
+  for (let r: u32 = 0; r < 4; r++) {
+    for (let c: u32 = 0; c < 4; c++) {
+      let sum: T = 0;
+      for (let k: u32 = 0; k < 4; k++) {
+        sum += a.m[r * 4 + k] * b.m[k * 4 + c];
+      }
+      out.m[r * 4 + c] = sum;
+    }
+  }
+  return out;
+}
+
+// 行列とベクトルの積 a × v。
+kernel function mat4MulVec<T>(a: mat4<T>, v: vec4<T>): vec4<T> {
+  return { x: a.m[0] * v.x + a.m[1] * v.y + a.m[2] * v.z + a.m[3] * v.w, y: a.m[4] * v.x + a.m[5] * v.y + a.m[6] * v.z + a.m[7] * v.w, z: a.m[8] * v.x + a.m[9] * v.y + a.m[10] * v.z + a.m[11] * v.w, w: a.m[12] * v.x + a.m[13] * v.y + a.m[14] * v.z + a.m[15] * v.w };
+}
+
+// 転置。
+kernel function mat4Transpose<T>(a: mat4<T>): mat4<T> {
+  let out: mat4<T>;
+  for (let r: u32 = 0; r < 4; r++) {
+    for (let c: u32 = 0; c < 4; c++) {
+      out.m[c * 4 + r] = a.m[r * 4 + c];
+    }
+  }
+  return out;
+}

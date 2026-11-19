@@ -1,0 +1,99 @@
+// 集めて投げる形: 探索のスレッドが入力の枠を fetchAdd で取り、入力を書いて印を立てる。投げる係（メイン）が
+// たまった分をまとめて1回の gpu.submit に渡し（出力は読み取り借用の RacyBuffer を mut として渡す）、
+// 終わったら結果の印を立てる。スレッドは自分の枠の結果を CPU で計算した値と比べる。
+// expect: 0
+// expect: true
+
+const SLOTS: u32 = 256;
+
+kernel function evalk(i: u32, out: mut RacyBuffer<i32>, inp: RacyBuffer<i32>): void {
+  let acc: i32 = 0;
+  for (let k: u32 = 0; k < 8; k++) {
+    acc = acc * 31 + inp[i * 8 + k];
+  }
+  out[i] = acc;
+}
+
+struct Batch {
+  inp: RacyBuffer<i32>;    // 枠ごとに 8 語
+  out: RacyBuffer<i32>;    // 枠ごとの結果
+  next: RacyBuffer<u32>;   // [0] 次に取る枠、[1] 書き終えた数
+  ready: RacyBuffer<u32>;  // 枠ごとの「結果がある」印（回の番号）
+  round: RacyBuffer<u32>;  // [0] いまの回、[1] 終わり
+}
+
+function searcher(k: u32, b: Batch, per: u32): u32 {
+  let bad: u32 = 0;
+  let r: u32 = 1;
+  while (b.round.load(1) == 0) {
+    if (b.round.load(0) != r) {
+      continue;
+    }
+    // 自分の分の枠を取って入力を書く（先読みの局面をまとめて預ける形）。
+    let mine: u32[] = [];
+    for (let j: u32 = 0; j < per; j++) {
+      const slot = b.next.fetchAdd(0, 1);
+      for (let w: u32 = 0; w < 8; w++) {
+        b.inp[slot * 8 + w] = ((slot * 8 + w) * 7 + r * 13) as i32;
+      }
+      b.next.fetchAdd(1, 1);
+      mine.push(slot);
+    }
+    // 結果を待って確かめる。
+    for (const slot of mine) {
+      while (b.ready.load(slot) != r) {
+      }
+      let acc: i32 = 0;
+      for (let w: u32 = 0; w < 8; w++) {
+        acc = acc * 31 + ((slot * 8 + w) * 7 + r * 13) as i32;
+      }
+      if (b.out[slot] != acc) {
+        bad += 1;
+      }
+    }
+    r += 1;
+  }
+  return bad;
+}
+
+export function main(): i32 {
+  const threads: u32 = 8;
+  const per: u32 = SLOTS / threads;
+  const b: Batch = {
+    inp: new RacyBuffer<i32>(SLOTS * 8), out: new RacyBuffer<i32>(SLOTS),
+    next: new RacyBuffer<u32>(2), ready: new RacyBuffer<u32>(SLOTS), round: new RacyBuffer<u32>(2),
+  };
+  let ks: u32[] = [];
+  for (let k: u32 = 0; k < threads; k++) {
+    ks.push(k);
+  }
+  let rounds: u32 = 0;
+  {
+    const g = thread.spawnEach(searcher, own ks, b, per);
+    for (let r: u32 = 1; r <= 200; r++) {
+      b.next.store(0, 0);
+      b.next.store(1, 0);
+      b.round.store(0, r);
+      // 全部の枠がそろうまで待ち、まとめて GPU に投げる。
+      while (b.next.load(1) != SLOTS) {
+      }
+      const t = gpu.submit(evalk, SLOTS, mut b.out, b.inp);
+      gpu.wait(t);
+      for (let s: u32 = 0; s < SLOTS; s++) {
+        b.ready.store(s, r);
+      }
+      rounds = r;
+    }
+    // 最後の回の結果を読み終えるまで待ってから止める（読み終えたかは、次の回が始まらないことで分かる）。
+    b.round.store(0, 0);
+    b.round.store(1, 1);
+    const bads = thread.join(g);
+    let bad: u32 = 0;
+    for (const x of bads) {
+      bad += x;
+    }
+    print(bad);
+  }
+  print(rounds == 200);
+  return 0;
+}

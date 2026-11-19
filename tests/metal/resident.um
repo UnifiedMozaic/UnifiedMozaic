@@ -1,0 +1,152 @@
+// 同じ kernel を同じ Buffer の組で1つずつ何度も呼ぶ（探索の末端の評価の形）。
+// ランタイムは途中から「先に提出して合図を待たせておいた kernel」に仕事を渡す（常駐）。
+// 個数と引数を毎回変えても、Buffer を作り直しても、kernel を切り替えても、結果が CPU と同じになることを確かめる。
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: 0
+
+kernel function score(i: u32, out: mut Buffer<i32>, pos: Buffer<i32>, w: Buffer<i32>, bias: i32): void {
+  let acc = bias;
+  for (let k: u32 = 0; k < 16; k++) {
+    acc = acc + pos[i * 16 + k] * w[k] + ((acc >> 3) ^ (k as i32));
+  }
+  out[i] = acc;
+}
+
+kernel function other(i: u32, out: mut Buffer<i32>, pos: Buffer<i32>): void {
+  out[i] = pos[i] * 7 - (i as i32);
+}
+
+function fill(pos: mut Buffer<i32>, round: u32): void {
+  for (let i: u32 = 0; i < pos.length; i++) {
+    pos[i] = ((i * 2654435761 + round * 40503) >> 7) as i32 % 1000;
+  }
+}
+
+function differ(a: Buffer<i32>, b: Buffer<i32>, n: u32): u32 {
+  let bad: u32 = 0;
+  for (let i: u32 = 0; i < n; i++) {
+    if (a[i] != b[i]) {
+      bad += 1;
+    }
+  }
+  return bad;
+}
+
+export function main(): i32 {
+  const max: u32 = 300;
+  let pos = new Buffer<i32>(max * 16);
+  let w = new Buffer<i32>(16);
+  for (let k: u32 = 0; k < 16; k++) {
+    w[k] = (k as i32) * 3 - 20;
+  }
+  let g = new Buffer<i32>(max);
+  let c = new Buffer<i32>(max);
+
+  // 1. 同じ形で 300 回。個数（1〜300）と引数を毎回変える。入力も毎回書き換える。
+  let bad: u32 = 0;
+  for (let round: u32 = 0; round < 300; round++) {
+    fill(mut pos, round);
+    const n: u32 = (round * 37) % max + 1;
+    gpu.dispatch(score, n, mut g, pos, w, (round as i32) - 150);
+    cpu.dispatch(score, n, mut c, pos, w, (round as i32) - 150);
+    bad += differ(g, c, n);
+  }
+  print(bad);
+
+  // 2. 途中で別の kernel を挟む（待機している形と違う dispatch）。
+  bad = 0;
+  for (let round: u32 = 0; round < 60; round++) {
+    fill(mut pos, round + 1000);
+    gpu.dispatch(score, max, mut g, pos, w, 5);
+    cpu.dispatch(score, max, mut c, pos, w, 5);
+    bad += differ(g, c, max);
+    if (round % 20 == 19) {
+      gpu.dispatch(other, max, mut g, pos);
+      cpu.dispatch(other, max, mut c, pos);
+      bad += differ(g, c, max);
+    }
+  }
+  print(bad);
+
+  // 3. 出力の Buffer を毎回作り直す（解放された領域を、待機している kernel が使い続けないこと）。
+  bad = 0;
+  for (let round: u32 = 0; round < 40; round++) {
+    let fresh = new Buffer<i32>(max);
+    for (let t: u32 = 0; t < 12; t++) {
+      fill(mut pos, round * 100 + t);
+      gpu.dispatch(score, max, mut fresh, pos, w, t as i32);
+      cpu.dispatch(score, max, mut c, pos, w, t as i32);
+      bad += differ(fresh, c, max);
+    }
+  }
+  print(bad);
+
+  // 4. 大きい個数（1行に収まらない）でも同じ。
+  const big: u32 = 40000;
+  let bp = new Buffer<i32>(big * 16);
+  let bg = new Buffer<i32>(big);
+  let bc = new Buffer<i32>(big);
+  bad = 0;
+  for (let round: u32 = 0; round < 20; round++) {
+    fill(mut bp, round);
+    const n: u32 = big - round * 1777;
+    gpu.dispatch(score, n, mut bg, bp, w, 1);
+    cpu.dispatch(score, n, mut bc, bp, w, 1);
+    bad += differ(bg, bc, n);
+  }
+  print(bad);
+
+  // 5. 2つの kernel を交互に呼ぶ（それぞれの形が待機する）。片方の出力をもう片方が読む。
+  bad = 0;
+  let mid = new Buffer<i32>(max * 16);
+  let mc = new Buffer<i32>(max * 16);
+  for (let round: u32 = 0; round < 120; round++) {
+    fill(mut pos, round + 5000);
+    gpu.dispatch(other, max * 16, mut mid, pos);
+    gpu.dispatch(score, max, mut g, mid, w, round as i32);
+    cpu.dispatch(other, max * 16, mut mc, pos);
+    cpu.dispatch(score, max, mut c, mc, w, round as i32);
+    bad += differ(g, c, max);
+  }
+  print(bad);
+
+  // 6. 待機させておける数より多い形を順に回す（古い形が追い出されても結果は同じ）。
+  bad = 0;
+  let o0 = new Buffer<i32>(max);
+  let o1 = new Buffer<i32>(max);
+  let o2 = new Buffer<i32>(max);
+  let o3 = new Buffer<i32>(max);
+  let o4 = new Buffer<i32>(max);
+  let o5 = new Buffer<i32>(max);
+  for (let round: u32 = 0; round < 400; round++) {
+    fill(mut pos, round + 9000);
+    const which = round % 6;
+    const bias = round as i32;
+    cpu.dispatch(score, max, mut c, pos, w, bias);
+    if (which == 0) {
+      gpu.dispatch(score, max, mut o0, pos, w, bias);
+      bad += differ(o0, c, max);
+    } else if (which == 1) {
+      gpu.dispatch(score, max, mut o1, pos, w, bias);
+      bad += differ(o1, c, max);
+    } else if (which == 2) {
+      gpu.dispatch(score, max, mut o2, pos, w, bias);
+      bad += differ(o2, c, max);
+    } else if (which == 3) {
+      gpu.dispatch(score, max, mut o3, pos, w, bias);
+      bad += differ(o3, c, max);
+    } else if (which == 4) {
+      gpu.dispatch(score, max, mut o4, pos, w, bias);
+      bad += differ(o4, c, max);
+    } else {
+      gpu.dispatch(score, max, mut o5, pos, w, bias);
+      bad += differ(o5, c, max);
+    }
+  }
+  print(bad);
+  return 0;
+}

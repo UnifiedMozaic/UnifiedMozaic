@@ -1,0 +1,19 @@
+// 一時値はスレッドに貸せない。
+function make(): i32[] {
+  return [1, 2];
+}
+
+function f(x: i32): i32 {
+  return x;
+}
+
+function g(xs: i32[]): i32 {
+  return xs[0];
+}
+
+export function main(): i32 {
+  const h = thread.spawn(g, make());
+  return 0;
+}
+
+// error: thread

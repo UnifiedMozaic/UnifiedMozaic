@@ -1,0 +1,5 @@
+// error: move-out
+class Box {
+  items: i32[] = [];
+  take(): i32[] { return this.items; }
+}

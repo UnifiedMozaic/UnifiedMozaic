@@ -1,0 +1,6 @@
+// error: interface-mismatch
+interface Shape { area(): f64; }
+class Dot implements Shape {
+  x: f64 = 0;
+}
+export function main(): i32 { return 0; }

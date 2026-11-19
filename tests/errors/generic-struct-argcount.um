@@ -1,0 +1,6 @@
+// error: arg-count
+struct Pair<A, B> { first: A; second: B; }
+export function main(): i32 {
+  const p: Pair<i32> = { first: 1, second: 2 };
+  return 0;
+}

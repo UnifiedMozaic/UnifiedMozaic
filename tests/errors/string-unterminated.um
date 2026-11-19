@@ -1,0 +1,5 @@
+// error: bad-string
+export function main(): i32 {
+  const a = "abc;
+  return 0;
+}

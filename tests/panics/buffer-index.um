@@ -1,0 +1,6 @@
+// panic: index out of bounds (line 5)
+export function main(): i32 {
+  let b = new Buffer<i32>(4);
+  let i = 4;
+  return b[i];
+}

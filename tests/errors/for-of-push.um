@@ -1,0 +1,8 @@
+// error: exclusive-borrow
+export function main(): i32 {
+  let xs: i32[] = [1, 2];
+  for (const x of xs) {
+    xs.push(x);
+  }
+  return 0;
+}

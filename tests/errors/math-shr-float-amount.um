@@ -1,0 +1,6 @@
+// error: type-mismatch
+export function main(): i32 {
+  let x: u64 = 8;
+  const y = Math.shr(x, 1.5);          // シフト量が整数でない
+  return y as i32;
+}

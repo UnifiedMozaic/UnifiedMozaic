@@ -1,0 +1,7 @@
+// error: type-mismatch
+struct P { x: i32; }
+function find(): P | null { return null; }
+export function main(): i32 {
+  const p = find();
+  return p.x;
+}

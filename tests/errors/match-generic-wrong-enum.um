@@ -1,0 +1,10 @@
+// error: type-mismatch
+enum Other { Ok(v: i32), Err(e: i32) }
+function f(): Result<i32, i32> { return Result.Ok(1); }
+export function main(): i32 {
+  match (f()) {
+    Other.Ok(v) => {}
+    Other.Err(e) => {}
+  }
+  return 0;
+}

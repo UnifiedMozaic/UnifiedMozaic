@@ -1,0 +1,5 @@
+// error: not-implemented
+export function main(): i32 {
+  const xs: i32[] = [1, 2];
+  return xs.reduce((a, b) => a + b, 0);
+}

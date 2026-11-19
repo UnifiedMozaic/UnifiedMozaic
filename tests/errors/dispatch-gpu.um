@@ -1,0 +1,8 @@
+// error: not-implemented
+// target: host
+kernel function k(i: u32, out: mut Buffer<f32>): void { out[i] = 1; }
+export function main(): i32 {
+  let b = new Buffer<f32>(4);
+  gpu.dispatch(k, 4, mut b);
+  return 0;
+}

@@ -1,0 +1,5 @@
+// error: kernel-type
+kernel function k(i: u32, out: mut Buffer<f32>): void {
+  const x: f64 = 1.5;
+  out[i] = 1;
+}

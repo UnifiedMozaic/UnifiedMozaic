@@ -1,0 +1,7 @@
+// error: move-out
+struct Bag { items: i32[]; n: i32; }
+export function main(): i32 {
+  const bag: Bag = { items: [1], n: 1 };
+  const taken = bag.items;
+  return 0;
+}

@@ -1,0 +1,7 @@
+// error: type-mismatch
+struct Box<T> { v: T; }
+export function main(): i32 {
+  const a: Box<i32> = { v: 1 };
+  const b: Box<f64> = a;
+  return 0;
+}

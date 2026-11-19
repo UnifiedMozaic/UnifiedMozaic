@@ -1,0 +1,4 @@
+// error: type-mismatch
+export function main(): i32 {
+  return Math.popcount(1.5) as i32;
+}

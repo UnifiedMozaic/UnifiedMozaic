@@ -1,0 +1,43 @@
+// データを順序なし（b[i]）で書いてから、印を store で立てる。印を load で見たら、データは必ず見える。
+// 10 万回の受け渡しで、読み違いは 0。
+function producer(rounds: u32, data: RacyBuffer<u32>, flag: RacyBuffer<u32>): u32 {
+  for (let r: u32 = 1; r <= rounds; r++) {
+    // 前の回を読み終わるまで待つ。
+    while (flag.load(0) != 0) {
+    }
+    for (let i: u32 = 0; i < 8; i++) {
+      data[i] = r * 8 + i;
+    }
+    flag.store(0, r);
+  }
+  return rounds;
+}
+
+function consumer(rounds: u32, data: RacyBuffer<u32>, flag: RacyBuffer<u32>): u32 {
+  let bad: u32 = 0;
+  for (let r: u32 = 1; r <= rounds; r++) {
+    while (flag.load(0) != r) {
+    }
+    for (let i: u32 = 0; i < 8; i++) {
+      if (data[i] != r * 8 + i) {
+        bad++;
+      }
+    }
+    flag.store(0, 0);
+  }
+  return bad;
+}
+
+export function main(): i32 {
+  const data = new RacyBuffer<u32>(8);
+  const flag = new RacyBuffer<u32>(1);
+  const rounds: u32 = 100000;
+  const p = thread.spawn(producer, rounds, data, flag);
+  const c = thread.spawn(consumer, rounds, data, flag);
+  print(thread.join(p));
+  print(thread.join(c));
+  return 0;
+}
+
+// expect: 100000
+// expect: 0

@@ -1,0 +1,15 @@
+// 起動を引数の中に書けない。
+function f(x: i32): i32 {
+  return x;
+}
+
+function g(xs: i32[]): i32 {
+  return xs[0];
+}
+
+export function main(): i32 {
+  print(thread.join(thread.spawn(f, 1)));
+  return 0;
+}
+
+// error: thread

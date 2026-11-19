@@ -1,0 +1,17 @@
+// 可変長配列 u32[] に push して、添字で読んで合計する。clear して繰り返す。
+export function main(): i32 {
+  let xs = new Array<u32>(0);
+  let total: u64 = 0;
+  for (let round: u32 = 0; round < 200; round++) {
+    xs.clear();
+    for (let i: u32 = 0; i < 5000000; i++) {
+      xs.push(i * 2654435761 + round);
+    }
+    for (let i: usize = 0; i < xs.length; i++) {
+      total += (xs[i] >> 3) as u64;
+    }
+  }
+  print(total);
+  print(xs.length as u64);
+  return 0;
+}

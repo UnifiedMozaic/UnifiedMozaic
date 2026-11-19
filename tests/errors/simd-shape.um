@@ -1,0 +1,7 @@
+// error: type-mismatch
+// SIMD の演算は 128 ビットのベクトル（i32x4 など）だけ。i32[3] は違う。
+export function main(): i32 {
+  const a: i32[3] = [1, 2, 3];
+  const b = Simd.max(a, a);
+  return b[0];
+}

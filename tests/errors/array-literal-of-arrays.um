@@ -1,0 +1,6 @@
+// error: not-implemented
+function mk(): i32[] { return [1, 2, 3]; }
+export function main(): i32 {
+  let g = [mk(), mk()];
+  return 0;
+}

@@ -1,0 +1,35 @@
+// 4 スレッドが同じ形の gpu.dispatch を取り合う（常駐の経路は1つのスレッドだけが使い、ほかは普通に提出する）。
+// 結果は CPU と同じで、止まらない（Metal に打ち切られない）。
+// expect: 0
+
+kernel function mix(i: u32, out: mut Buffer<u32>, seed: u32): void {
+  let x = i * 2654435761 + seed;
+  for (let k: u32 = 0; k < 64; k++) {
+    x = (x ^ (x >> 15)) * 2246822519;
+  }
+  out[i] = x;
+}
+
+function run(k: u32, rounds: u32): u32 {
+  let g = new Buffer<u32>(512);
+  let c = new Buffer<u32>(512);
+  let bad: u32 = 0;
+  for (let r: u32 = 0; r < rounds; r++) {
+    gpu.dispatch(mix, 512, mut g, k * 1000 + r);
+    cpu.dispatch(mix, 512, mut c, k * 1000 + r);
+    for (let i: u32 = 0; i < 512; i++) {
+      if (g[i] != c[i]) {
+        bad += 1;
+      }
+    }
+  }
+  return bad;
+}
+
+export function main(): i32 {
+  let ks: u32[] = [0, 1, 2, 3];
+  const g = thread.spawnEach(run, own ks, 400);
+  const bads = thread.join(g);
+  print(bads[0] + bads[1] + bads[2] + bads[3]);
+  return 0;
+}

@@ -1,0 +1,5 @@
+// error: arg-count
+export function main(): i32 {
+  let x: u32 = 1;
+  return Math.shl(x) as i32;           // 引数が足りない
+}

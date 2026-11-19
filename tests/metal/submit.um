@@ -1,0 +1,122 @@
+// gpu.submit: 終わるのを待たずに kernel の実行を頼む。いくつも預けたまま進めても、gpu.wait / gpu.ready のあとに
+// 読んだ結果は、同じ kernel を CPU で実行した結果と同じになる。
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: true
+
+kernel function score(i: u32, out: mut RacyBuffer<i32>, pos: RacyBuffer<i32>, bias: i32): void {
+  let acc = bias;
+  for (let k: u32 = 0; k < 16; k++) {
+    acc = acc + pos[i * 16 + k] * ((k as i32) - 7) + ((acc >> 3) ^ (k as i32));
+  }
+  out[i] = acc;
+}
+
+kernel function bump(i: u32, out: mut RacyBuffer<i32>): void {
+  out[i] = out[i] * 3 + (i as i32);
+}
+
+function fill(pos: mut RacyBuffer<i32>, round: u32): void {
+  for (let i: u32 = 0; i < pos.length; i++) {
+    pos[i] = ((i * 2654435761 + round * 40503) >> 7) as i32 % 1000;
+  }
+}
+
+function differ(a: RacyBuffer<i32>, b: RacyBuffer<i32>, n: u32): u32 {
+  let bad: u32 = 0;
+  for (let i: u32 = 0; i < n; i++) {
+    if (a[i] != b[i]) {
+      bad += 1;
+    }
+  }
+  return bad;
+}
+
+export function main(): i32 {
+  const n: u32 = 200;
+  let c = new RacyBuffer<i32>(n);
+
+  // 1. 1件ずつ: 頼む → 待つ → 比べる。
+  let p0 = new RacyBuffer<i32>(n * 16);
+  let o0 = new RacyBuffer<i32>(n);
+  let bad: u32 = 0;
+  for (let round: u32 = 0; round < 200; round++) {
+    fill(mut p0, round);
+    const t = gpu.submit(score, n, mut o0, p0, round as i32);
+    gpu.wait(t);
+    cpu.dispatch(score, n, mut c, p0, round as i32);
+    bad += differ(o0, c, n);
+  }
+  print(bad);
+
+  // 2. 3件を預けたまま進める。受け取る順は、頼んだ順と違ってもよい。
+  let p1 = new RacyBuffer<i32>(n * 16);
+  let p2 = new RacyBuffer<i32>(n * 16);
+  let o1 = new RacyBuffer<i32>(n);
+  let o2 = new RacyBuffer<i32>(n);
+  bad = 0;
+  for (let round: u32 = 0; round < 200; round++) {
+    fill(mut p0, round * 3);
+    fill(mut p1, round * 3 + 1);
+    fill(mut p2, round * 3 + 2);
+    const ta = gpu.submit(score, n, mut o0, p0, 1);
+    const tb = gpu.submit(score, n, mut o1, p1, 2);
+    const tc = gpu.submit(score, n, mut o2, p2, 3);
+    gpu.wait(tc);
+    cpu.dispatch(score, n, mut c, p2, 3);
+    bad += differ(o2, c, n);
+    gpu.wait(ta);
+    cpu.dispatch(score, n, mut c, p0, 1);
+    bad += differ(o0, c, n);
+    while (!gpu.ready(tb)) {
+    }
+    cpu.dispatch(score, n, mut c, p1, 2);
+    bad += differ(o1, c, n);
+  }
+  print(bad);
+
+  // 3. 同じ Buffer に続けて頼む（前の仕事の結果を次の仕事が読む）。頼んだ順に実行される。
+  let g = new RacyBuffer<i32>(n);
+  let h = new RacyBuffer<i32>(n);
+  for (let i: u32 = 0; i < n; i++) {
+    g[i] = i as i32;
+    h[i] = i as i32;
+  }
+  bad = 0;
+  for (let round: u32 = 0; round < 50; round++) {
+    const t1 = gpu.submit(bump, n, mut g);
+    const t2 = gpu.submit(bump, n, mut g);
+    const t3 = gpu.submit(bump, n, mut g);
+    gpu.wait(t3);
+    cpu.dispatch(bump, n, mut h);
+    cpu.dispatch(bump, n, mut h);
+    cpu.dispatch(bump, n, mut h);
+    bad += differ(g, h, n);
+    gpu.wait(t1);
+    gpu.wait(t2);
+  }
+  print(bad);
+
+  // 4. 預けたまま Buffer を手放す（解放の前に、その Buffer を使う仕事が終わるのを待つ）。
+  bad = 0;
+  for (let round: u32 = 0; round < 60; round++) {
+    let fresh = new RacyBuffer<i32>(n);
+    fill(mut p0, round + 700);
+    const t = gpu.submit(score, n, mut fresh, p0, 5);
+    if (round % 2 == 0) {
+      gpu.wait(t);
+      cpu.dispatch(score, n, mut c, p0, 5);
+      bad += differ(fresh, c, n);
+    }
+  }
+  print(bad);
+
+  // 5. 終わった券は、何度確かめても true。券 0 も true。
+  const done = gpu.submit(score, n, mut o0, p0, 9);
+  gpu.wait(done);
+  const zero: u64 = 0;
+  print(gpu.ready(done) && gpu.ready(done) && gpu.ready(zero));
+  return 0;
+}

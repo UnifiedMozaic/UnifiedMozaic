@@ -1,0 +1,6 @@
+// error: immutable
+const LIMIT: i32 = 10;
+export function main(): i32 {
+  LIMIT = 11;
+  return LIMIT;
+}

@@ -1,0 +1,10 @@
+// error: kernel-type
+// i8 は Buffer の要素そのものにはなれるが、Buffer に入れる struct のフィールドにはなれない。
+struct P {
+  a: i8;
+  b: i32;
+}
+export function main(): i32 {
+  const b = new Buffer<P>(4);
+  return 0;
+}

@@ -1,0 +1,15 @@
+// RacyBuffer の要素は整数（i8〜i64、u8〜u64）と f32 だけ。
+function f(x: i32): i32 {
+  return x;
+}
+
+function g(xs: i32[]): i32 {
+  return xs[0];
+}
+
+export function main(): i32 {
+  const b = new RacyBuffer<f64>(1);
+  return 0;
+}
+
+// error: kernel-type

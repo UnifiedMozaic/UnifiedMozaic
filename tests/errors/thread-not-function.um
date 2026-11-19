@@ -1,0 +1,15 @@
+// 最初の引数が関数の名前でない。
+function f(x: i32): i32 {
+  return x;
+}
+
+function g(xs: i32[]): i32 {
+  return xs[0];
+}
+
+export function main(): i32 {
+  const h = thread.spawn(1);
+  return 0;
+}
+
+// error: type-mismatch

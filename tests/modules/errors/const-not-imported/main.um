@@ -1,0 +1,5 @@
+// error: not-imported
+import { SIZE } from "./lib.um";
+export function main(): i32 {
+  return SIZE + DEPTH;
+}

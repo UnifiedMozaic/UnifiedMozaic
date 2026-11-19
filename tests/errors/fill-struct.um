@@ -1,0 +1,10 @@
+// error: not-implemented
+// fill は数と bool の配列だけ。
+struct P {
+  a: i32;
+}
+export function main(): i32 {
+  let xs: P[] = [{ a: 1 }];
+  xs.fill({ a: 2 });
+  return 0;
+}

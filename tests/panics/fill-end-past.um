@@ -1,0 +1,7 @@
+// panic: index out of bounds (line 5)
+// fill の終わりが長さを超える。
+export function main(): i32 {
+  let xs = new Array<i32>(4);
+  xs.fill(1, 2, 5);
+  return xs[0];
+}

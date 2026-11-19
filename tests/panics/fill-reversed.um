@@ -1,0 +1,7 @@
+// panic: index out of bounds (line 5)
+// fill の始まりが終わりより後ろ。
+export function main(): i32 {
+  let xs = new RacyBuffer<i8>(4);
+  xs.fill(1 as i8, 3, 2);
+  return xs[0] as i32;
+}

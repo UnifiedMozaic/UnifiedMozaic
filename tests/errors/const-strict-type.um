@@ -1,0 +1,6 @@
+// error: type-mismatch
+const N: i32 = 3;
+export function main(): i32 {
+  const n: usize = N;
+  return n as i32;
+}

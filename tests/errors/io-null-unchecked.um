@@ -1,0 +1,5 @@
+// error: type-mismatch
+export function main(): i32 {
+  const line = readLine();
+  return line.length as i32;
+}

@@ -1,0 +1,11 @@
+// error: use-after-move
+class Bag {
+  items: i32[] = [];
+  eat(other: own Bag): i32 { return 1; }
+}
+function swallow(b: own Bag): i32 { return 1; }
+export function main(): i32 {
+  let b = new Bag();
+  b.eat(own b);
+  return 0;
+}

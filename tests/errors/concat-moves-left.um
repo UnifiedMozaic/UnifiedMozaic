@@ -1,0 +1,8 @@
+// error: use-after-move
+function eat(s: own string): string { return "q"; }
+export function main(): i32 {
+  let s = "abcdefgh";
+  let n = s + eat(own s);
+  print(n);
+  return 0;
+}

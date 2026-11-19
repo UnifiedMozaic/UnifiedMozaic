@@ -1,0 +1,4 @@
+// error: immutable
+function f(xs: i32[]): void {
+  xs.push(1);
+}

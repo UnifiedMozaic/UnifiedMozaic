@@ -1,0 +1,11 @@
+// error: kernel-type
+// kernel の中の i16 の符号反転も計算なので使えない。
+kernel function k(i: u32, out: mut Buffer<i16>): void {
+  const x = out[i];
+  out[i] = -x;
+}
+export function main(): i32 {
+  let o = new Buffer<i16>(4);
+  dispatch(k, 4, mut o);
+  return 0;
+}

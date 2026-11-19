@@ -1,0 +1,136 @@
+// 8 / 16 ビットの整数の Buffer / RacyBuffer を、CPU と GPU（Metal）で同じに読み書きできることを確かめる。
+// あわせて、gpu.submit に読むだけの普通の Buffer（重み）を渡せること。
+// 出力は、各 kernel の CPU と GPU の不一致の個数（0）と、検算の値。
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: 1
+// expect: 0
+// expect: 0
+// expect: -5084
+// expect: 1
+
+// 重み（i8）と入力（u8）の内積。i16 のバイアスを足し、i16 に切り詰めて書く。
+kernel function dot8(i: u32, out: mut Buffer<i16>, w: Buffer<i8>, x: Buffer<u8>, bias: Buffer<i16>, n: u32): void {
+  let acc: i32 = bias[i] as i32;
+  for (let k: u32 = 0; k < n; k++) {
+    acc = acc + (w[i * n + k] as i32) * (x[k] as i32);
+  }
+  out[i] = acc as i16;
+}
+
+// 変換の端: 切り詰め、符号の広げ方、bool から。読むのは範囲外の添字も含む（最後の要素に切り詰め）。
+kernel function conv(i: u32, a: mut Buffer<i8>, b: mut Buffer<u8>, c: mut Buffer<u16>, d: mut Buffer<i32>, src: Buffer<i32>): void {
+  const v = src[i];
+  const s8 = v as i8;
+  a[i] = s8;
+  b[i] = (v >> 3) as u8;
+  c[i] = (s8 as u16);
+  const big = src[i + 1000000];  // 範囲外: 最後の要素
+  const t: i16 = (big as i16);
+  let r: i32 = (t as i32) + ((v > 0) as i8 as i32);
+  if (s8 < (0 as i8)) { r = r + 1000; }
+  if ((v as u8) == (255 as u8)) { r = r + 7; }
+  d[i] = r + (b[i] as i32);
+}
+
+// RacyBuffer<u8> / <i16>: どの要素にも書ける（隣どうしの要素を別の実行が同時に書く）。
+kernel function racy8(i: u32, r8: mut RacyBuffer<u8>, r16: mut RacyBuffer<i16>): void {
+  r8[i ^ 1] = (i * 7) as u8;
+  r16[i ^ 1] = (0 as i32 - (i as i32) * 3) as i16;
+}
+
+kernel function scale(i: u32, out: mut RacyBuffer<i32>, w: Buffer<i8>): void {
+  out[i] = (w[i] as i32) * 2;
+}
+
+function diff16(a: Buffer<i16>, b: Buffer<i16>): i32 {
+  let n = 0;
+  for (let i = 0; i < a.length; i++) { if (a[i] != b[i]) { n++; } }
+  return n;
+}
+
+export function main(): i32 {
+  const rows: u32 = 37;
+  const n: u32 = 129;
+  let w = new Buffer<i8>(rows * n);
+  let x = new Buffer<u8>(n);
+  let bias = new Buffer<i16>(rows);
+  let seed: u32 = 12345;
+  for (let i = 0; i < w.length; i++) {
+    seed = seed * 1103515245 + 12345;
+    w[i] = (seed >> 16) as i8;
+  }
+  for (let i = 0; i < x.length; i++) {
+    seed = seed * 1103515245 + 12345;
+    x[i] = (seed >> 20) as u8;
+  }
+  for (let i = 0; i < bias.length; i++) { bias[i] = ((i as i32) * 1000 - 9000) as i16; }
+
+  let a = new Buffer<i16>(rows);
+  let b = new Buffer<i16>(rows);
+  cpu.dispatch(dot8, rows, mut a, w, x, bias, n);
+  gpu.dispatch(dot8, rows, mut b, w, x, bias, n);
+  print(diff16(a, b));
+
+  const m: u32 = 301;
+  let src = new Buffer<i32>(m);
+  for (let i = 0; i < src.length; i++) {
+    seed = seed * 1103515245 + 12345;
+    src[i] = (seed as i32) >> ((i % 29) as i32);
+  }
+  src[0] = 255;
+  src[1] = -1;
+  src[2] = -128;
+  src[3] = 32768;
+  let a1 = new Buffer<i8>(m);
+  let b1 = new Buffer<u8>(m);
+  let c1 = new Buffer<u16>(m);
+  let d1 = new Buffer<i32>(m);
+  let a2 = new Buffer<i8>(m);
+  let b2 = new Buffer<u8>(m);
+  let c2 = new Buffer<u16>(m);
+  let d2 = new Buffer<i32>(m);
+  cpu.dispatch(conv, m, mut a1, mut b1, mut c1, mut d1, src);
+  gpu.dispatch(conv, m, mut a2, mut b2, mut c2, mut d2, src);
+  let bad = 0;
+  for (let i = 0; i < a1.length; i++) {
+    if (a1[i] != a2[i] || b1[i] != b2[i] || c1[i] != c2[i] || d1[i] != d2[i]) { bad++; }
+  }
+  print(bad);
+
+  // 長さが 4 の倍数でない Buffer に、数の少ない dispatch で書く（後ろの要素は 0 のまま）。
+  let p1 = new Buffer<i8>(7);
+  let q1 = new Buffer<u8>(7);
+  let r1 = new Buffer<u16>(7);
+  let s1 = new Buffer<i32>(7);
+  gpu.dispatch(conv, 5, mut p1, mut q1, mut r1, mut s1, src);
+  let tail = 0;
+  for (let i = 5; i < 7; i++) { tail = tail + (p1[i] as i32) + (q1[i] as i32) + (r1[i] as i32) + s1[i]; }
+  print(tail);
+  print((p1[1] as i32) + 1 - (a1[1] as i32));
+
+  const k: u32 = 64;
+  let r8a = new RacyBuffer<u8>(k);
+  let r16a = new RacyBuffer<i16>(k);
+  let r8b = new RacyBuffer<u8>(k);
+  let r16b = new RacyBuffer<i16>(k);
+  cpu.dispatch(racy8, k, mut r8a, mut r16a);
+  gpu.dispatch(racy8, k, mut r8b, mut r16b);
+  let rb = 0;
+  for (let i = 0; i < r8a.length; i++) { if (r8a[i] != r8b[i] || r16a[i] != r16b[i]) { rb++; } }
+  print(rb);
+
+  // gpu.submit: 読むだけの普通の Buffer<i8> を渡す。CPU は待つあいだも同じ重みを読める。
+  let out = new RacyBuffer<i32>(w.length);
+  const t = gpu.submit(scale, w.length as u32, mut out, w);
+  let cpuSum: i32 = 0;
+  for (let i = 0; i < w.length; i++) { cpuSum = cpuSum + (w[i] as i32) * 2; }
+  gpu.wait(t);
+  let gpuSum: i32 = 0;
+  for (let i = 0; i < out.length; i++) { gpuSum = gpuSum + out[i]; }
+  print(cpuSum - gpuSum);
+  print(cpuSum);
+  print(gpu.ready(t) ? 1 : 0);
+  return 0;
+}

@@ -1,0 +1,13 @@
+// 2本のスレッドがほぼ同時に停止しても、メッセージは1回だけ。
+function boom(k: u32, d: i32): i32 {
+  return 10 / d;
+}
+
+export function main(): i32 {
+  let ks: u32[] = [0, 1];
+  const g = thread.spawnEach(boom, own ks, 0);
+  thread.join(g);
+  return 0;
+}
+
+// panic: division by zero (line 3)

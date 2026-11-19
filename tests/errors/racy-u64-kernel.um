@@ -1,0 +1,18 @@
+// 64 ビットの RacyBuffer は kernel に渡せない。
+kernel function k(i: u32, out: mut RacyBuffer<u64>): void {
+  out[i] = 1;
+}
+
+function f(x: i32): i32 {
+  return x;
+}
+
+function g(xs: i32[]): i32 {
+  return xs[0];
+}
+
+export function main(): i32 {
+  return 0;
+}
+
+// error: kernel-type

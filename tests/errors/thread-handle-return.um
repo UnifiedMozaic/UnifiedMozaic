@@ -1,0 +1,20 @@
+// 持ち手は返せない。
+function start(): u64 {
+  const h = thread.spawn(f, 1);
+  return h;
+}
+
+function f(x: i32): i32 {
+  return x;
+}
+
+function g(xs: i32[]): i32 {
+  return xs[0];
+}
+
+export function main(): i32 {
+  print(start());
+  return 0;
+}
+
+// error: thread

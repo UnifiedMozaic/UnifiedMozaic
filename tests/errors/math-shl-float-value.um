@@ -1,0 +1,5 @@
+// error: type-mismatch
+export function main(): i32 {
+  const x = Math.shl(1.5, 2 as i32);   // 値が整数でない
+  return x as i32;
+}

@@ -1,0 +1,10 @@
+// error: arg-count
+enum Shape { Rect(w: f32, h: f32), Empty }
+export function main(): i32 {
+  const s = Shape.Rect(1, 2);
+  match (s) {
+    Shape.Rect(w) => {}
+    Shape.Empty => {}
+  }
+  return 0;
+}

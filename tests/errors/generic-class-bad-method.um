@@ -1,0 +1,12 @@
+// error: type-mismatch
+class Box<T> {
+  v: T;
+  constructor(v: T) { this.v = v; }
+  double(): T { return this.v * 2; }
+}
+struct P { x: i32; }
+export function main(): i32 {
+  const p: P = { x: 1 };
+  const b = new Box<P>(p);
+  return 0;
+}

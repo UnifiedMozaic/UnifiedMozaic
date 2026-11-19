@@ -1,0 +1,12 @@
+// panic: index out of bounds (line 8)
+// i + 2 が i32 の中で折り返して負になる。検査を省いた写しに入ってはいけない。
+export function main(): i32 {
+  let xs: i32[] = [1, 2, 3, 4];
+  let sum = 0;
+  let n = 0;
+  for (let i = 2147483645; n < 3; i++) {
+    sum += xs[i + 2];
+    n++;
+  }
+  return sum;
+}

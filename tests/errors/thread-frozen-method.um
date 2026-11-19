@@ -1,0 +1,28 @@
+// 貸した変数の、書き換えるメソッドを呼べない。
+class Bag {
+  xs: i32[] = [];
+  add(x: i32): void {
+    this.xs.push(x);
+  }
+}
+
+function count(b: Bag): i32 {
+  return b.xs.length as i32;
+}
+
+function f(x: i32): i32 {
+  return x;
+}
+
+function g(xs: i32[]): i32 {
+  return xs[0];
+}
+
+export function main(): i32 {
+  let b = new Bag();
+  const h = thread.spawn(count, b);
+  b.add(1);
+  return 0;
+}
+
+// error: exclusive-borrow

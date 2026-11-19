@@ -1,0 +1,39 @@
+// 複数のスレッドが同時に cpu.dispatch する。スレッドプールは同時に1つの仕事だけなので、使用中なら
+// 呼んだスレッドだけで実行する。結果は1スレッドで実行した場合と同じ。
+kernel function step(i: u32, out: mut Buffer<u32>, seed: u32): void {
+  let x = i * 2654435761 + seed;
+  for (let k: u32 = 0; k < 20; k++) {
+    x = x ^ (x >> 13);
+    x = x * 1597334677;
+  }
+  out[i] = x;
+}
+
+function run(seed: u32, n: u32): u64 {
+  let b = new Buffer<u32>(n);
+  let sum: u64 = 0;
+  for (let r: u32 = 0; r < 20; r++) {
+    cpu.dispatch(step, n, mut b, seed + r);
+    for (let i: u32 = 0; i < n; i += 97) {
+      sum += b[i] as u64;
+    }
+  }
+  return sum;
+}
+
+export function main(): i32 {
+  const n: u32 = 50000;
+  let seeds: u32[] = [1, 2, 3, 4, 5, 6];
+  const g = thread.spawnEach(run, own seeds, n);
+  const rs = thread.join(g);
+  let same = true;
+  for (let k: u32 = 0; k < 6; k++) {
+    if (rs[k] != run(k + 1, n)) {
+      same = false;
+    }
+  }
+  print(same);
+  return 0;
+}
+
+// expect: true

@@ -1,0 +1,3 @@
+// error: import-name
+import { hidden } from "./lib.um";
+export function main(): i32 { return hidden(); }

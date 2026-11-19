@@ -1,0 +1,10 @@
+// error: unknown-type
+enum Ev { A(t: Nope), B }
+export function main(): i32 {
+  let e = Ev.B;
+  match (e) {
+    Ev.A(q) => { }
+    Ev.B => { }
+  }
+  return 0;
+}

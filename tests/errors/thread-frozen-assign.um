@@ -1,0 +1,17 @@
+// スレッドに貸した変数は、ブロックの終わりまで書き換えられない。
+function f(x: i32): i32 {
+  return x;
+}
+
+function g(xs: i32[]): i32 {
+  return xs[0];
+}
+
+export function main(): i32 {
+  let xs: i32[] = [1];
+  const h = thread.spawn(g, xs);
+  xs = [2];
+  return 0;
+}
+
+// error: exclusive-borrow

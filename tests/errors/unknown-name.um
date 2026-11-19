@@ -1,0 +1,4 @@
+// error: unknown-name
+export function main(): i32 {
+  return y;
+}

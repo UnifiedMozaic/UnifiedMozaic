@@ -1,0 +1,6 @@
+// error: not-implemented
+export function main(): i32 {
+  let words: string[] = ["a"];
+  const copy = words.clone();
+  return 0;
+}

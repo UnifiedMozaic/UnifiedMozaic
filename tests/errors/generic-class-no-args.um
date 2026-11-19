@@ -1,0 +1,9 @@
+// error: needs-type
+class Box<T> {
+  v: T;
+  constructor(v: T) { this.v = v; }
+}
+export function main(): i32 {
+  const b = new Box(1);
+  return 0;
+}

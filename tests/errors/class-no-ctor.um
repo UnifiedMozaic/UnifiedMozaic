@@ -1,0 +1,4 @@
+// error: missing-field
+class C {
+  n: i32;
+}

@@ -1,0 +1,15 @@
+// inputReady もメインスレッドだけ（readLine は thread-readline.um）。
+function poll(n: i32): i32 {
+  if (inputReady()) {
+    return n + 1;
+  }
+  return n;
+}
+
+export function main(): i32 {
+  const h = thread.spawn(poll, 1);
+  print(thread.join(h));
+  return 0;
+}
+
+// panic: readLine and inputReady can only be called from the main thread (line 3)

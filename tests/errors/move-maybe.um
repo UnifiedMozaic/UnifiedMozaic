@@ -1,0 +1,11 @@
+// error: use-after-move
+function take(xs: own i32[]): usize { return xs.length; }
+export function main(): i32 {
+  const a: i32[] = [1, 2];
+  let n = 0;
+  if (n == 0) {
+    take(own a);
+  }
+  print(a.length);
+  return 0;
+}

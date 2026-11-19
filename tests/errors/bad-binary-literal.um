@@ -1,0 +1,2 @@
+// error: bad-number
+export function main(): i32 { let x = 0b; return 0; }

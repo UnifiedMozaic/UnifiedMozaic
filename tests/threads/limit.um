@@ -1,0 +1,16 @@
+// 同時に存在できるスレッドは 256 本まで。超えると停止する。
+function id(k: u32): u32 {
+  return k;
+}
+
+export function main(): i32 {
+  let ks: u32[] = [];
+  for (let k: u32 = 0; k < 300; k++) {
+    ks.push(k);
+  }
+  const g = thread.spawnEach(id, own ks);
+  print(thread.join(g).length);
+  return 0;
+}
+
+// panic: could not start a thread (line 11)

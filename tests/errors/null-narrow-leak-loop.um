@@ -1,0 +1,13 @@
+// error: type-mismatch
+function find(): i32 | null { return null; }
+export function main(): i32 {
+  const v = find();
+  let n = 0;
+  while (n < 3) {
+    if (v == null) {
+      break;
+    }
+    n++;
+  }
+  return v + 1;
+}

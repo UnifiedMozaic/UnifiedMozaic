@@ -1,0 +1,6 @@
+// error: const-expr
+function two(): i32 { return 2; }
+const N: i32 = two() * 3;
+export function main(): i32 {
+  return N;
+}

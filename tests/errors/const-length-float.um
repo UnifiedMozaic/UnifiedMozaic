@@ -1,0 +1,8 @@
+// error: bad-type
+const N: f64 = 4.0;
+function sum(xs: i32[N]): i32 {
+  return xs[0];
+}
+export function main(): i32 {
+  return 0;
+}

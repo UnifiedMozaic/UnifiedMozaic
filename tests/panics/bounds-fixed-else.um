@@ -1,0 +1,10 @@
+// else では i >= 100 なので範囲外。前の比較での除去が効きすぎて検査を消していないこと。
+// panic: index out of bounds (line 5)
+function pick(a: i32[100], i: i32): i32 {
+  if (i < 100) { return a[i]; }
+  return a[i];
+}
+export function main(): i32 {
+  let a: i32[100];
+  return pick(a, 150);
+}

@@ -1,0 +1,12 @@
+// error: kernel-restriction
+// GPU には先読みがないので、kernel の中では Math.prefetch を使えない。
+kernel function k(i: u32, out: mut Buffer<i32>, t: Buffer<i32>): void {
+  Math.prefetch(t, i + 1);
+  out[i] = t[i];
+}
+export function main(): i32 {
+  let o = new Buffer<i32>(4);
+  let t = new Buffer<i32>(4);
+  dispatch(k, 4, mut o, t);
+  return 0;
+}

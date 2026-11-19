@@ -1,0 +1,10 @@
+// error: use-after-move
+function take(p: own string): u8[] {
+  const out: u8[] = [p[0]];
+  return out;
+}
+export function main(): i32 {
+  const path = "a.bin";
+  writeFile(path, take(own path));
+  return 0;
+}

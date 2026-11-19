@@ -1,0 +1,5 @@
+// error: type-mismatch
+export function main(): i32 {
+  const a: string = [104, 105];
+  return 0;
+}

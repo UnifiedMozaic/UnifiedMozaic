@@ -1,0 +1,22 @@
+// 負の値の最上位の定数に単項の `-` を付けた kernel が、GPU でも CPU と同じ結果になること
+// （シェーダの中で `--1.5f` と続くと、コンパイルできずに停止する）。
+// expect: 2.5
+// expect: 1000.5
+// expect: 13
+const NEG_F: f32 = -1.5;
+const NEG_I: i32 = -5;
+
+kernel function k(i: u32, out: mut Buffer<f32>, ints: mut Buffer<i32>): void {
+  out[i] = -NEG_F + (i as f32);
+  ints[i] = -NEG_I - NEG_I + (i as i32);
+}
+
+export function main(): i32 {
+  let a = new Buffer<f32>(1000);
+  let b = new Buffer<i32>(1000);
+  gpu.dispatch(k, 1000, mut a, mut b);
+  print(a[1]);
+  print(a[999]);
+  print(b[3]);
+  return 0;
+}

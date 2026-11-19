@@ -1,0 +1,128 @@
+// SIMD の各演算を、レーンごとの素直な計算（スカラー）と突き合わせる。乱数の値と端の値（-128、32767 など）。
+// 出力は各演算の不一致の個数（0）。tests/run.ts は、NEON の sdot を使う経路と汎用の経路の両方で実行する。
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: 0
+
+function rnd(s: mut u64): u64 {
+  s = s * 6364136223846793005 + 1442695040888963407;
+  return s >> 33;
+}
+
+function pick8(s: mut u64): i8 {
+  const r = rnd(mut s);
+  if (r % 8 == 0) { return -128 as i8; }
+  if (r % 8 == 1) { return 127 as i8; }
+  return (r >> 4) as i8;
+}
+
+function pick16(s: mut u64): i16 {
+  const r = rnd(mut s);
+  if (r % 8 == 0) { return -32768 as i16; }
+  if (r % 8 == 1) { return 32767 as i16; }
+  return (r >> 4) as i16;
+}
+
+export function main(): i32 {
+  let s: u64 = 12345;
+  let badDot = 0;
+  let badWide = 0;
+  let badAdd = 0;
+  let badMinMax = 0;
+  let badU = 0;
+  let badShuf = 0;
+  let badSum = 0;
+  let badF = 0;
+  let badLoad = 0;
+  for (let round = 0; round < 2000; round++) {
+    let a8: i8x16;
+    let b8: i8x16;
+    for (let k = 0; k < 16; k++) { a8[k] = pick8(mut s); b8[k] = pick8(mut s); }
+    let acc: i32x4;
+    for (let k = 0; k < 4; k++) { acc[k] = (rnd(mut s) as i32) - 1073741824; }
+    if (round % 5 == 0) { acc[0] = 2147483647; }
+    const d = Simd.dot(acc, a8, b8);
+    for (let k = 0; k < 4; k++) {
+      let w = acc[k];
+      for (let j = 0; j < 4; j++) { w = w + (a8[4 * k + j] as i32) * (b8[4 * k + j] as i32); }
+      if (w != d[k]) { badDot++; }
+    }
+    let a16: i16x8;
+    let b16: i16x8;
+    for (let k = 0; k < 8; k++) { a16[k] = pick16(mut s); b16[k] = pick16(mut s); }
+    const m = Simd.mulAddWide(acc, a16, b16);
+    for (let k = 0; k < 4; k++) {
+      const w = acc[k] + (a16[2 * k] as i32) * (b16[2 * k] as i32) + (a16[2 * k + 1] as i32) * (b16[2 * k + 1] as i32);
+      if (w != m[k]) { badWide++; }
+    }
+    const sum = a16 + b16;
+    const dif = a16 - b16;
+    const pro = a16 * b16;
+    const lo = Simd.min(a16, b16);
+    const hi = Simd.max(a16, b16);
+    for (let k = 0; k < 8; k++) {
+      if (sum[k] != a16[k] + b16[k] || dif[k] != a16[k] - b16[k] || pro[k] != a16[k] * b16[k]) { badAdd++; }
+      if (lo[k] != Math.min(a16[k], b16[k]) || hi[k] != Math.max(a16[k], b16[k])) { badMinMax++; }
+    }
+    // 符号なしの min / max（u8x16）
+    let ua: u8x16;
+    let ub: u8x16;
+    for (let k = 0; k < 16; k++) { ua[k] = a8[k] as u8; ub[k] = b8[k] as u8; }
+    const ulo = Simd.min(ua, ub);
+    const uhi = Simd.max(ua, ub);
+    for (let k = 0; k < 16; k++) {
+      if (ulo[k] != Math.min(ua[k], ub[k]) || uhi[k] != Math.max(ua[k], ub[k])) { badU++; }
+    }
+    // shuffle: 前半と後半の入れ替え、b からの取り出し
+    const sh = Simd.shuffle(a16, b16, [8, 1, 15, 3, 0, 9, 7, 7]);
+    if (sh[0] != b16[0] || sh[1] != a16[1] || sh[2] != b16[7] || sh[3] != a16[3] || sh[4] != a16[0] || sh[5] != b16[1] || sh[6] != a16[7] || sh[7] != a16[7]) { badShuf++; }
+    // sum（i16 でラップ）
+    let w16: i16 = 0;
+    for (let k = 0; k < 8; k++) { w16 = w16 + a16[k]; }
+    if (Simd.sum(a16) != w16) { badSum++; }
+    // f32x4: 演算と min / max（NaN は 2 番目）
+    let fa: f32x4;
+    let fb: f32x4;
+    for (let k = 0; k < 4; k++) { fa[k] = (a16[k] as f32) * 0.37; fb[k] = (b16[k] as f32) * 1.5; }
+    if (round % 7 == 0) { fa[1] = 0.0 / 0.0; }
+    const fs = fa * fb + fb;
+    const fmin = Simd.min(fa, fb);
+    for (let k = 0; k < 4; k++) {
+      const want = fa[k] * fb[k] + fb[k];
+      const same = want == fs[k] || (want != want && fs[k] != fs[k]);
+      const m2 = Math.min(fa[k], fb[k]);
+      const sameMin = m2 == fmin[k] || (m2 != m2 && fmin[k] != fmin[k]);
+      if (!same || !sameMin) { badF++; }
+    }
+    if (Simd.sum(fa) != Simd.sum(fa) && fa[1] == fa[1]) { badF++; }
+  }
+  // load / store: 端の位置と、i32 の配列・固定長配列
+  let xs = new Array<i32>(11);
+  for (let i = 0; i < xs.length; i++) { xs[i] = i as i32 * 3; }
+  const v = Simd.load(xs, 7);
+  if (v[0] != 21 || v[3] != 30) { badLoad++; }
+  Simd.store(mut xs, 0, v + Simd.splat(1));
+  if (xs[0] != 22 || xs[3] != 31 || xs[4] != 12) { badLoad++; }
+  let fixed: u16[12];
+  const ones: u16x8 = Simd.splat(65535);
+  Simd.store(mut fixed, 4, ones);
+  if (fixed[3] != 0 || fixed[4] != 65535 || fixed[11] != 65535) { badLoad++; }
+  const back = Simd.load(fixed, 3);
+  if (back[0] != 0 || back[1] != 65535) { badLoad++; }
+  print(badDot);
+  print(badWide);
+  print(badAdd);
+  print(badMinMax);
+  print(badU);
+  print(badShuf);
+  print(badSum);
+  print(badF);
+  print(badLoad);
+  return 0;
+}

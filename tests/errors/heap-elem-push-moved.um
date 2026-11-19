@@ -1,0 +1,8 @@
+// error: use-after-move
+export function main(): i32 {
+  let words: string[] = [];
+  const s = "a";
+  words.push(s);
+  print(s);
+  return 0;
+}

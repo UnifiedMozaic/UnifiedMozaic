@@ -1,0 +1,8 @@
+// error: arg-mode
+// Simd.store は配列を書き換えるので mut を付けて渡す。
+export function main(): i32 {
+  let xs = new Array<i16>(8);
+  const v: i16x8 = Simd.splat(1);
+  Simd.store(xs, 0, v);
+  return 0;
+}

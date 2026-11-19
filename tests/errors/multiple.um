@@ -1,0 +1,8 @@
+// error: unknown-name
+// error: type-mismatch
+function a(): i32 {
+  return nope;
+}
+function b(): i32 {
+  return true;
+}

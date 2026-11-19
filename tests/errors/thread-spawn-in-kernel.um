@@ -1,0 +1,29 @@
+// kernel の中では thread.spawn / spawnEach / join も使えない（thread.cpus は thread-in-kernel.um）。
+function f(x: u32): u32 {
+  return x;
+}
+
+kernel function k(i: u32, out: mut Buffer<u32>): void {
+  const h = thread.spawn(f, i);
+  out[i] = 1;
+}
+
+kernel function k2(i: u32, out: mut Buffer<u32>): void {
+  const g = thread.spawnEach(f, own out);
+}
+
+kernel function k3(i: u32, out: mut Buffer<u32>): void {
+  out[i] = thread.join(i);
+}
+
+export function main(): i32 {
+  let b = new Buffer<u32>(4);
+  dispatch(k, 4, mut b);
+  dispatch(k2, 4, mut b);
+  dispatch(k3, 4, mut b);
+  return 0;
+}
+
+// error: kernel-restriction
+// error: kernel-restriction
+// error: kernel-restriction

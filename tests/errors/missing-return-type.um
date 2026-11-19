@@ -1,0 +1,8 @@
+// error: type-mismatch
+// error: type-mismatch
+function double(x: i32) {
+  return x * 2;
+}
+export function main(): i32 {
+  return double(2);
+}

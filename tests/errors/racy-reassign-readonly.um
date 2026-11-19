@@ -1,0 +1,21 @@
+// 読み取り借用の RacyBuffer の全体は代入できない（要素は書ける）。
+function reset(b: RacyBuffer<u32>): void {
+  b[0] = 1;
+  b = new RacyBuffer<u32>(2);
+}
+
+function f(x: i32): i32 {
+  return x;
+}
+
+function g(xs: i32[]): i32 {
+  return xs[0];
+}
+
+export function main(): i32 {
+  const b = new RacyBuffer<u32>(1);
+  reset(b);
+  return 0;
+}
+
+// error: immutable

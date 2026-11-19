@@ -1,0 +1,5 @@
+// error: not-implemented
+let counter: i32 = 0;
+export function main(): i32 {
+  return counter;
+}

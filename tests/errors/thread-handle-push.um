@@ -1,0 +1,17 @@
+// 持ち手は配列にしまえない。
+function f(x: i32): i32 {
+  return x;
+}
+
+function g(xs: i32[]): i32 {
+  return xs[0];
+}
+
+export function main(): i32 {
+  let hs: u64[] = [];
+  const h = thread.spawn(f, 1);
+  hs.push(h);
+  return 0;
+}
+
+// error: thread

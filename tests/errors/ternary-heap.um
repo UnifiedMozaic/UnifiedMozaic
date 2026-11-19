@@ -1,0 +1,7 @@
+// error: not-implemented
+export function main(): i32 {
+  const a: i32[] = [1];
+  const b: i32[] = [2];
+  const c = a.length > 0 ? a : b;
+  return 0;
+}

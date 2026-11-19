@@ -1,0 +1,9 @@
+// error: duplicate
+// 標準の関数（`a + b` が呼ぶ vec3Add）と同じ名前の定数は作れない。標準の関数を黙って消さない。
+const vec3Add: i32 = 1;
+export function main(): i32 {
+  const a: vec3<f32> = vec3(1, 2, 3);
+  const b = a + a;
+  print(b.x);
+  return 0;
+}

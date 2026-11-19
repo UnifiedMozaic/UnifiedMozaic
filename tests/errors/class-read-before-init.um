@@ -1,0 +1,9 @@
+// error: uninitialized
+class C {
+  a: i32;
+  b: i32;
+  constructor() {
+    this.a = this.b;
+    this.b = 1;
+  }
+}

@@ -1,0 +1,6 @@
+// error: unknown-method
+export function main(): i32 {
+  const xs: i32[] = [1];
+  xs.map(1);
+  return 0;
+}

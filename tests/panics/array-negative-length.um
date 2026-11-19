@@ -1,0 +1,6 @@
+// panic: out of memory (line 4)
+export function main(): i32 {
+  let n = -1;
+  const xs = new Array<i32>(n);
+  return 0;
+}

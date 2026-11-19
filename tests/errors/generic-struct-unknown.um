@@ -1,0 +1,6 @@
+// error: unknown-type
+struct P { x: i32; }
+export function main(): i32 {
+  const p: P<i32> = { x: 1 };
+  return 0;
+}

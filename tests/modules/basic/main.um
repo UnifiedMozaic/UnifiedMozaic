@@ -1,0 +1,42 @@
+// 複数のファイルに分けたプログラム。import した名前だけが使える。
+// expect: 25
+// expect: 7
+// expect: 3
+// expect: circle 12
+// expect: 6
+// expect: 9
+// expect: 82
+// expect: 6
+// expect: 16
+import { square, Vec2, dot } from "./lib/math.um";
+import { Shape, describe } from "./shapes.um";
+import { Counter } from "./lib/counter.um";
+import { larger, scale, SQUARES, BOARD, lastPlus } from "./lib/math.um";
+
+// import した定数を、このファイルの定数や配列の長さに使う。
+const NEXT: i32 = SQUARES + 1;
+
+export function main(): i32 {
+  print(square(5));
+  const a: Vec2 = { x: 1, y: 2 };
+  const b: Vec2 = { x: 3, y: 2 };
+  print(dot(a, b));
+  print(larger(3, 2));
+  print(describe(Shape.Circle(2)));
+  let c = new Counter();
+  c.add(2);
+  c.add(4);
+  print(c.total());
+  let buf: Buffer<i32> = [1, 2];
+  dispatch(scale, 2, mut buf, 3);
+  print(buf[0] + buf[1]);
+  print(NEXT);
+  const row: i32[BOARD] = [1, 2, 3];
+  print(row[0] + row[1] + row[2]);
+  // 配列リテラルの型は、lastPlus の引数の型（math.um の中だけの定数 TRIPLE を使う）から決まる。
+  // 同じ名前のローカル変数がこちらにあっても関係しない。
+  const TRIPLE = 5;
+  let d: i64 = 10;
+  print(lastPlus(d, [4, 5, 6]) + (TRIPLE as i64) - 5);
+  return 0;
+}

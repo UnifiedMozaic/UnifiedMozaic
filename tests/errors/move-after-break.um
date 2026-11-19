@@ -1,0 +1,12 @@
+// error: use-after-move
+function take(xs: own i32[]): i32 { return 1; }
+export function main(): i32 {
+  let a: i32[] = [1];
+  for (let i = 0; i < 3; i++) {
+    if (i == 2) {
+      take(own a);
+      break;
+    }
+  }
+  return a[0];
+}

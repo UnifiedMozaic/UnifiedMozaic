@@ -1,0 +1,4 @@
+// error: ts-feature
+class P {
+  constructor(public x: i32) { }
+}

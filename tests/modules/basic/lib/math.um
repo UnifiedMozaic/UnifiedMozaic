@@ -1,0 +1,39 @@
+export struct Vec2 {
+  x: i32;
+  y: i32;
+}
+
+export function square(x: i32): i32 {
+  return helper(x) * x;
+}
+
+// export していないので、このファイルの中だけで使える。
+function helper(x: i32): i32 {
+  return x;
+}
+
+export function dot(a: Vec2, b: Vec2): i32 {
+  return a.x * b.x + a.y * b.y;
+}
+
+export function larger<T>(a: T, b: T): T {
+  if (a > b) {
+    return a;
+  }
+  return b;
+}
+
+export kernel function scale(i: u32, out: mut Buffer<i32>, k: i32): void {
+  out[i] = out[i] * k;
+}
+
+// 定数も export できる。初期化には、このファイルの中だけの定数も使える。
+const BASE: i32 = 9;
+export const SQUARES: i32 = BASE * BASE;
+export const BOARD: usize = 3;
+
+// ジェネリック関数の引数の型に、このファイルの中だけの定数を使う（呼び出す側は import しなくてよい）。
+const TRIPLE: usize = 3;
+export function lastPlus<T>(d: T, xs: T[TRIPLE]): T {
+  return xs[TRIPLE - 1] + d;
+}

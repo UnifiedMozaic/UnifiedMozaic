@@ -1,0 +1,6 @@
+// error: missing-field
+struct P { x: i32; y: i32; }
+export function main(): i32 {
+  const p: P = { x: 1 };
+  return p.x;
+}

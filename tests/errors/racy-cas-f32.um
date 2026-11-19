@@ -1,0 +1,16 @@
+// f32 の compareExchange はできない。
+function f(x: i32): i32 {
+  return x;
+}
+
+function g(xs: i32[]): i32 {
+  return xs[0];
+}
+
+export function main(): i32 {
+  const b = new RacyBuffer<f32>(1);
+  print(b.compareExchange(0, 1.0, 2.0));
+  return 0;
+}
+
+// error: type-mismatch

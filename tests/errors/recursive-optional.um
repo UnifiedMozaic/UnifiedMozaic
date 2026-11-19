@@ -1,0 +1,4 @@
+// error: recursive-struct
+// error: recursive-struct
+struct W { r: W | null; }
+export function main(): i32 { let w: W = { r: null }; return 0; }

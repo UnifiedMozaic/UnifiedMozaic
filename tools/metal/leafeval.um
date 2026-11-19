@@ -1,0 +1,40 @@
+// 探索の末端の評価の形: 小さい仕事を1つずつ GPU に渡し、毎回答えを読んで次の入力を決める。
+// 1回の往復にかかる時間が支配的になる（調査用。テストではない）。
+//   UM_METAL=1 node src/cli.ts build tools/metal/leafeval.um --target host -o out/mac-check/leafeval
+//   time out/mac-check/leafeval                      常駐（待機 kernel）あり
+//   time env UM_GPU_RESIDENT=0 out/mac-check/leafeval  なし
+kernel function score(i: u32, out: mut Buffer<i32>, pos: Buffer<i32>, w: Buffer<i32>, bias: i32): void {
+  let acc = bias;
+  for (let k: u32 = 0; k < 64; k++) {
+    acc = acc + pos[i * 64 + k] * w[k] + ((acc >> 3) ^ (k as i32));
+  }
+  out[i] = acc;
+}
+
+export function main(): i32 {
+  const leaves: u32 = 32;
+  let pos = new Buffer<i32>(leaves * 64);
+  let w = new Buffer<i32>(64);
+  for (let k: u32 = 0; k < 64; k++) {
+    w[k] = (k as i32) * 3 - 90;
+  }
+  let out = new Buffer<i32>(leaves);
+  let best: i32 = 0;
+  let sum: i64 = 0;
+  for (let round: u32 = 0; round < 20000; round++) {
+    // 前の答えから次の局面を作る（答えを読まないと先へ進めない）。
+    for (let i: u32 = 0; i < leaves * 64; i += 17) {
+      pos[i] = (best + (i as i32) + (round as i32)) % 97;
+    }
+    gpu.dispatch(score, leaves, mut out, pos, w, round as i32);
+    best = out[0];
+    for (let i: u32 = 1; i < leaves; i++) {
+      if (out[i] > best) {
+        best = out[i];
+      }
+    }
+    sum += best as i64;
+  }
+  print(sum);
+  return 0;
+}

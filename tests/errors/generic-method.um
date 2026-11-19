@@ -1,0 +1,7 @@
+// error: not-implemented
+class Box {
+  v: i32;
+  constructor() { this.v = 0; }
+  put<T>(x: T): void {}
+}
+export function main(): i32 { return 0; }

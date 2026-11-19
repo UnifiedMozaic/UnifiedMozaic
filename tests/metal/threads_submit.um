@@ -1,0 +1,104 @@
+// 8 スレッドがそれぞれ gpu.submit / gpu.ready / gpu.wait を回す。結果は CPU で実行した結果と同じ。
+// 別のスレッドが頼んだ仕事の券を、ほかのスレッドが待ってもよい。
+// expect: 0
+// expect: 0
+// expect: 0
+
+kernel function score(i: u32, out: mut RacyBuffer<i32>, pos: RacyBuffer<i32>, bias: i32): void {
+  let acc = bias;
+  for (let k: u32 = 0; k < 16; k++) {
+    acc = acc + pos[i * 16 + k] * ((k as i32) - 7) + ((acc >> 3) ^ (k as i32));
+  }
+  out[i] = acc;
+}
+
+struct Lane {
+  id: u32;
+  pos: RacyBuffer<i32>;
+  out: RacyBuffer<i32>;
+  check: RacyBuffer<i32>;
+}
+
+function fill(pos: RacyBuffer<i32>, seed: u32): void {
+  for (let i: u32 = 0; i < pos.length; i++) {
+    pos[i] = ((i * 2654435761 + seed * 40503) >> 7) as i32 % 1000;
+  }
+}
+
+function differ(a: RacyBuffer<i32>, b: RacyBuffer<i32>): u32 {
+  let bad: u32 = 0;
+  for (let i: u32 = 0; i < a.length; i++) {
+    if (a[i] != b[i]) {
+      bad += 1;
+    }
+  }
+  return bad;
+}
+
+// 1 件ずつ頼んで、半分は gpu.wait、半分は gpu.ready を見張って受け取る。
+function lane(l: own Lane, rounds: u32): u32 {
+  let bad: u32 = 0;
+  for (let r: u32 = 0; r < rounds; r++) {
+    const seed = l.id * 100000 + r;
+    fill(l.pos, seed);
+    const t = gpu.submit(score, l.out.length, mut l.out, l.pos, seed as i32);
+    if (r % 2 == 0) {
+      gpu.wait(t);
+    } else {
+      while (!gpu.ready(t)) {
+      }
+    }
+    cpu.dispatch(score, l.check.length, mut l.check, l.pos, seed as i32);
+    bad += differ(l.out, l.check);
+  }
+  return bad;
+}
+
+// 渡された券（別のスレッドが頼んだもの）を待ってから、結果を確かめる。
+function waitOther(t: u64, out: RacyBuffer<i32>, pos: RacyBuffer<i32>, seed: u32): u32 {
+  gpu.wait(t);
+  let check = new RacyBuffer<i32>(out.length);
+  cpu.dispatch(score, out.length, mut check, pos, seed as i32);
+  return differ(out, check);
+}
+
+export function main(): i32 {
+  const n: u32 = 256;
+  let lanes: Lane[] = [];
+  for (let k: u32 = 0; k < 8; k++) {
+    lanes.push({ id: k, pos: new RacyBuffer<i32>(n * 16), out: new RacyBuffer<i32>(n), check: new RacyBuffer<i32>(n) });
+  }
+  {
+    const g = thread.spawnEach(lane, own lanes, 300);
+    const bads = thread.join(g);
+    let bad: u32 = 0;
+    for (const b of bads) {
+      bad += b;
+    }
+    print(bad);
+  }
+
+  // 頼んだのはメイン、待つのは別のスレッド。
+  const pos = new RacyBuffer<i32>(n * 16);
+  const out = new RacyBuffer<i32>(n);
+  let bad: u32 = 0;
+  for (let r: u32 = 0; r < 50; r++) {
+    fill(pos, r + 7);
+    const t = gpu.submit(score, n, mut out, pos, (r + 7) as i32);
+    const h = thread.spawn(waitOther, t, out, pos, r + 7);
+    bad += thread.join(h);
+  }
+  print(bad);
+
+  // 預けたまま、別々のスレッドが同じ券を同時に待つ。
+  bad = 0;
+  for (let r: u32 = 0; r < 50; r++) {
+    fill(pos, r + 99);
+    const t = gpu.submit(score, n, mut out, pos, (r + 99) as i32);
+    const a = thread.spawn(waitOther, t, out, pos, r + 99);
+    const b = thread.spawn(waitOther, t, out, pos, r + 99);
+    bad += thread.join(a) + thread.join(b);
+  }
+  print(bad);
+  return 0;
+}

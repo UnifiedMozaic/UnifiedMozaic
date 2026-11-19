@@ -1,0 +1,7 @@
+// error: move-out
+struct B { items: i32[]; }
+function mk(): B { return { items: [1, 2, 3] }; }
+export function main(): i32 {
+  let x = mk().items;
+  return 0;
+}

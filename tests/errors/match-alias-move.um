@@ -1,0 +1,11 @@
+// error: move-out
+enum Message { Text(body: string), Quit }
+function take(s: own string): void {}
+export function main(): i32 {
+  const m = Message.Text("a");
+  match (m) {
+    Message.Text(body) => take(own body),
+    Message.Quit => {}
+  }
+  return 0;
+}

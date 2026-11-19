@@ -1,0 +1,16 @@
+// 標準入力が「待たない」設定（O_NONBLOCK）で、まだ何も届いていないとき、readLine() は届くまで待つ
+// （入力の終わりとして扱わない）。親のプロセスがこの設定を付けたパイプを引き継ぐと起きる。
+// expect: first
+// expect: second
+// expect: 2
+export function main(): i32 {
+  let n = 0;
+  while (true) {
+    const line = readLine();
+    if (line == null) { break; }
+    n++;
+    print(line);
+  }
+  print(n);
+  return 0;
+}

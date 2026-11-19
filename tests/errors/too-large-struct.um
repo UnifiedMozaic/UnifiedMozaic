@@ -1,0 +1,2 @@
+// error: too-large
+struct Big { a: i64[3000]; b: i64[3000]; }

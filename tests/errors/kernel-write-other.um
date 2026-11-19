@@ -1,0 +1,4 @@
+// error: kernel-restriction
+kernel function k(i: u32, out: mut Buffer<i32>): void {
+  out[i + 1] = 1;
+}

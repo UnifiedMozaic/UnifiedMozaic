@@ -1,0 +1,9 @@
+// error: non-exhaustive
+enum Light { Red, Yellow, Green }
+function f(l: Light): i32 {
+  match (l) {
+    Light.Red => return 1,
+    Light.Green => return 2,
+  }
+}
+export function main(): i32 { return f(Light.Red); }

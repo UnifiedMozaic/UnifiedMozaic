@@ -1,0 +1,254 @@
+// MSL 出力の確認用。kernel を CPU で実行してチェックサムを出す。
+// tests/msl/harness.cpp が、同じ入力で生成した MSL（スタブヘッダでC++として）を実行して、同じチェックサムを出す。
+// tests/run.ts が2つの出力を比べる。
+
+struct Cell {
+  a: f32;
+  b: i32;
+  hist: u32[4];
+}
+
+struct Config {
+  scale: f32;
+  bias: i32;
+  flag: u32;
+  table: i32[4];
+}
+
+kernel function arith(i: u32, out: mut Buffer<f32>, x: Buffer<f32>, y: Buffer<f32>, k: f32): void {
+  const v = x[i] * k + y[i] / (x[i] + 1.5) - Math.floor(y[i] * 0.5);
+  out[i] = Math.max(Math.min(v, 1000), -1000) + Math.abs(x[i] - y[i]) + Math.sqrt(Math.abs(y[i])) + Math.ceil(x[i] * 0.25);
+}
+
+kernel function ints(i: u32, out: mut Buffer<i32>, a: Buffer<i32>, b: Buffer<i32>): void {
+  const x = a[i];
+  const y = b[i];
+  let r = x / y + x % y;
+  r = r ^ (x << y) ^ (x >> y);
+  r = r + Math.abs(x) + Math.min(x, y) * 3 - Math.max(x, y);
+  r = r + Math.popcount(x) + Math.clz(x) + Math.ctz(y);
+  out[i] = r * 31 + (-x) + (~y);
+}
+
+kernel function uints(i: u32, out: mut Buffer<u32>, a: Buffer<u32>): void {
+  const x = a[i];
+  let r = -x;
+  r = r + x / (i % 3) + x % (i % 5);
+  r = r ^ (x << i) ^ (x >> (i + 30));
+  out[i] = r + Math.popcount(x) + Math.clz(x) + Math.ctz(x) + Math.min(x, i) + Math.max(x, 7);
+}
+
+kernel function casts(i: u32, out: mut Buffer<i32>, f: Buffer<f32>): void {
+  const v = f[i];
+  out[i] = (v as i32) + ((v as u32) as i32) / 3 + (((i as f32) * 0.5) as i32) + ((v > 0) as i32);
+}
+
+kernel function fetch(src: Buffer<i32>, at: i32): i32 {
+  return src[at];
+}
+
+kernel function clamps(i: u32, out: mut Buffer<i32>, src: Buffer<i32>, empty: Buffer<i32>): void {
+  const signed = (i as i32) - 3;
+  out[i] = fetch(src, signed) + src[i + 2] * 2 + fetch(empty, 5) + (src.length as i32) + (empty.length as i32);
+}
+
+kernel function cells(i: u32, out: mut Buffer<Cell>, cfg: Config, on: bool): void {
+  let c = out[i];
+  c.a = c.a * cfg.scale + 1;
+  if (on) {
+    c.b = c.b + cfg.bias + cfg.table[i % 4] + cfg.table[i + 100];
+  }
+  for (let k: u32 = 0; k < 4; k++) {
+    c.hist[k] = c.hist[k] + k * cfg.flag + i;
+  }
+  let total: u32 = 0;
+  for (const h of c.hist) {
+    total += h;
+  }
+  c.hist[3] = total;
+  out[i] = c;
+}
+
+kernel function collatz(i: u32, steps: mut Buffer<u32>): void {
+  let n = i + 1;
+  let count: u32 = 0;
+  while (true) {
+    if (n == 1) {
+      break;
+    }
+    if (n % 2 == 0) {
+      n = n / 2;
+      count++;
+      continue;
+    }
+    n = 3 * n + 1;
+    count++;
+  }
+  steps[i] = count;
+}
+
+kernel function sums(i: u32, out: mut Buffer<i32>, src: Buffer<i32>): void {
+  let s = 0;
+  for (const v of src) {
+    s += v * ((i as i32) + 1);
+  }
+  out[i] = s;
+}
+
+kernel function loops(i: u32, out: mut Buffer<u32>, src: Buffer<u32>): void {
+  let acc: u32 = 0;
+  for (let k: u32 = 0; k < 40; k++) {
+    if (k % 3 == 0) {
+      continue;
+    }
+    if (k > i % 37 + 5) {
+      break;
+    }
+    acc = acc * 31 + k + src[k + i];
+  }
+  out[i] = acc;
+}
+
+kernel function misc(i: u32, out: mut Buffer<i32>, a: Buffer<i32>, fl: Buffer<f32>): void {
+  const x = a[i];
+  const s = (i as i32) * 7 - 40;
+  const f = fl[i];
+  const z = f - f;
+  const nan = z / z;
+  let r = (x << s) ^ (x >> s) ^ (((x as u32) >> (s as u32)) as i32);
+  r = r + (x & s | 5) + ((~x) ^ s) + (-s) * x;
+  r = r + (((f % 7.5) * 4) as i32) + (f > 0 ? 1 : 2) + ((x > 0 && f < 100) as i32) + ((x < 0 || f > 0) as i32);
+  r = r + (nan as i32) + (Math.min(nan, 1.0) as i32) * 10 + (Math.max(1.0, nan) as i32) * 100 + ((1.0 / z) as i32) / 7 + ((-1.0 / z) as i32) / 11;
+  r = r + Math.abs(x) / (s + 40) + x % (s + 40) + ((x * 65537) as i32) / (-1);
+  out[i] = r;
+}
+
+// 決まった並びの乱数（線形合同法）。harness.cpp にも同じものがある。
+class Rng {
+  state: u32;
+
+  constructor(seed: u32) {
+    this.state = seed;
+  }
+
+  next(): u32 {
+    this.state = this.state * 1664525 + 1013904223;
+    return this.state;
+  }
+}
+
+function hashI32(a: Buffer<i32>): u64 {
+  let h: u64 = 0;
+  for (const v of a) {
+    h = h * 1000003 + ((v as i64) as u64);
+  }
+  return h;
+}
+
+function hashU32(a: Buffer<u32>): u64 {
+  let h: u64 = 0;
+  for (const v of a) {
+    h = h * 1000003 + (v as u64);
+  }
+  return h;
+}
+
+function hashF32(a: Buffer<f32>): u64 {
+  let h: u64 = 0;
+  for (const v of a) {
+    h = h * 1000003 + (((v * 64.0) as i64) as u64);
+  }
+  return h;
+}
+
+function hashCells(a: Buffer<Cell>): u64 {
+  let h: u64 = 0;
+  for (const c of a) {
+    h = h * 1000003 + (((c.a * 64.0) as i64) as u64);
+    h = h * 1000003 + ((c.b as i64) as u64);
+    for (const x of c.hist) {
+      h = h * 1000003 + (x as u64);
+    }
+  }
+  return h;
+}
+
+export function main(): i32 {
+  const n: u32 = 1000;
+  let rng = new Rng(12345);
+
+  let xs = new Buffer<f32>(n);
+  let ys = new Buffer<f32>(n);
+  let ia = new Buffer<i32>(n);
+  let ib = new Buffer<i32>(n);
+  let ua = new Buffer<u32>(n + 64);
+  let fs = new Buffer<f32>(n);
+  for (let i: u32 = 0; i < n; i++) {
+    xs[i] = ((rng.next() % 2000) as f32) * 0.01 - 5;
+    ys[i] = ((rng.next() % 3000) as f32) * 0.02 - 30;
+    ia[i] = (rng.next() as i32) / 1000;
+    ib[i] = ((rng.next() % 41) as i32) - 20;
+    ua[i] = rng.next();
+    fs[i] = ((rng.next() % 100000) as f32) * 97.5 - 4000000;
+  }
+  for (let i: u32 = n; i < n + 64; i++) {
+    ua[i] = rng.next();
+  }
+  // 端の値: ゼロ除算、最小値 / -1、範囲外の変換
+  ia[0] = -2147483648;
+  ib[0] = -1;
+  ia[1] = 7;
+  ib[1] = 0;
+  fs[0] = 3000000000;
+  fs[1] = -3000000000;
+  fs[2] = 5000000000;
+  fs[3] = 0;
+
+  let fa = new Buffer<f32>(n);
+  cpu.dispatch(arith, n, mut fa, xs, ys, 1.75);
+  print(hashF32(fa));
+
+  let a2 = new Buffer<i32>(n);
+  cpu.dispatch(ints, n, mut a2, ia, ib);
+  print(hashI32(a2));
+
+  let a3 = new Buffer<u32>(n);
+  cpu.dispatch(uints, n, mut a3, ua);
+  print(hashU32(a3));
+
+  let a4 = new Buffer<i32>(n);
+  cpu.dispatch(casts, n, mut a4, fs);
+  print(hashI32(a4));
+
+  const small: Buffer<i32> = [10, 20, 30, 40, 50];
+  const empty = new Buffer<i32>(0);
+  let a5 = new Buffer<i32>(64);
+  cpu.dispatch(clamps, 64, mut a5, small, empty);
+  print(hashI32(a5));
+
+  const cfg: Config = { scale: 0.5, bias: 3, flag: 2, table: [1, -2, 3, -4] };
+  let a6 = new Buffer<Cell>(200);
+  for (let i: u32 = 0; i < 200; i++) {
+    const cell: Cell = { a: (i as f32) * 0.5, b: (i as i32) - 100, hist: [i, 1, 2, 3] };
+    a6[i] = cell;
+  }
+  cpu.dispatch(cells, 200, mut a6, cfg, true);
+  print(hashCells(a6));
+
+  let a7 = new Buffer<u32>(300);
+  cpu.dispatch(collatz, 300, mut a7);
+  print(hashU32(a7));
+
+  let a8 = new Buffer<i32>(100);
+  cpu.dispatch(sums, 100, mut a8, ib);
+  print(hashI32(a8));
+
+  let a9 = new Buffer<u32>(n);
+  cpu.dispatch(loops, n, mut a9, ua);
+  print(hashU32(a9));
+
+  let a10 = new Buffer<i32>(n);
+  cpu.dispatch(misc, n, mut a10, ia, fs);
+  print(hashI32(a10));
+  return 0;
+}

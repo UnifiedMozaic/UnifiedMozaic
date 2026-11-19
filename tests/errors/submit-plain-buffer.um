@@ -1,0 +1,11 @@
+// error: type-mismatch
+// gpu.submit は終わる前に戻るので、kernel が書く Buffer は RacyBuffer でなければならない（読むだけの Buffer は渡せる）。
+kernel function k(i: u32, out: mut Buffer<i32>): void {
+  out[i] = 1;
+}
+export function main(): i32 {
+  let b = new Buffer<i32>(4);
+  const t = gpu.submit(k, 4, mut b);
+  gpu.wait(t);
+  return 0;
+}

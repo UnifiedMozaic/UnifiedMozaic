@@ -1,0 +1,30 @@
+// 1次元のワークグループ数の上限（65535 × 64 要素）を超える dispatch。2次元の格子に割り当てる経路を確かめる。
+// main(0) は両方 CPU、main(1) は片方を GPU で実行する。
+// expect: 0
+// expect: 9019427347642080
+kernel function mixBits(i: u32, out: mut Buffer<u32>): void {
+  out[i] = (i * 2654435761) ^ (i >> 7);
+}
+
+export function main(useGpu: i32): i32 {
+  const n: u32 = 4200000;
+  let a = new Buffer<u32>(n);
+  let b = new Buffer<u32>(n);
+  cpu.dispatch(mixBits, n, mut a);
+  if (useGpu != 0) {
+    gpu.dispatch(mixBits, n, mut b);
+  } else {
+    cpu.dispatch(mixBits, n, mut b);
+  }
+  let bad = 0;
+  let sum: u64 = 0;
+  for (let i: u32 = 0; i < n; i++) {
+    if (a[i] != b[i]) {
+      bad++;
+    }
+    sum += a[i] as u64;
+  }
+  print(bad);
+  print(sum);
+  return 0;
+}

@@ -1,0 +1,6 @@
+// error: type-mismatch
+kernel function helper(a: f32): f32 { return a; }
+export function main(): i32 {
+  dispatch(helper, 4, 1.0);
+  return 0;
+}

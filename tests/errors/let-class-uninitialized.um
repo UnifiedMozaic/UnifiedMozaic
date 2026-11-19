@@ -1,0 +1,6 @@
+// error: uninitialized
+class C { n: i32 = 0; }
+export function main(): i32 {
+  let c: C;
+  return 0;
+}

@@ -1,0 +1,8 @@
+// error: bad-type
+// 配列の長さに書いた名前が、その場所ではローカル変数を指している。最上位の定数を黙って使わない。
+const N: usize = 2;
+export function main(): i32 {
+  const N = 2;
+  let g: i32[N] = [1, 2];
+  return g[0];
+}

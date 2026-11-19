@@ -1,0 +1,6 @@
+// error: unknown-method
+export function main(): i32 {
+  let b = new Buffer<i32>(4);
+  b.push(1);
+  return 0;
+}
