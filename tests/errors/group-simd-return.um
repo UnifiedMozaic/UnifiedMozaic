@@ -1,0 +1,18 @@
+// 集計を使う kernel では return を使えない（全スレッドが集計にそろう必要がある）。
+// target: host
+kernel function k(i: u32, out: mut Buffer<i32>, xs: Buffer<i32>): void {
+  if (xs[i] < 0) {
+    return;
+  }
+  const s = group.simdSum(xs[i]);
+  out[i] = s;
+}
+
+export function main(): i32 {
+  let b = new Buffer<i32>(64);
+  let xs = new Buffer<i32>(64);
+  dispatchGroups(k, 2, 32, mut b, xs);
+  return 0;
+}
+
+// error: kernel-restriction

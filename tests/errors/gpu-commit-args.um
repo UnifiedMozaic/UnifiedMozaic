@@ -1,0 +1,6 @@
+// error: arg-count
+// gpu.commit は引数を取らない。
+export function main(): i32 {
+  gpu.commit(1);
+  return 0;
+}

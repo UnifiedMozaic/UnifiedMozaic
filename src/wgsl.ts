@@ -6,12 +6,18 @@
 //   - 整数のゼロ除算・最小値 / -1 は WGSL の仕様で x / 0 = x、x % 0 = 0、最小値 / -1 = 最小値 と決まっており、
 //     kernel の CPU 版と同じ
 //
-// レイアウト: kernel で使える型はすべて 4 バイト単位（i32 / u32 / f32 とその struct・固定長配列）なので、
+// レイアウト: WGSL にする kernel で使える型はすべて 4 バイト単位（i32 / u32 / f32 とその struct・固定長配列）なので、
 // LLVM 側の構造体と WGSL の構造体は、同じ並びで隙間なく一致する。
+// 64 ビットの整数（i64 / u64）を使う kernel は WGSL にしない（WebGPU では CPU で実行する。codegen.ts の kernelUses64）。
 
 import { tyStr } from './ast.ts';
+import { CompileError } from './diag.ts';
 import type { Expr, FnDecl, Stmt, Sym, Ty } from './ast.ts';
 import type { FnSig, Program } from './checker.ts';
+import { atomicParams } from './msl.ts';
+
+/** kernel が定数の配列を使っていて WGSL にできないときのエラーの原因コード。 */
+export const WEBGPU_CONST_ARRAY = 'webgpu-const-array';
 
 /** 1回の dispatch で1つのワークグループが担当する要素数。runtime/host.mjs の定数と揃えること。 */
 export const WORKGROUP_SIZE = 64;
@@ -28,11 +34,36 @@ export interface WgslKernel {
   buffers: WgslBuffer[];
 }
 
-/** 型の大きさ（4 バイト単位）。 */
-export function sizeWords(prog: Program, t: Ty): number {
-  if (t.k === 'array') return t.len * sizeWords(prog, t.elem);
-  if (t.k === 'struct') return prog.structs.get(t.name)!.fields.reduce((n, f) => n + sizeWords(prog, f.ty), 0);
-  return 1;
+/**
+ * GPU と共有する値の並び（バイト数と境界）。CPU（LLVM の自然な並び）・MSL・WGSL で同じになる:
+ * 32 ビットの値は 4 バイト、64 ビットの整数は 8 バイトで 8 バイト境界。struct は最大の境界に揃え、
+ * 末尾も境界まで詰める（配列の要素の間隔 = 大きさ）。
+ */
+export function gpuLayout(prog: Program, t: Ty): { size: number; align: number } {
+  if (t.k === 'array') {
+    const e = gpuLayout(prog, t.elem);
+    return { size: t.len * e.size, align: e.align };
+  }
+  if (t.k === 'struct') {
+    let size = 0;
+    let align = 4;
+    for (const f of prog.structs.get(t.name)!.fields) {
+      const l = gpuLayout(prog, f.ty);
+      size = Math.ceil(size / l.align) * l.align + l.size;
+      align = Math.max(align, l.align);
+    }
+    return { size: Math.ceil(size / align) * align, align };
+  }
+  if (t.k === 'int' && t.bits === 64) return { size: 8, align: 8 };
+  return { size: 4, align: 4 };
+}
+
+/** 型に 64 ビットの整数が含まれるか（WGSL には 64 ビットの整数がない）。 */
+export function has64(prog: Program, t: Ty): boolean {
+  if (t.k === 'int') return t.bits === 64;
+  if (t.k === 'array' || t.k === 'heap') return has64(prog, t.elem);
+  if (t.k === 'struct') return prog.structs.get(t.name)!.fields.some((f) => has64(prog, f.ty));
+  return false;
 }
 
 /** Buffer の引数が、シェーダのどのグローバル変数と長さに対応するか。 */
@@ -41,6 +72,11 @@ interface BufferRef {
   len: string;
   /** 8 / 16 ビットの要素。WGSL には 8 / 16 ビットの整数がないので、u32 の語に詰めて持ち、読み書きの関数を通す。 */
   small?: { bits: number; signed: boolean };
+  /**
+   * アトミックに読み書きする RacyBuffer（kernel の中で load / store / fetchAdd / compareExchange を使うもの）。
+   * array<atomic<i32>> か array<atomic<u32>>（f32 はビット列）で持ち、要素の読み書きもすべて atomicLoad / atomicStore にする。
+   */
+  atomic?: { elem: Ty };
 }
 
 class Emitter {
@@ -55,6 +91,10 @@ class Emitter {
   indent = 1;
   lines: string[] = [];
   tmp = 0;
+  /** dispatchGroups 用の形か。 */
+  groups = false;
+  /** 共有配列（var<workgroup>）の宣言。 */
+  workgroupVars: string[] = [];
 
   constructor(prog: Program) {
     this.prog = prog;
@@ -67,6 +107,8 @@ class Emitter {
       case 'bool':
         return 'bool';
       case 'int':
+        // 64 ビットの整数を使う kernel は WGSL にしない（codegen.ts の kernelUses64 で CPU の実行に回す）。
+        if (t.bits === 64) throw new Error(`internal: WGSL has no 64-bit integers (${tyStr(t)}); this kernel runs on the CPU in WebGPU builds`);
         return t.signed ? 'i32' : 'u32';
       case 'float':
         return 'f32';
@@ -95,6 +137,12 @@ class Emitter {
   }
 
   name(sym: Sym): string {
+    if (sym.global) {
+      // 最上位の定数の配列は WebGPU では扱わない（WebGPU / WGSL の対応はやめる方針。CPU と Metal だけ）。
+      // dispatch の自動判断では、コード生成がこのエラーを受けて CPU で実行する（codegen.ts の gpuKernel）。
+      throw new CompileError(WEBGPU_CONST_ARRAY, `kernel uses the constant array '${sym.name}', which WebGPU (WGSL) does not support`, { line: 1, col: 1 },
+        'constant arrays in kernels run on the CPU and on Metal only; on wasm32 use `dispatch.cpu` (or let `dispatch` choose), or pass the table in a `Buffer<T>`');
+    }
     let n = this.names.get(sym.id);
     if (!n) {
       n = `u_${sym.name}_${sym.id}`;
@@ -123,6 +171,11 @@ class Emitter {
         return;
 
       case 'let':
+        if (s.sym!.shared) {
+          // 共有配列はモジュールの var<workgroup>。WebGPU がグループの始めに 0 で埋める。
+          this.workgroupVars.push(`var<workgroup> ${this.name(s.sym!)}: ${this.ty(s.sym!.ty)};`);
+          return;
+        }
         // 初期値のない宣言は、WGSL でもゼロで初期化される。
         this.line(s.init
           ? `var ${this.name(s.sym!)}: ${this.ty(s.sym!.ty)} = ${this.expr(s.init)};`
@@ -135,6 +188,10 @@ class Emitter {
           const ref = this.bufferOf(t.base);
           if (ref.small) {
             this.line(`um_st_${ref.global}(${this.index(t.index)}, ${this.expr(s.value)});`);
+            return;
+          }
+          if (ref.atomic) {
+            this.line(`${this.atomicStore(ref, this.index(t.index), this.expr(s.value))};`);
             return;
           }
         }
@@ -182,7 +239,7 @@ class Emitter {
         if (it.k === 'heap') {
           const ref = this.bufferOf(s.iter);
           len = ref.len;
-          elem = (i) => (ref.small ? `um_ld_${ref.global}(${i})` : `${ref.global}[${i}]`);
+          elem = (i) => (ref.small ? `um_ld_${ref.global}(${i})` : ref.atomic ? this.atomicLoad(ref, i, false) : `${ref.global}[${i}]`);
         } else {
           // 配列の値を一度変数に置いてから回す（反復中に元の配列が変わっても影響しない）。
           const arr = `um_a${++this.tmp}`;
@@ -213,10 +270,18 @@ class Emitter {
         this.line('continue;');
         return;
 
-      case 'expr':
-        // 副作用があるのは関数呼び出しだけ。kernel の補助関数は値を返すだけなので、結果を捨てる。
-        if (s.expr.kind === 'call') this.line(`_ = ${this.expr(s.expr)};`);
+      case 'expr': {
+        // 副作用があるのは、関数呼び出し・RacyBuffer のアトミック演算・group.barrier()。
+        const e = s.expr;
+        if (e.kind === 'math' && e.fn === 'group.barrier') {
+          this.line('workgroupBarrier();');
+        } else if (e.kind === 'mcall' && e.ty!.k === 'void') {
+          this.line(`${this.expr(e)};`);
+        } else if (e.kind === 'call' || e.kind === 'mcall') {
+          this.line(`_ = ${this.expr(e)};`);
+        }
         return;
+      }
     }
   }
 
@@ -227,6 +292,38 @@ class Emitter {
   }
 
   // ---- 式 ----
+
+  atomicLoad(ref: BufferRef, i: string, clamp = true): string {
+    const v = `atomicLoad(&${ref.global}[${clamp ? `um_clamp(${i}, ${ref.len})` : i}])`;
+    return ref.atomic!.elem.k === 'float' ? `bitcast<f32>(${v})` : v;
+  }
+
+  atomicStore(ref: BufferRef, i: string, v: string): string {
+    const x = ref.atomic!.elem.k === 'float' ? `bitcast<u32>(${v})` : v;
+    return `atomicStore(&${ref.global}[um_clamp(${i}, ${ref.len})], ${x})`;
+  }
+
+  /** `r.load(i)` などの RacyBuffer のアトミック演算。アトミックでない Buffer（読むだけの引数）では普通に読む。 */
+  racyCall(e: Expr & { kind: 'mcall' }): string {
+    const ref = this.bufferOf(e.recv);
+    const i = this.index(e.args[0].expr);
+    const a = e.args.slice(1).map((x) => this.expr(x.expr));
+    if (!ref.atomic) {
+      if (e.name === 'load') return ref.small ? `um_ld_${ref.global}(${i})` : `${ref.global}[um_clamp(${i}, ${ref.len})]`;
+      throw new Error(`internal: wgsl non-atomic ${e.name}`);
+    }
+    switch (e.name) {
+      case 'load':
+        return this.atomicLoad(ref, i);
+      case 'store':
+        return this.atomicStore(ref, i, a[0]);
+      case 'fetchAdd':
+        return `atomicAdd(&${ref.global}[um_clamp(${i}, ${ref.len})], ${a[0]})`;
+      case 'compareExchange':
+        return `um_cas_${ref.global}(${i}, ${a[0]}, ${a[1]})`;
+    }
+    throw new Error(`internal: wgsl RacyBuffer.${e.name}`);
+  }
 
   bufferOf(e: Expr): BufferRef {
     if (e.kind !== 'ident') throw new Error('internal: wgsl buffer expression');
@@ -309,6 +406,7 @@ class Emitter {
         if (bt.k === 'heap') {
           const ref = this.bufferOf(e.base);
           if (ref.small) return `um_ld_${ref.global}(${this.index(e.index)})`;
+          if (ref.atomic) return this.atomicLoad(ref, this.index(e.index));
           return `${ref.global}[um_clamp(${this.index(e.index)}, ${ref.len})]`;
         }
         if (e.index.kind === 'int') return `${this.expr(e.base)}[${e.index.value}]`;
@@ -331,9 +429,25 @@ class Emitter {
         return `${fn}(${args.join(', ')})`;
       }
 
+      case 'mcall':
+        return this.racyCall(e);
+
       case 'math': {
+        if (e.fn.startsWith('group.simd')) {
+          // WebGPU の subgroup は拡張機能で幅も決まっていないので、simdgroup の集計は Metal と CPU だけ。
+          throw new CompileError('kernel-restriction', `\`${e.fn}\` is not supported on WebGPU (wasm32)`, e.pos,
+            'simdgroup functions run on Metal and on the CPU; build with `--target host`');
+        }
         const a = e.args.map((x) => this.expr(x));
         switch (e.fn) {
+          case 'group.local':
+            return 'um_l';
+          case 'group.id':
+            return 'um_g';
+          case 'group.size':
+            return 'um_wg';
+          case 'group.count':
+            return 'um_params.count';
           case 'sqrt':
           case 'floor':
           case 'ceil':
@@ -450,8 +564,14 @@ class Emitter {
     );
   }
 
-  /** dispatch される kernel 全体を出力する。 */
-  kernel(d: FnDecl): WgslKernel {
+  /**
+   * dispatch される kernel 全体を出力する。
+   * groups: dispatchGroups 用。グループの大きさはパイプラインの定数 um_wg（override）で、ランタイム（runtime/host.mjs）が
+   * dispatch ごとに決める。count はグループの数、row は1行のグループの数。
+   */
+  kernel(d: FnDecl, groups: boolean): WgslKernel {
+    this.groups = groups;
+    const atomics = atomicParams(d);
     const buffers: WgslBuffer[] = [];
     const paramFields = ['  count: u32,', '  row: u32,'];
     const globals: string[] = [];
@@ -472,6 +592,28 @@ class Emitter {
           globals.push(`@group(0) @binding(${binding}) var<storage, ${write ? 'read_write' : 'read'}> ${global}: array<${write ? 'atomic<u32>' : 'u32'}>;`);
           this.smallAccess(global, len, small, write, !!ty.racy);
           this.bufs.set(p.sym!.id, { global, len, small });
+          return;
+        }
+        if (atomics.has(p.sym!.id)) {
+          const at = el.k === 'int' && el.signed ? 'atomic<i32>' : 'atomic<u32>';
+          globals.push(`@group(0) @binding(${binding}) var<storage, read_write> ${global}: array<${at}>;`);
+          this.bufs.set(p.sym!.id, { global, len, atomic: { elem: el } });
+          if (el.k === 'int') {
+            // 比較交換。前の値を返す（等しければ desired に入れ替わっている）。弱い版の空振りはやり直す。
+            const t = this.ty(el);
+            this.fnText.push(
+              `fn um_cas_${global}(i: u32, expected: ${t}, desired: ${t}) -> ${t} {`,
+              `  let j: u32 = um_clamp(i, ${len});`,
+              '  loop {',
+              `    let r = atomicCompareExchangeWeak(&${global}[j], expected, desired);`,
+              '    if (r.exchanged || r.old_value != expected) {',
+              '      return r.old_value;',
+              '    }',
+              '  }',
+              '}',
+              '',
+            );
+          }
           return;
         }
         globals.push(`@group(0) @binding(${binding}) var<storage, ${p.mode === 'mut' ? 'read_write' : 'read'}> ${global}: array<${this.ty(ty.elem)}>;`);
@@ -522,13 +664,30 @@ class Emitter {
       '  return select(lo, 0u, v != v);',
       '}',
       '',
+      ...this.workgroupVars,
+      ...(this.workgroupVars.length > 0 ? [''] : []),
       ...this.fnText,
-      `@compute @workgroup_size(${WORKGROUP_SIZE})`,
-      'fn um_main(@builtin(global_invocation_id) gid: vec3<u32>) {',
-      '  let um_i: u32 = gid.y * um_params.row + gid.x;',
-      '  if (um_i >= um_params.count) {',
-      '    return;',
-      '  }',
+      ...(groups
+        ? [
+          '// グループの大きさ。パイプラインを作るときにランタイムが決める。',
+          'override um_wg: u32 = 64u;',
+          '',
+          '@compute @workgroup_size(um_wg)',
+          'fn um_main(@builtin(workgroup_id) um_wid: vec3<u32>, @builtin(local_invocation_index) um_l: u32) {',
+          '  let um_g: u32 = um_wid.y * um_params.row + um_wid.x;',
+          '  if (um_g >= um_params.count) {',
+          '    return;',
+          '  }',
+          '  let um_i: u32 = um_g * um_wg + um_l;',
+        ]
+        : [
+          `@compute @workgroup_size(${WORKGROUP_SIZE})`,
+          'fn um_main(@builtin(global_invocation_id) gid: vec3<u32>) {',
+          '  let um_i: u32 = gid.y * um_params.row + gid.x;',
+          '  if (um_i >= um_params.count) {',
+          '    return;',
+          '  }',
+        ]),
       ...prelude,
       ...this.lines,
       '}',
@@ -538,6 +697,6 @@ class Emitter {
   }
 }
 
-export function emitWgsl(prog: Program, kernel: FnDecl): WgslKernel {
-  return new Emitter(prog).kernel(kernel);
+export function emitWgsl(prog: Program, kernel: FnDecl, groups = false): WgslKernel {
+  return new Emitter(prog).kernel(kernel, groups);
 }

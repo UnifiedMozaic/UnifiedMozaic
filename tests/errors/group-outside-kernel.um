@@ -1,0 +1,8 @@
+// group.* は kernel の中でだけ使える。
+export function main(): i32 {
+  const l = group.local();
+  print(l);
+  return 0;
+}
+
+// error: kernel-restriction

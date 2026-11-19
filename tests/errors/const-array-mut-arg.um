@@ -1,0 +1,10 @@
+// error: immutable
+// 定数の配列を `mut` で貸すことはできない（読み取り専用のデータ）。
+const T: u32[3] = [1, 2, 3];
+function clear(t: mut u32[3]): void {
+  t[0] = 0;
+}
+export function main(): i32 {
+  clear(mut T);
+  return 0;
+}

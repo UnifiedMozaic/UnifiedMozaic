@@ -1,0 +1,107 @@
+// kernel の中で 64 ビットの整数（i64 / u64）を使う。ビットボード（盤のマスを 1 ビットずつ持つ整数）の計算を、
+// 各要素ごとに kernel で行う。CPU と Metal（GPU）で同じ結果になる。WebGPU には 64 ビットの整数がないので、
+// wasm32 では dispatch が CPU で実行する。
+// expect: 201
+// expect: 303
+// expect: 431
+// expect: 354
+// expect: 32
+// expect: 63
+// expect: 1099512676352
+// expect: -3145734
+// expect: 4294967297
+
+// 9x9 = 81 マスの盤。lo に 0〜62 マス、hi に 63〜80 マス。
+struct Bb {
+  lo: u64;
+  hi: u64;
+}
+
+kernel function popcount(b: Bb): u32 {
+  return (Math.popcount(b.lo) + Math.popcount(b.hi)) as u32;
+}
+
+// 1 のマスのうち最も小さい番号（なければ 81）。
+kernel function firstSquare(b: Bb): u32 {
+  if (b.lo != 0) {
+    return Math.ctz(b.lo) as u32;
+  }
+  if (b.hi != 0) {
+    return (Math.ctz(b.hi) + 63) as u32;
+  }
+  return 81;
+}
+
+// マス番号 sq の 1 ビットだけを立てた盤。
+kernel function square(sq: u32): Bb {
+  if (sq < 63) {
+    return { lo: (1 as u64) << (sq as u64), hi: 0 };
+  }
+  return { lo: 0, hi: (1 as u64) << ((sq - 63) as u64) };
+}
+
+// 縦に並ぶ 9 マスを 1 列とし、i 番目の盤の「上下左右に 1 マス動ける先」の数を数える（盤の外へ出る分は数えない）。
+kernel function moves(i: u32, out: mut Buffer<u32>, sqs: Buffer<u32>): void {
+  const sq = sqs[i];
+  const file = sq / 9;
+  const rank = sq % 9;
+  let b: Bb = { lo: 0, hi: 0 };
+  if (rank > 0) {
+    const s = square(sq - 1);
+    b = { lo: b.lo | s.lo, hi: b.hi | s.hi };
+  }
+  if (rank < 8) {
+    const s = square(sq + 1);
+    b = { lo: b.lo | s.lo, hi: b.hi | s.hi };
+  }
+  if (file > 0) {
+    const s = square(sq - 9);
+    b = { lo: b.lo | s.lo, hi: b.hi | s.hi };
+  }
+  if (file < 8) {
+    const s = square(sq + 9);
+    b = { lo: b.lo | s.lo, hi: b.hi | s.hi };
+  }
+  out[i] = popcount(b) * 100 + firstSquare(b);
+}
+
+// 1 の立っているビットを ctz で 1 つずつ取り出して、番号の和を求める。
+kernel function bitSum(i: u32, out: mut Buffer<u64>, xs: Buffer<u64>): void {
+  let x = xs[i];
+  let s: u64 = 0;
+  while (x != 0) {
+    s += Math.ctz(x);
+    x = x & (x - 1);
+  }
+  out[i] = s;
+}
+
+// 64 ビットの演算はラップする（CPU と GPU で同じ）。シフト量は 64 で割った余り。
+kernel function wrap(i: u32, out: mut Buffer<i64>, xs: Buffer<i64>, k: i64): void {
+  const x = xs[i];
+  out[i] = x * k + (x << (64 + (i as i64)));
+}
+
+export function main(): i32 {
+  // 盤の角（0）、辺（4）、中央（40）、63 マス目（lo と hi の境目）。結果は「動ける先の数 * 100 + 最小の行き先」。
+  const sqs: Buffer<u32> = [0, 4, 40, 63];
+  let mv = new Buffer<u32>(4);
+  dispatch(moves, 4, mut mv, sqs);
+  for (const m of mv) {
+    print(m);
+  }
+
+  const xs: Buffer<u64> = [0x1_0000_0001, 0x8000_0000_0000_0000];
+  let sums = new Buffer<u64>(2);
+  dispatch(bitSum, 2, mut sums, xs);
+  print(sums[0]);
+  print(sums[1]);
+
+  const ys: Buffer<i64> = [1048576, -3];
+  let ws = new Buffer<i64>(2);
+  dispatch(wrap, 2, mut ws, ys, 1048576);
+  print(ws[0]);
+  print(ws[1]);
+  print(xs[0]);
+  return 0;
+}

@@ -1,13 +1,17 @@
 #!/usr/bin/env node
-// wasm を Node で実行する: node runtime/run-node.mjs out.wasm [関数名]
+// wasm を Node で実行する: node runtime/run-node.mjs out.wasm [関数名] [-- 引数...]
+// `--` のあとの引数は、プログラムの args() に渡す。
 // 標準入力の行は readLine() に、ファイルの読み書きは readFile() / writeFile() にそのままつなぐ
 // （ネイティブのバイナリと同じく、プログラムが指定したファイルを読み書きできる）。
-import { readFileSync, readSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, fstatSync, openSync, readFileSync, readSync, statSync, writeFileSync } from 'node:fs';
 import { instantiate, UmPanic } from './host.mjs';
 
-const [file, fn = 'main'] = process.argv.slice(2);
+const argv = process.argv.slice(2);
+const dash = argv.indexOf('--');
+const [file, fn = 'main'] = dash >= 0 ? argv.slice(0, dash) : argv;
+const programArgs = dash >= 0 ? argv.slice(dash + 1) : [];
 if (!file) {
-  console.error('usage: node runtime/run-node.mjs <file.wasm> [function]');
+  console.error('usage: node runtime/run-node.mjs <file.wasm> [function] [-- args...]');
   process.exit(2);
 }
 
@@ -71,6 +75,47 @@ const exports = await instantiate(readFileSync(file), {
       return false;
     }
   },
+  fileSize: (path) => {
+    try {
+      const st = statSync(path, { bigint: true });
+      return st.isFile() ? st.size : null;
+    } catch {
+      return null;
+    }
+  },
+  readFileRange: (path, offset, length) => {
+    let fd = -1;
+    try {
+      fd = openSync(path, 'r');
+      const st = fstatSync(fd);
+      if (st.isDirectory()) return null;
+      // ふつうのファイルなら、残っている分より多くは確保しない。
+      if (st.isFile()) length = Math.max(0, Math.min(length, st.size - offset));
+      else if (offset !== 0) return null;
+      const buf = new Uint8Array(length);
+      let n = 0;
+      while (n < length) {
+        const r = readSync(fd, buf, n, length - n, st.isFile() ? offset + n : null);
+        if (r <= 0) break;
+        n += r;
+      }
+      return buf.subarray(0, n);
+    } catch {
+      return null;
+    } finally {
+      if (fd >= 0) closeSync(fd);
+    }
+  },
+  appendFile: (path, bytes) => {
+    try {
+      appendFileSync(path, bytes);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  args: programArgs,
+  eprint: (line) => process.stderr.write(line + '\n'),
 });
 if (typeof exports[fn] !== 'function') {
   console.error(`'${fn}' is not exported; write \`export function ${fn}()\``);

@@ -1,0 +1,177 @@
+// gpu.flags: gpu.submit の印（1 = 検算をしない、2 = 急ぎの列、4 = 提出を見送る）。どの組み合わせでも、
+// gpu.wait / gpu.ready のあとに読んだ結果は、同じ kernel を CPU で実行した結果と同じになる。
+// 結果の語に札（世代）を書く kernel なら、gpu.wait / gpu.ready を呼ばずに札を見て完了を判断できる。
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: true
+
+kernel function score(i: u32, out: mut RacyBuffer<i32>, pos: RacyBuffer<i32>, bias: i32): void {
+  let acc = bias;
+  for (let k: u32 = 0; k < 16; k++) {
+    acc = acc + pos[i * 16 + k] * ((k as i32) - 7) + ((acc >> 3) ^ (k as i32));
+  }
+  out[i] = acc;
+}
+
+kernel function bump(i: u32, out: mut RacyBuffer<i32>): void {
+  out[i] = out[i] * 3 + (i as i32);
+}
+
+// 下位 16 ビットが値、上位 16 ビットが札（1〜65535）。1 つの 32 ビットの語に両方あるので、札が見えた語は正しい。
+kernel function tagged(i: u32, out: mut RacyBuffer<u32>, pos: RacyBuffer<i32>, tag: u32): void {
+  let acc: i32 = 0;
+  for (let k: u32 = 0; k < 16; k++) {
+    acc = acc + pos[i * 16 + k] * ((k as i32) - 7);
+  }
+  out[i] = ((acc as u32) & 65535) | (tag << 16);
+}
+
+function fill(pos: mut RacyBuffer<i32>, round: u32): void {
+  for (let i: u32 = 0; i < pos.length; i++) {
+    pos[i] = ((i * 2654435761 + round * 40503) >> 7) as i32 % 1000;
+  }
+}
+
+function differ(a: RacyBuffer<i32>, b: RacyBuffer<i32>, n: u32): u32 {
+  let bad: u32 = 0;
+  for (let i: u32 = 0; i < n; i++) {
+    if (a[i] != b[i]) {
+      bad += 1;
+    }
+  }
+  return bad;
+}
+
+export function main(): i32 {
+  const n: u32 = 200;
+  let c = new RacyBuffer<i32>(n);
+  let p0 = new RacyBuffer<i32>(n * 16);
+  let o0 = new RacyBuffer<i32>(n);
+
+  // 1. 印の組み合わせ（HOLD を除く）ごとに、頼む → 待つ（または ready を見続ける）→ 比べる。
+  let bad: u32 = 0;
+  for (let f: u32 = 0; f < 4; f++) {
+    const old = gpu.flags(f);
+    for (let round: u32 = 0; round < 50; round++) {
+      fill(mut p0, round + f * 100);
+      const t = gpu.submit(score, n, mut o0, p0, round as i32);
+      if (round % 2 == 0) {
+        gpu.wait(t);
+      } else {
+        while (!gpu.ready(t)) {
+        }
+      }
+      cpu.dispatch(score, n, mut c, p0, round as i32);
+      bad += differ(o0, c, n);
+    }
+    gpu.flags(old);
+  }
+  print(bad);
+
+  // 2. HOLD でためて、最後の HOLD なしの submit で提出する（同じ Buffer に続けて頼む。頼んだ順に実行される）。
+  let g = new RacyBuffer<i32>(n);
+  let h = new RacyBuffer<i32>(n);
+  for (let i: u32 = 0; i < n; i++) {
+    g[i] = i as i32;
+    h[i] = i as i32;
+  }
+  bad = 0;
+  for (let round: u32 = 0; round < 40; round++) {
+    // 偶数の回は急ぎの列、奇数の回は今までの列。どちらも検算なし。
+    const q: u32 = round % 2 == 0 ? 3 : 1;
+    gpu.flags(q | 4);
+    const t1 = gpu.submit(bump, n, mut g);
+    const t2 = gpu.submit(bump, n, mut g);
+    gpu.flags(q);
+    const t3 = gpu.submit(bump, n, mut g);
+    gpu.flags(0);
+    gpu.wait(t3);
+    cpu.dispatch(bump, n, mut h);
+    cpu.dispatch(bump, n, mut h);
+    cpu.dispatch(bump, n, mut h);
+    bad += differ(g, h, n);
+    gpu.wait(t1);
+    gpu.wait(t2);
+  }
+  print(bad);
+
+  // 3. HOLD だけでためたものは、gpu.commit()、または gpu.ready / gpu.wait で提出される（止まらない）。
+  bad = 0;
+  for (let round: u32 = 0; round < 40; round++) {
+    const urgent: u32 = round % 2 == 0 ? 2 : 0;
+    gpu.flags(4 | urgent);
+    const t1 = gpu.submit(bump, n, mut g);
+    gpu.flags(0);
+    if (round % 3 == 0) {
+      gpu.commit();
+      gpu.wait(t1);
+    } else if (round % 3 == 1) {
+      while (!gpu.ready(t1)) {
+      }
+    } else {
+      gpu.wait(t1);
+    }
+    cpu.dispatch(bump, n, mut h);
+    bad += differ(g, h, n);
+  }
+  print(bad);
+
+  // 4. 札で完了を判断する: gpu.ready / gpu.wait を呼ばずに、すべての語の札がそろうまで見続ける。
+  //    券を片付けないまま 3000 件投げても、券の表は完了の印で回収されて止まらない。
+  let t0 = new RacyBuffer<u32>(n);
+  let tc = new RacyBuffer<u32>(n);
+  let a1 = new RacyBuffer<i32>(n);
+  bad = 0;
+  gpu.flags(1 | 2);
+  for (let round: u32 = 0; round < 3000; round++) {
+    const tag: u32 = round % 65535 + 1;
+    fill(mut p0, round);
+    // 補助の仕事（券は捨てる）と、札を書く最後の仕事。
+    gpu.submit(score, n, mut a1, p0, 0);
+    gpu.submit(tagged, n, mut t0, p0, tag);
+    for (let i: u32 = 0; i < n; i++) {
+      while ((t0[i] >> 16) != tag) {
+      }
+    }
+    if (round % 100 == 0) {
+      cpu.dispatch(tagged, n, mut tc, p0, tag);
+      for (let i: u32 = 0; i < n; i++) {
+        if (t0[i] != tc[i]) {
+          bad += 1;
+        }
+      }
+    }
+  }
+  gpu.flags(0);
+  print(bad);
+
+  // 5. 急ぎの列と今までの列に、別々の Buffer を交互に投げる。
+  let o1 = new RacyBuffer<i32>(n);
+  let p1 = new RacyBuffer<i32>(n * 16);
+  bad = 0;
+  for (let round: u32 = 0; round < 100; round++) {
+    fill(mut p0, round * 2);
+    fill(mut p1, round * 2 + 1);
+    gpu.flags(1);
+    const ta = gpu.submit(score, n, mut o0, p0, 7);
+    gpu.flags(3);
+    const tb = gpu.submit(score, n, mut o1, p1, 8);
+    gpu.flags(0);
+    gpu.wait(tb);
+    cpu.dispatch(score, n, mut c, p1, 8);
+    bad += differ(o1, c, n);
+    gpu.wait(ta);
+    cpu.dispatch(score, n, mut c, p0, 7);
+    bad += differ(o0, c, n);
+  }
+  print(bad);
+
+  // 6. gpu.flags は前の値を返す。
+  const was = gpu.flags(5);
+  const now = gpu.flags(was);
+  print(now == 5);
+  return 0;
+}

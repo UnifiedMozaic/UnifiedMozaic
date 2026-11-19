@@ -1,0 +1,6 @@
+// error: not-implemented
+// 定数の配列の要素は整数・f32・f64・bool（とそれらの固定長配列）だけ。
+const NAMES: string[2] = ["a", "b"];
+export function main(): i32 {
+  return 0;
+}

@@ -37,6 +37,9 @@ namespace k_loops {
 namespace k_misc {
 #include "misc.metal"
 }
+namespace k_wide {
+#include "wide.metal"
+}
 
 typedef uint64_t u64;
 
@@ -78,6 +81,12 @@ static int64_t f2i64(float v) {
   if (v >= 9223372036854775808.0f) return INT64_MAX;
   if (v <= -9223372036854775808.0f) return INT64_MIN;
   return (int64_t)v;
+}
+
+static u64 hu64(const std::vector<ulong>& a, size_t n) {
+  u64 h = 0;
+  for (size_t i = 0; i < n; i++) h = h * M + (u64)a[i];
+  return h;
 }
 
 static u64 scaled(float v) {
@@ -206,6 +215,14 @@ int main() {
     p.count = n; p.row = ROW; p.len_out = n; p.len_a = n; p.len_fl = n;
     for (uint i = 0; i < n; i++) um_main(p, out.data(), ia.data(), fs.data(), grid(i));
     printf("%llu\n", (unsigned long long)hi32(out, n));
+  }
+  {
+    using namespace k_wide;
+    std::vector<ulong> out(n);
+    UmParams p{};
+    p.count = n; p.row = ROW; p.len_out = n; p.len_a = n + 64; p.len_b = n; p.p_k = 0x9e3779b97f4a7c15ul;
+    for (uint i = 0; i < n; i++) um_main(p, out.data(), ua.data(), ib.data(), grid(i));
+    printf("%llu\n", (unsigned long long)hu64(out, n));
   }
   return 0;
 }

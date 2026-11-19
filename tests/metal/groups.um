@@ -1,0 +1,238 @@
+// dispatchGroups: グループ（threadgroup）の共有配列・barrier・group.* と、kernel の中のアトミック演算。
+// GPU（gpu.dispatchGroups / gpu.submitGroups）と CPU（cpu.dispatchGroups）の結果が一致することを確かめる。
+// 共有配列での木の形の足し算は、足す順番が CPU と GPU で同じなので、f32 でも一致する。
+// expect: true
+// expect: true
+// expect: true
+// expect: true
+// expect: true
+// expect: true
+// expect: true
+// expect: true
+// expect: true
+// expect: true
+
+const SIZE: u32 = 256;
+
+// グループごとの和（共有配列での木の形の足し算）。結果はグループの番号の場所に、スレッド 0 が書く。
+kernel function groupSum(i: u32, out: mut RacyBuffer<u32>, xs: Buffer<u32>): void {
+  let t: u32[256] = group.shared();
+  const l = group.local();
+  t[l] = xs[i];
+  group.barrier();
+  for (let s = group.size() / 2; s > 0; s = s / 2) {
+    if (l < s) {
+      t[l] = t[l] + t[l + s];
+    }
+    group.barrier();
+  }
+  if (l == 0) {
+    out[group.id()] = t[0];
+  }
+}
+
+// 同じことを f32 で。
+kernel function groupSumF(i: u32, out: mut RacyBuffer<f32>, xs: Buffer<f32>): void {
+  let t: f32[256] = group.shared();
+  const l = group.local();
+  t[l] = xs[i];
+  group.barrier();
+  let s = group.size() / 2;
+  while (s > 0) {
+    if (l < s) {
+      t[l] = t[l] + t[l + s];
+    }
+    group.barrier();
+    s = s / 2;
+  }
+  if (l == 0) {
+    out[group.id()] = t[0];
+  }
+}
+
+// 番号の確かめ: 添字 = グループの番号 × 大きさ + グループ内の番号。
+kernel function ids(i: u32, out: mut Buffer<u32>): void {
+  out[i] = (group.id() * group.size() + group.local()) * 1000 + group.count();
+}
+
+// 共有配列はグループの始めに 0。読んでから barrier のあとで書くので、どのグループでも 0 が読める。
+kernel function zeroed(i: u32, bad: mut RacyBuffer<u32>): void {
+  let t: u32[64] = group.shared();
+  const l = group.local();
+  const seen = t[l];
+  group.barrier();
+  t[l] = 5 + i;
+  if (seen != 0) {
+    bad.fetchAdd(0, 1);
+  }
+}
+
+// barrier をまたぐ変数（スレッドごとの値）と、一様な条件の if の中の barrier。
+kernel function rotate(i: u32, out: mut Buffer<i32>, xs: Buffer<i32>, rounds: u32): void {
+  let t: i32[128] = group.shared();
+  const l = group.local();
+  const n = group.size();
+  let v = xs[i];
+  for (let r: u32 = 0; r < rounds; r++) {
+    t[l] = v;
+    group.barrier();
+    v = t[(l + 1) % n] * 3 - v;
+    if (rounds > 2) {
+      group.barrier();
+    }
+  }
+  out[i] = v;
+}
+
+// アトミック: 数え上げは取りこぼしなく正確。比較交換は、1つの場所に1つだけが勝つ。
+kernel function histogram(i: u32, hist: mut RacyBuffer<u32>, xs: Buffer<u32>): void {
+  hist.fetchAdd(xs[i] % 16, 1);
+}
+kernel function claim(i: u32, slots: mut RacyBuffer<i32>, wins: mut RacyBuffer<u32>): void {
+  const old = slots.compareExchange(i % 32, 0, (i as i32) + 1);
+  if (old == 0) {
+    wins.fetchAdd(0, 1);
+  }
+}
+
+// group.* を使わない kernel も dispatchGroups で実行できる。
+kernel function twice(i: u32, out: mut Buffer<u32>): void {
+  out[i] = i * 2;
+}
+
+function sameU(a: RacyBuffer<u32>, b: RacyBuffer<u32>): bool {
+  for (let k: u32 = 0; k < a.length; k++) {
+    if (a[k] != b[k]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function main(): i32 {
+  const groups: u32 = 300;
+  const n = groups * SIZE;
+  let xs = new Buffer<u32>(n);
+  let xf = new Buffer<f32>(n);
+  for (let k: u32 = 0; k < n; k++) {
+    xs[k] = (k * 2654435761) >> 12;
+    xf[k] = (((k * 40503) % 1000) as f32) * 0.37 - 150.0;
+  }
+
+  // 1. 和: GPU と CPU が一致し、CPU で順に足した値とも一致する（u32 はラップ）。
+  let g1 = new RacyBuffer<u32>(groups);
+  let c1 = new RacyBuffer<u32>(groups);
+  gpu.dispatchGroups(groupSum, groups, SIZE, mut g1, xs);
+  cpu.dispatchGroups(groupSum, groups, SIZE, mut c1, xs);
+  let direct = true;
+  for (let g: u32 = 0; g < groups; g++) {
+    let s: u32 = 0;
+    for (let k: u32 = 0; k < SIZE; k++) {
+      s += xs[g * SIZE + k];
+    }
+    if (s != c1[g]) {
+      direct = false;
+    }
+  }
+  print(sameU(g1, c1) && direct);
+
+  // 2. f32 の和も一致する。
+  let g2 = new RacyBuffer<f32>(groups);
+  let c2 = new RacyBuffer<f32>(groups);
+  gpu.dispatchGroups(groupSumF, groups, SIZE, mut g2, xf);
+  cpu.dispatchGroups(groupSumF, groups, SIZE, mut c2, xf);
+  let fsame = true;
+  for (let g: u32 = 0; g < groups; g++) {
+    if (g2[g] != c2[g]) {
+      fsame = false;
+    }
+  }
+  print(fsame);
+
+  // 3. 番号。大きさ 64 のグループを 7 個。
+  let o3 = new Buffer<u32>(7 * 64);
+  gpu.dispatchGroups(ids, 7, 64, mut o3);
+  let idsOk = true;
+  for (let k: u32 = 0; k < 7 * 64; k++) {
+    if (o3[k] != k * 1000 + 7) {
+      idsOk = false;
+    }
+  }
+  let o3c = new Buffer<u32>(7 * 64);
+  cpu.dispatchGroups(ids, 7, 64, mut o3c);
+  for (let k: u32 = 0; k < 7 * 64; k++) {
+    if (o3c[k] != o3[k]) {
+      idsOk = false;
+    }
+  }
+  print(idsOk);
+
+  // 4. 共有配列の 0 埋め。
+  let bad = new RacyBuffer<u32>(1);
+  gpu.dispatchGroups(zeroed, 50, 64, mut bad);
+  cpu.dispatchGroups(zeroed, 50, 64, mut bad);
+  print(bad[0] == 0);
+
+  // 5. barrier をまたぐ変数。大きさ 128。
+  let xi = new Buffer<i32>(40 * 128);
+  for (let k: u32 = 0; k < xi.length; k++) {
+    xi[k] = ((k * 7919) % 201) as i32 - 100;
+  }
+  let o5 = new Buffer<i32>(40 * 128);
+  let o5c = new Buffer<i32>(40 * 128);
+  gpu.dispatchGroups(rotate, 40, 128, mut o5, xi, 5);
+  cpu.dispatchGroups(rotate, 40, 128, mut o5c, xi, 5);
+  let rot = true;
+  for (let k: u32 = 0; k < o5.length; k++) {
+    if (o5[k] != o5c[k]) {
+      rot = false;
+    }
+  }
+  print(rot);
+
+  // 6. アトミックな数え上げ（普通の dispatch でも使える）。
+  let h = new RacyBuffer<u32>(16);
+  gpu.dispatch(histogram, n, mut h, xs);
+  let want = new RacyBuffer<u32>(16);
+  for (let k: u32 = 0; k < n; k++) {
+    want[xs[k] % 16] = want[xs[k] % 16] + 1;
+  }
+  print(sameU(h, want));
+
+  // 7. 比較交換: 32 個の場所に、それぞれ1つだけが勝つ。
+  let slots = new RacyBuffer<i32>(32);
+  let wins = new RacyBuffer<u32>(1);
+  gpu.dispatch(claim, 10000, mut slots, mut wins);
+  let claimed = true;
+  for (let k: u32 = 0; k < 32; k++) {
+    if (slots[k] == 0 || ((slots[k] - 1) as u32) % 32 != k) {
+      claimed = false;
+    }
+  }
+  print(wins[0] == 32 && claimed);
+
+  // 8. 待たない提出（gpu.submitGroups）。
+  let g8 = new RacyBuffer<u32>(groups);
+  const t = gpu.submitGroups(groupSum, groups, SIZE, mut g8, xs);
+  gpu.wait(t);
+  print(sameU(g8, c1));
+
+  // 9. group.* を使わない kernel を dispatchGroups で。
+  let o9 = new Buffer<u32>(10 * 32);
+  gpu.dispatchGroups(twice, 10, 32, mut o9);
+  let tw = true;
+  for (let k: u32 = 0; k < o9.length; k++) {
+    if (o9[k] != k * 2) {
+      tw = false;
+    }
+  }
+  print(tw);
+
+  // 10. 自動判断（dispatchGroups）でも結果は同じ。
+  let g10 = new RacyBuffer<u32>(groups);
+  for (let r = 0; r < 4; r++) {
+    dispatchGroups(groupSum, groups, SIZE, mut g10, xs);
+  }
+  print(sameU(g10, c1));
+  return 0;
+}

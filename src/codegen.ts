@@ -1,8 +1,9 @@
-import { tyStr } from './ast.ts';
+import { isCollectiveLet, tyStr } from './ast.ts';
 import type { Arg, Expr, FnDecl, Stmt, Sym, Ty } from './ast.ts';
 import { isCopyTy, isPlace, passByPtr, simdInfo } from './checker.ts';
 import type { FnSig, Program } from './checker.ts';
-import { emitWgsl, sizeWords } from './wgsl.ts';
+import { emitWgsl, gpuLayout, has64, WEBGPU_CONST_ARRAY } from './wgsl.ts';
+import { CompileError } from './diag.ts';
 import { emitMsl } from './msl.ts';
 
 export type TargetKind = 'wasm32' | 'native';
@@ -17,6 +18,9 @@ const PANIC_DISPATCH = 6;
 const PANIC_NO_GPU = 7;
 // 8 = スレッドを起こせなかった（ランタイムが um_thread_start の中で停止する）。
 const PANIC_THREAD_IO = 9;
+const PANIC_GROUP = 10;
+/** グループの大きさの上限（Metal の1グループのスレッド数の上限）。 */
+const MAX_GROUP_SIZE = 1024;
 
 // TBAA のタグ（ModuleGen.generate の末尾で定義）。
 // HDR: 可変長配列・Buffer の管理情報（%um.Array のフィールド）の読み書き。
@@ -97,6 +101,7 @@ function planSplit(s: Stmt & { kind: 'for' }): SplitPlan | null {
         return args(e.args);
       case 'dispatch':
         ex(e.count);
+        if (e.group) ex(e.group);
         return args(e.args);
       case 'mcall':
         ex(e.recv);
@@ -267,6 +272,9 @@ function walkExprs(body: Stmt[], visit: (e: Expr) => void): void {
         return ex(e.else);
       case 'call':
         return e.args.forEach((a) => ex(a.expr));
+      case 'mcall':
+        ex(e.recv);
+        return e.args.forEach((a) => ex(a.expr));
       case 'math':
         return e.args.forEach(ex);
       case 'field':
@@ -312,6 +320,111 @@ function walkExprs(body: Stmt[], visit: (e: Expr) => void): void {
     }
   };
   body.forEach(st);
+}
+
+/**
+ * kernel（と、そこから呼ぶ補助の kernel）が 64 ビットの整数を使うか。WGSL には 64 ビットの整数がないので、
+ * そうした kernel は WebGPU では実行せず CPU で実行する（Metal と CPU では使える）。
+ */
+export function kernelUses64(prog: Program, d: FnDecl, seen = new Set<string>()): boolean {
+  if (seen.has(d.name)) return false;
+  seen.add(d.name);
+  if (d.params.some((p) => has64(prog, p.ty!)) || (d.ret && has64(prog, d.ret))) return true;
+  let found = false;
+  const visitStmt = (s: Stmt | undefined): void => {
+    if (!s || found) return;
+    if ((s.kind === 'let' || s.kind === 'forOf') && s.sym && has64(prog, s.sym.ty)) found = true;
+    if (s.kind === 'block') s.body.forEach(visitStmt);
+    else if (s.kind === 'if') {
+      visitStmt(s.then);
+      visitStmt(s.else);
+    } else if (s.kind === 'while' || s.kind === 'forOf') visitStmt(s.body);
+    else if (s.kind === 'for') {
+      visitStmt(s.init);
+      visitStmt(s.body);
+    }
+  };
+  d.body.forEach(visitStmt);
+  if (found) return true;
+  walkExprs(d.body, (e) => {
+    if (found) return;
+    if (e.ty && has64(prog, e.ty)) found = true;
+    else if (e.kind === 'call') {
+      const sig = prog.fns.get(e.callee);
+      if (sig && kernelUses64(prog, sig.decl, seen)) found = true;
+    }
+  });
+  return found;
+}
+
+/** 文が group.barrier() か simdgroup の集計（`const s = group.simdSum(x)` など）を含むか。どちらも CPU では区切りになる。 */
+function hasBarrier(s: Stmt | undefined): boolean {
+  if (!s) return false;
+  switch (s.kind) {
+    case 'let':
+      return isCollectiveLet(s);
+    case 'expr':
+      return s.expr.kind === 'math' && s.expr.fn === 'group.barrier';
+    case 'block':
+      return s.body.some(hasBarrier);
+    case 'if':
+      return hasBarrier(s.then) || hasBarrier(s.else);
+    case 'while':
+      return hasBarrier(s.body);
+    case 'for':
+      return hasBarrier(s.init) || hasBarrier(s.step) || hasBarrier(s.body);
+    case 'forOf':
+      return hasBarrier(s.body);
+    default:
+      return false;
+  }
+}
+
+/** 本体を文の並びとして返す（{ } ならその中身）。 */
+function stmtList(s: Stmt): Stmt[] {
+  return s.kind === 'block' ? s.body : [s];
+}
+
+/**
+ * barrier を使う kernel で、barrier をまたいで生きうる変数（スレッドごとに置き場所が要る）を集める。
+ * 本体の直下と、barrier を含む文の直下で宣言された変数。それ以外（barrier の間の文の内側）は、
+ * 1つのスレッドを続けて実行する間だけ生きるので、普通の変数でよい。
+ */
+function groupLevelSyms(list: Stmt[], out: Sym[]): void {
+  for (const s of list) {
+    if (s.kind === 'let' && !s.sym!.shared) out.push(s.sym!);
+    if (!hasBarrier(s)) continue;
+    switch (s.kind) {
+      case 'block':
+        groupLevelSyms(s.body, out);
+        break;
+      case 'if':
+        groupLevelSyms(stmtList(s.then), out);
+        if (s.else) groupLevelSyms(stmtList(s.else), out);
+        break;
+      case 'while':
+        groupLevelSyms(stmtList(s.body), out);
+        break;
+      case 'for':
+        if (s.init) groupLevelSyms([s.init], out);
+        groupLevelSyms(stmtList(s.body), out);
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+/** kernel の共有配列（本体の直下の `let t: T[N] = group.shared();`）の並びと、合計のバイト数。 */
+export function sharedLayout(d: FnDecl): { offsets: Map<number, number>; bytes: number } {
+  const offsets = new Map<number, number>();
+  let bytes = 0;
+  for (const s of d.body) {
+    if (s.kind !== 'let' || !s.sym?.shared) continue;
+    offsets.set(s.sym.id, bytes);
+    bytes += (s.sym.ty as Ty & { k: 'array' }).len * 4;
+  }
+  return { offsets, bytes };
 }
 
 // ============================================================================
@@ -397,6 +510,7 @@ function collectMutArgs(e: Expr | undefined, out: Set<number>): void {
       return args(e.args);
     case 'dispatch':
       collectMutArgs(e.count, out);
+      if (e.group) collectMutArgs(e.group, out);
       return args(e.args);
     case 'thread':
       return args(e.args);
@@ -531,6 +645,7 @@ function analyzeBounds(d: FnDecl): { safeIndex: Set<Expr>; safeShift: Set<Expr> 
         return typeRange(e.ty!);
       case 'dispatch':
         visit(e.count, facts, blocked);
+        if (e.group) visit(e.group, facts, blocked);
         e.args.forEach((a) => visit(a.expr, facts, blocked));
         return UNBOUNDED;
       case 'thread':
@@ -1025,11 +1140,15 @@ class ModuleGen {
     const offsets = new Map<number, { min: number; max: number }>();
     const locals = affineLocals(d.body, idx);
     walkExprs(d.body, (e) => {
-      if (e.kind !== 'index' || e.base.kind !== 'ident' || e.base.ty!.k !== 'heap') return;
-      const c = indexRange(e.index, idx, locals);
+      // RacyBuffer のアトミック演算（r.fetchAdd(j, v) など）の添字も、検査なし版では切り詰めを省くので数える。
+      const racy = e.kind === 'mcall' && e.key?.startsWith('Racy.') === true;
+      const base = e.kind === 'index' ? e.base : e.kind === 'mcall' && racy ? e.recv : null;
+      const index = e.kind === 'index' ? e.index : e.kind === 'mcall' && racy ? e.args[0].expr : null;
+      if (!base || !index || base.kind !== 'ident' || base.ty!.k !== 'heap') return;
+      const c = indexRange(index, idx, locals);
       if (c === null) return;
-      const o = offsets.get(e.base.sym!.id) ?? { min: 0, max: 0 };
-      offsets.set(e.base.sym!.id, { min: Math.min(o.min, c.min), max: Math.max(o.max, c.max) });
+      const o = offsets.get(base.sym!.id) ?? { min: 0, max: 0 };
+      offsets.set(base.sym!.id, { min: Math.min(o.min, c.min), max: Math.max(o.max, c.max) });
     });
 
     const out = [`define internal void ${fn}(i32 %begin, i32 %end, ptr %ctx) #0 {`, 'entry:'];
@@ -1117,6 +1236,64 @@ class ModuleGen {
     return r;
   }
 
+  /** グループで実行する関数（kernel の名前 → 区間の関数の名前と、引数をまとめた型）。 */
+  groupRanges = new Map<string, { fn: string; ctxTy: string }>();
+
+  /**
+   * dispatchGroups の CPU での実行: グループの番号の区間 [begin, end) について、グループを1つずつ実行する関数を作る。
+   * ctx は { グループの大きさ, グループの数, 引数... }。共有配列はグループごとに 0 で埋めてから渡す。
+   * barrier を使う kernel は、スレッドごとの変数の置き場所（グループの大きさ × 1スレッドぶん）を区間ごとに1回確保する。
+   */
+  groupRangeFn(sig: FnSig, types: string[]): { fn: string; ctxTy: string } {
+    let r = this.groupRanges.get(sig.key);
+    if (r) return r;
+    const d = sig.decl;
+    const fn = `@um.grange.${sig.key}`;
+    const ctxTy = `{ ${['i32', 'i32', ...types].join(', ')} }`;
+    const g = new FnGen(this, d);
+    const body = g.generateGroup();
+    const { bytes } = sharedLayout(d);
+    const usz = this.usz;
+
+    const out = [`define internal void ${fn}(i32 %begin, i32 %end, ptr %ctx) #0 {`, 'entry:'];
+    if (bytes > 0) out.push(`  %sh = alloca [${bytes} x i8], align 16`);
+    out.push(`  %ps = getelementptr inbounds ${ctxTy}, ptr %ctx, i32 0, i32 0`, '  %size = load i32, ptr %ps');
+    out.push(`  %pc = getelementptr inbounds ${ctxTy}, ptr %ctx, i32 0, i32 1`, '  %count = load i32, ptr %pc');
+    types.forEach((t, i) => {
+      out.push(`  %p${i} = getelementptr inbounds ${ctxTy}, ptr %ctx, i32 0, i32 ${i + 2}`);
+      out.push(`  %a${i} = load ${t}, ptr %p${i}`);
+    });
+    let scratch = 'null';
+    if (g.ptTy) {
+      // スレッドごとの変数の置き場所。グループの大きさは 1024 以下なので、大きくてもスタックではなくヒープに置く。
+      // wasm32 では usize が i32 なので、広げる命令は要らない（i32 から i32 への zext は IR の誤り）。
+      out.push(usz === 'i32' ? '  %sz = add i32 %size, 0' : `  %sz = zext i32 %size to ${usz}`);
+      out.push(`  %scr = call ptr @um_alloc(${usz} %sz, ${usz} ptrtoint (ptr getelementptr (${g.ptTy}, ptr null, i32 1) to ${usz}))`);
+      scratch = '%scr';
+    }
+    out.push(
+      '  br label %cond',
+      'cond:',
+      '  %g = phi i32 [ %begin, %entry ], [ %gn, %body ]',
+      '  %more = icmp ult i32 %g, %end',
+      '  br i1 %more, label %body, label %done',
+      'body:',
+    );
+    if (bytes > 0) {
+      this.intrinsics.add('declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)');
+      out.push(`  call void @llvm.memset.p0.i64(ptr align 16 %sh, i8 0, i64 ${bytes}, i1 false)`);
+    }
+    const args = ['i32 %g', 'i32 %size', 'i32 %count', `ptr ${bytes > 0 ? '%sh' : 'null'}`, `ptr ${scratch}`, ...types.map((t, k) => `${t} %a${k}`)];
+    out.push(`  call void ${this.fnName(sig.key)}.group(${args.join(', ')})`, '  %gn = add i32 %g, 1', '  br label %cond', 'done:');
+    if (g.ptTy) out.push('  call void @um_free(ptr %scr)');
+    out.push('  ret void', '}', '');
+    this.rangeFns.push(body, '', ...out);
+
+    r = { fn, ctxTy };
+    this.groupRanges.set(sig.key, r);
+    return r;
+  }
+
   /** f8 / f4 の変換をランタイムに頼んだか（宣言を出すかどうか）。 */
   usesSmall = false;
   smallTables = new Set<number>();
@@ -1155,22 +1332,65 @@ class ModuleGen {
     return g;
   }
 
-  /** kernel を WGSL に変換し、文字列定数として埋め込む。同じ kernel は1回だけ。 */
-  gpuKernel(name: string): { id: number; global: string; bytes: number } {
-    let k = this.gpuKernels.get(name);
+  /** WGSL にできない kernel（定数の配列を使う）。wasm32 では GPU の経路を作らない。 */
+  noWgsl = new Set<string>();
+
+  /** 出力した定数の配列（定数の名前 → グローバルの名前）。 */
+  constArrays = new Map<string, string>();
+
+  /**
+   * 最上位の定数の配列を、読み取り専用のグローバル（LLVM の constant）として出力し、その名前を返す。
+   * 置き場所はプログラムの読み取り専用のデータで、ヒープもコピーも使わない（添字の検査は固定長配列と同じ）。
+   */
+  constArray(sym: Sym): string {
+    const g = sym.global!;
+    let name = this.constArrays.get(g.name);
+    if (!name) {
+      name = `@um.k.${g.name}`;
+      const init = (v: unknown, t: Ty): string => {
+        if (t.k === 'array') return `[${(v as unknown[]).map((x) => `${llTy(t.elem)} ${init(x, t.elem)}`).join(', ')}]`;
+        if (t.k === 'bool') return v ? 'true' : 'false';
+        if (t.k === 'float') return floatConst(v as number, t);
+        return String(v as bigint);
+      };
+      this.globals.push(`${name} = private unnamed_addr constant ${llTy(sym.ty)} ${init(g.value, sym.ty)}, align 16`);
+      this.constArrays.set(g.name, name);
+    }
+    return name;
+  }
+
+  /**
+   * kernel を WGSL / MSL に変換し、文字列定数として埋め込む。同じ kernel は1回だけ。
+   * groups: dispatchGroups 用（グループの番号から添字を作る形）。同じ kernel でも普通の dispatch とは別のシェーダになる。
+   */
+  gpuKernel(name: string, groups = false): { id: number; global: string; bytes: number } | null {
+    const key = groups ? `${name}#groups` : name;
+    let k = this.gpuKernels.get(key);
     if (!k) {
+      if (this.noWgsl.has(name)) return null;
       const decl = this.prog.fns.get(name)!.decl;
       // wasm32 には WGSL、Metal には MSL のソースを埋め込む。実行時にランタイムがコンパイルする。
-      const bytes = Buffer.from(this.gpu === 'metal' ? emitMsl(this.prog, decl) : emitWgsl(this.prog, decl).source, 'utf8');
+      let source: string;
+      try {
+        source = this.gpu === 'metal' ? emitMsl(this.prog, decl, groups) : emitWgsl(this.prog, decl, groups).source;
+      } catch (err) {
+        // WGSL にできない kernel（定数の配列を使う）は、wasm32 では CPU でだけ実行する。
+        if (err instanceof CompileError && err.code === WEBGPU_CONST_ARRAY) {
+          this.noWgsl.add(name);
+          return null;
+        }
+        throw err;
+      }
+      const bytes = Buffer.from(source, 'utf8');
       // 印字できる ASCII 以外と、引用符・バックスラッシュは \XX で書く。
       let text = '';
       for (const b of bytes) {
         text += b >= 0x20 && b < 0x7f && b !== 0x22 && b !== 0x5c ? String.fromCharCode(b) : `\\${b.toString(16).toUpperCase().padStart(2, '0')}`;
       }
-      const global = `@um.shader.${name}`;
+      const global = `@um.shader.${name}${groups ? '.groups' : ''}`;
       this.globals.push(`${global} = private unnamed_addr constant [${bytes.length} x i8] c"${text}"`);
       k = { id: this.gpuKernels.size, global, bytes: bytes.length };
-      this.gpuKernels.set(name, k);
+      this.gpuKernels.set(key, k);
     }
     return k;
   }
@@ -1331,6 +1551,8 @@ class ModuleGen {
         attr = `#${attrId++}`;
         exportAttrs.push(`attributes ${attr} = { ${this.fnAttrs()} "wasm-export-name"="${d.name}" }`);
       }
+      // group.* を使う kernel は普通の関数としては呼べない。CPU では dispatchGroups がグループごとの関数（groupRangeFn）を作る。
+      if (d.isKernel && d.usesGroup) continue;
       bodies.push(new FnGen(this, d).generate(attr));
       bodies.push('');
     }
@@ -1340,13 +1562,15 @@ class ModuleGen {
     if (this.target === 'wasm32') {
       // GPU（WebGPU）での実行。実装は runtime/host.mjs。
       imports.push('i32 um_gpu_available()', 'i32 um_gpu_pick(i32, i32)', 'void um_gpu_dispatch(i32, ptr, i32, i32, ptr, i32, ptr, i32)');
+      imports.push('void um_gpu_group(i32)');
     }
     if (this.gpu === 'metal') {
       // Metal での実行。実装は runtime/metal.m（一緒にリンクする）。
       out.push(`declare ptr @um_alloc_shared(${this.usz}, ${this.usz}) #0`);
       out.push('declare i32 @um_gpu_available() #0', 'declare i32 @um_gpu_pick(i32, i32) #0', 'declare void @um_gpu_dispatch(i32, ptr, i32, i32, ptr, i32, ptr, i32) #0');
-      out.push('declare void @um_gpu_cpu_done(i32, i32) #0', 'declare void @um_gpu_flush() #0');
+      out.push('declare void @um_gpu_cpu_done(i32, i32) #0', 'declare void @um_gpu_flush() #0', 'declare void @um_gpu_group(i32) #0');
       out.push('declare i64 @um_gpu_submit(i32, ptr, i32, i32, ptr, i32, ptr, i32) #0', 'declare i32 @um_gpu_ready(i64) #0', 'declare void @um_gpu_wait(i64) #0');
+      out.push('declare i32 @um_gpu_set_flags(i32) #0', 'declare void @um_gpu_commit() #0', 'declare void @um_gpu_untracked(ptr) #0');
     }
     const importAttrs: string[] = [];
     imports.forEach((sig, i) => {
@@ -1373,6 +1597,9 @@ class ModuleGen {
     // 入出力の組み込み（readLine など）。ネイティブは runtime/native.c、wasm は runtime/wasm_rt.c がホストの関数を呼ぶ。
     out.push('declare i32 @um_read_line(ptr, ptr) #0', 'declare i32 @um_input_ready() #0', 'declare double @um_clock() #0');
     out.push(`declare i32 @um_read_file(ptr, ${this.usz}, ptr, ptr) #0`, `declare i32 @um_write_file(ptr, ${this.usz}, ptr, ${this.usz}) #0`);
+    out.push(`declare i32 @um_file_size(ptr, ${this.usz}, ptr) #0`, `declare i32 @um_read_file_range(ptr, ${this.usz}, i64, i64, ptr, ptr) #0`);
+    out.push(`declare i32 @um_append_file(ptr, ${this.usz}, ptr, ${this.usz}) #0`, 'declare void @um_args(ptr, ptr) #0', `declare void @um_eprint(ptr, ${this.usz}) #0`);
+    if (this.target === 'native') out.push('declare void @um_set_args(i32, ptr) #0');
     // wasm では LLVM が f16 を整数のビット列として変換関数に渡すので、ランタイム（wasm_rt.c）が直接その関数を持つ。
     out.push('declare zeroext i8 @um_f8_enc(double) #0', 'declare zeroext i8 @um_f4_enc(double) #0');
     if (this.usesF16()) out.push(...(this.target === 'native' ? F16_SHIMS : ['declare i16 @um_d2h(i64) #0']));
@@ -1390,7 +1617,9 @@ class ModuleGen {
     // ネイティブではCの main から呼び出す。wasmでは export 名で公開する。
     const main = this.prog.fns.get('main');
     if (this.target === 'native' && main && main.exported && main.params.length === 0) {
-      out.push('define i32 @main() #0 {');
+      // コマンドライン引数は args() のためにランタイムへ渡しておく。
+      out.push('define i32 @main(i32 %argc, ptr %argv) #0 {');
+      out.push('  call void @um_set_args(i32 %argc, ptr %argv)');
       if (main.ret.k === 'int' && main.ret.bits === 32) {
         out.push('  %r = call i32 @um.main()');
         out.push('  ret i32 %r');
@@ -1461,6 +1690,17 @@ class FnGen {
   safeIndex: Set<Expr>;
   /** 値域の解析で「シフト量が必ずビット幅未満」と分かったシフト（シフト検査を省く）。 */
   safeShift: Set<Expr>;
+  /**
+   * グループをまとめて実行する関数（generateGroup）を生成している間の状態。
+   *   lid: いまのスレッドのグループ内の番号（i32 の値）。スレッドを回すループの外では '0'
+   *   next: いまのスレッドの残りを飛ばす先（return）
+   *   perThread: スレッドごとに置き場所を持つ変数 → 1スレッドぶんの塊の中の番号（barrier を使う kernel だけ）
+   */
+  grp: { lid: string; next: string; perThread: Map<number, number> } | null = null;
+  /** スレッドごとの変数を並べた1スレッドぶんの塊の型（LLVM）。barrier を使う kernel だけ。 */
+  ptTy = '';
+  /** simdgroup の集計の let → 引数を入れるスレッドごとの置き場所（塊の中の番号）。 */
+  collSlots = new Map<Stmt, number[]>();
 
   constructor(m: ModuleGen, d: FnDecl) {
     this.m = m;
@@ -1777,6 +2017,374 @@ class FnGen {
     ].join('\n');
   }
 
+  /**
+   * group.* を使う kernel を、グループ1つをまとめて CPU で実行する関数にする（dispatchGroups の CPU の経路）。
+   *   define void @um.K.group(i32 %gid, i32 %gsize, i32 %gcount, ptr %gshared, ptr %gscratch, 引数...)
+   * 本体を barrier で区切り、区切りの間の文を「グループの全スレッドについて順に」実行する（スレッドを回すループ）。
+   * barrier を含む文（if / while / for / { }）はグループで1回だけ実行し、条件はスレッド 0 の値で決める
+   * （型検査の checkGroupBody が、その条件が全スレッドで同じ値になることを確かめている）。
+   * barrier をまたいで生きうる変数は、スレッドごとの置き場所（%gscratch。1スレッドぶんの塊が gsize 個並ぶ）に置く。
+   * barrier を使わない kernel は、本体全体を1つの区切りとして、スレッドを順に最後まで実行する。
+   */
+  generateGroup(): string {
+    const d = this.d;
+    const params = d.params.slice(1).map((p, i) => `${this.m.paramSig(p.mode, p.ty!)} %p${i + 1}`);
+    params.unshift('i32 %gid', 'i32 %gsize', 'i32 %gcount', 'ptr %gshared', 'ptr %gscratch');
+
+    // 共有配列は %gshared の中の決まった位置。
+    for (const [id, off] of sharedLayout(d).offsets) {
+      const p = `%sh${id}`;
+      this.allocas.push(`  ${p} = getelementptr inbounds i8, ptr %gshared, i32 ${off}`);
+      this.vars.set(id, p);
+    }
+
+    const perThread = new Map<number, number>();
+    const ptTys: string[] = [];
+    // 値の引数（添字を含む）は、スレッドごとに書き換えられうるので、スレッドごとの値として持つ。
+    const valueParams = d.params.filter((p) => !(passByPtr(p.mode, p.ty!) && p.mode !== 'own'));
+    if (d.usesBarrier) {
+      const syms: Sym[] = valueParams.map((p) => p.sym!);
+      groupLevelSyms(d.body, syms);
+      for (const sym of syms) {
+        perThread.set(sym.id, ptTys.length);
+        ptTys.push(llTy(sym.ty));
+      }
+      // simdgroup の集計の引数も、スレッドごとの置き場所に入れてから集める（groupStmt の let）。
+      const coll = (list: Stmt[]): void => {
+        for (const x of list) {
+          if (isCollectiveLet(x)) {
+            const init = (x as Stmt & { kind: 'let' }).init as Expr & { kind: 'math' };
+            this.collSlots.set(x, init.args.map((a) => {
+              ptTys.push(llTy(a.ty!));
+              return ptTys.length - 1;
+            }));
+            continue;
+          }
+          if (!hasBarrier(x)) continue;
+          if (x.kind === 'block') coll(x.body);
+          else if (x.kind === 'if') coll([x.then, ...(x.else ? [x.else] : [])]);
+          else if (x.kind === 'while') coll([x.body]);
+          else if (x.kind === 'for') coll([...(x.init ? [x.init] : []), x.body]);
+        }
+      };
+      coll(d.body);
+      this.ptTy = `{ ${ptTys.join(', ')} }`;
+    }
+    this.grp = { lid: '0', next: '', perThread };
+
+    // 借用で受け取る Buffer などは、呼び出し側の置き場所をそのまま使う。値の引数は、スレッドの始めに入れる。
+    d.params.forEach((p, i) => {
+      if (i > 0 && passByPtr(p.mode, p.ty!) && p.mode !== 'own') this.vars.set(p.sym!.id, `%p${i}`);
+    });
+    const scalarSlots = new Map<number, string>();
+    if (!d.usesBarrier) for (const p of valueParams) scalarSlots.set(p.sym!.id, this.alloca(p.ty!));
+    const initParams = () => {
+      d.params.forEach((p, i) => {
+        if (!valueParams.includes(p)) return;
+        const ty = p.ty!;
+        const slot = this.vars.get(p.sym!.id)!;
+        let v: string;
+        if (i === 0) {
+          // 添字 = グループの番号 × 大きさ + グループ内の番号（dispatch の側で u32 に収まることを確かめてある）。
+          const base = this.tmp();
+          v = this.tmp();
+          this.emit(`${base} = mul i32 %gid, %gsize`);
+          this.emit(`${v} = add i32 ${base}, ${this.grp!.lid}`);
+        } else if (passByPtr(p.mode, ty)) {
+          v = this.tmp();
+          this.emit(`${v} = load ${llTy(ty)}, ptr %p${i}`);
+        } else {
+          v = `%p${i}`;
+        }
+        this.emit(`store ${llTy(ty)} ${v}, ptr ${slot}`);
+      });
+    };
+    for (const [id, slot] of scalarSlots) this.vars.set(id, slot);
+    this.atThread0();
+
+    this.scopes.push([]);
+    if (d.usesBarrier) {
+      this.segment(initParams);
+      this.groupStmts(d.body);
+    } else {
+      this.segment(() => {
+        initParams();
+        this.stmts(d.body);
+      });
+    }
+    this.scopes.pop();
+    this.emit('ret void');
+    this.grp = null;
+
+    return [
+      `define internal void ${this.m.fnName(this.m.declKey(d))}.group(${params.join(', ')}) #0 {`,
+      'entry:',
+      ...this.allocas,
+      ...this.lines,
+      '}',
+    ].join('\n');
+  }
+
+  /** スレッドごとの変数を、スレッド 0 の置き場所に向ける（グループで1回だけ評価する条件のため）。 */
+  atThread0(): void {
+    const g = this.grp!;
+    g.lid = '0';
+    for (const [id, k] of g.perThread) this.vars.set(id, this.perThreadPtr(k, '0', true));
+  }
+
+  /** スレッドごとの置き場所。entry: 入口に置く（どこからでも使える）。 */
+  perThreadPtr(k: number, lid: string, entry = false): string {
+    const p = entry ? `%pt${k}` : this.tmp();
+    const line = `${p} = getelementptr inbounds ${this.ptTy}, ptr %gscratch, i32 ${lid}, i32 ${k}`;
+    if (entry) {
+      if (!this.allocas.includes(`  ${line}`)) this.allocas.push(`  ${line}`);
+    } else {
+      this.emit(line);
+    }
+    return p;
+  }
+
+  /** グループの全スレッドについて、body を順に実行するループ（スレッドを回すループ）。 */
+  segment(body: () => void): void {
+    const g = this.grp!;
+    const slot = this.alloca({ k: 'int', bits: 32, signed: false });
+    this.emit(`store i32 0, ptr ${slot}`);
+    const condL = this.newLabel('thr.cond');
+    const bodyL = this.newLabel('thr.body');
+    const nextL = this.newLabel('thr.next');
+    const endL = this.newLabel('thr.end');
+    this.br(condL);
+    this.label(condL);
+    const lid = this.tmp();
+    const more = this.tmp();
+    this.emit(`${lid} = load i32, ptr ${slot}`);
+    this.emit(`${more} = icmp ult i32 ${lid}, %gsize`);
+    this.emit(`br i1 ${more}, label %${bodyL}, label %${endL}`);
+    this.label(bodyL);
+    g.lid = lid;
+    g.next = nextL;
+    for (const [id, k] of g.perThread) this.vars.set(id, this.perThreadPtr(k, lid));
+    body();
+    this.br(nextL);
+    this.label(nextL);
+    const lid2 = this.tmp();
+    const inc = this.tmp();
+    this.emit(`${lid2} = load i32, ptr ${slot}`);
+    this.emit(`${inc} = add i32 ${lid2}, 1`);
+    this.emit(`store i32 ${inc}, ptr ${slot}`);
+    this.br(condL);
+    this.label(endL);
+    g.next = '';
+    // ループの中で求めた置き場所は、ループの外では使えない。
+    this.atThread0();
+  }
+
+  /** グループで実行する文の並び。barrier を含まない文が続く所は、まとめて1つのスレッドを回すループにする。 */
+  groupStmts(list: Stmt[]): void {
+    let run: Stmt[] = [];
+    const flush = () => {
+      if (run.length === 0) return;
+      const r = run;
+      run = [];
+      this.segment(() => this.stmts(r));
+    };
+    for (const s of list) {
+      if (!hasBarrier(s)) {
+        run.push(s);
+        continue;
+      }
+      flush();
+      this.groupStmt(s);
+    }
+    flush();
+  }
+
+  /** barrier を含む文。グループで1回だけ実行する（条件はスレッド 0 の値）。 */
+  groupStmt(s: Stmt): void {
+    if (this.terminated) this.label(this.newLabel('dead'));
+    const cond = (e: Expr) => {
+      this.atThread0();
+      return this.withTemps(() => this.expr(e));
+    };
+    switch (s.kind) {
+      case 'expr':
+        // group.barrier(): 前の区切りの全スレッドが終わってから次の区切りを始めるので、何もしなくてよい。
+        return;
+      case 'let':
+        this.collective(s);
+        return;
+      case 'block':
+        this.groupStmts(s.body);
+        return;
+      case 'if': {
+        const c = cond(s.cond);
+        const thenL = this.newLabel('gthen');
+        const elseL = this.newLabel('gelse');
+        const endL = this.newLabel('gendif');
+        this.emit(`br i1 ${c}, label %${thenL}, label %${elseL}`);
+        this.terminated = true;
+        this.label(thenL);
+        this.groupStmts(stmtList(s.then));
+        this.br(endL);
+        this.label(elseL);
+        if (s.else) this.groupStmts(stmtList(s.else));
+        this.br(endL);
+        this.label(endL);
+        return;
+      }
+      case 'while':
+      case 'for': {
+        if (s.kind === 'for' && s.init) {
+          const init = s.init;
+          this.segment(() => this.stmt(init));
+        }
+        const condL = this.newLabel('gloop.cond');
+        const bodyL = this.newLabel('gloop.body');
+        const endL = this.newLabel('gloop.end');
+        this.br(condL);
+        this.label(condL);
+        const ce = s.cond;
+        if (ce) {
+          const c = cond(ce);
+          this.emit(`br i1 ${c}, label %${bodyL}, label %${endL}`);
+          this.terminated = true;
+        } else {
+          this.br(bodyL);
+        }
+        this.label(bodyL);
+        this.groupStmts(stmtList(s.body));
+        if (s.kind === 'for' && s.step) {
+          const step = s.step;
+          this.segment(() => this.stmt(step));
+        }
+        this.br(condL);
+        this.label(endL);
+        this.atThread0();
+        return;
+      }
+      default:
+        throw new Error(`internal: group statement ${s.kind}`);
+    }
+  }
+
+  /**
+   * simdgroup の集計 `const v = group.simdSum(x)` など。simdgroup はグループの中の連続した 32 スレッド
+   * （最後のものは、グループの大きさが 32 で割り切れなければ短い）。Metal の simd_sum などと同じ。
+   * 区切り 1: 全スレッドの引数をスレッドごとの置き場所に入れる。区切り 2: 各スレッドが、自分の simdgroup の値を集める。
+   * 和は lane の順に足す（Metal の f32 の和は順番が決まっていないので、丸めが違うことがある）。
+   */
+  collective(s: Stmt & { kind: 'let' }): void {
+    const init = s.init as Expr & { kind: 'math' };
+    const slots = this.collSlots.get(s)!;
+    const g = this.grp!;
+    this.segment(() => this.withTemps(() => {
+      init.args.forEach((a, k) => {
+        const v = this.expr(a);
+        this.emit(`store ${llTy(a.ty!)} ${v}, ptr ${this.perThreadPtr(slots[k], g.lid)}`);
+      });
+    }));
+    const ty = s.sym!.ty as Ty & ({ k: 'int' } | { k: 'float' });
+    const lt = llTy(ty);
+    this.segment(() => {
+      const lid = g.lid;
+      const base = this.tmp();
+      const rest = this.tmp();
+      const short = this.tmp();
+      const cnt = this.tmp();
+      this.emit(`${base} = and i32 ${lid}, -32`);
+      this.emit(`${rest} = sub i32 %gsize, ${base}`);
+      this.emit(`${short} = icmp ult i32 ${rest}, 32`);
+      this.emit(`${cnt} = select i1 ${short}, i32 ${rest}, i32 32`);
+      let result: string;
+      if (init.fn === 'group.simdShuffle') {
+        // lane が simdgroup の外なら最後のスレッドに切り詰める。
+        const lane = this.tmp();
+        const lim = this.tmp();
+        const inR = this.tmp();
+        const l = this.tmp();
+        const j = this.tmp();
+        this.emit(`${lane} = load i32, ptr ${this.perThreadPtr(slots[1], lid)}`);
+        this.emit(`${lim} = sub i32 ${cnt}, 1`);
+        this.emit(`${inR} = icmp ult i32 ${lane}, ${cnt}`);
+        this.emit(`${l} = select i1 ${inR}, i32 ${lane}, i32 ${lim}`);
+        this.emit(`${j} = add i32 ${base}, ${l}`);
+        result = this.tmp();
+        this.emit(`${result} = load ${lt}, ptr ${this.perThreadPtr(slots[0], j)}`);
+      } else {
+        const acc = this.alloca(ty);
+        const jslot = this.alloca({ k: 'int', bits: 32, signed: false });
+        const first = this.tmp();
+        const end = this.tmp();
+        const start = this.tmp();
+        this.emit(`${first} = load ${lt}, ptr ${this.perThreadPtr(slots[0], base)}`);
+        this.emit(`store ${lt} ${first}, ptr ${acc}`);
+        this.emit(`${end} = add i32 ${base}, ${cnt}`);
+        this.emit(`${start} = add i32 ${base}, 1`);
+        this.emit(`store i32 ${start}, ptr ${jslot}`);
+        const condL = this.newLabel('simd.cond');
+        const bodyL = this.newLabel('simd.body');
+        const endL = this.newLabel('simd.end');
+        this.br(condL);
+        this.label(condL);
+        const j = this.tmp();
+        const more = this.tmp();
+        this.emit(`${j} = load i32, ptr ${jslot}`);
+        this.emit(`${more} = icmp ult i32 ${j}, ${end}`);
+        this.emit(`br i1 ${more}, label %${bodyL}, label %${endL}`);
+        this.terminated = true;
+        this.label(bodyL);
+        const x = this.tmp();
+        const a = this.tmp();
+        const c = this.tmp();
+        this.emit(`${x} = load ${lt}, ptr ${this.perThreadPtr(slots[0], j)}`);
+        this.emit(`${a} = load ${lt}, ptr ${acc}`);
+        const isF = ty.k === 'float';
+        const sign = ty.k === 'int' && ty.signed ? 's' : 'u';
+        if (init.fn === 'group.simdSum') {
+          this.emit(`${c} = ${isF ? 'fadd' : 'add'} ${lt} ${a}, ${x}`);
+        } else {
+          const op = init.fn === 'group.simdMin' ? 'min' : 'max';
+          const name = isF ? `@llvm.${op}num.f32` : `@llvm.${sign}${op}.i32`;
+          this.m.intrinsics.add(`declare ${lt} ${name}(${lt}, ${lt})`);
+          this.emit(`${c} = call ${lt} ${name}(${lt} ${a}, ${lt} ${x})`);
+        }
+        this.emit(`store ${lt} ${c}, ptr ${acc}`);
+        const j2 = this.tmp();
+        this.emit(`${j2} = add i32 ${j}, 1`);
+        this.emit(`store i32 ${j2}, ptr ${jslot}`);
+        this.br(condL);
+        this.label(endL);
+        result = this.tmp();
+        this.emit(`${result} = load ${lt}, ptr ${acc}`);
+      }
+      this.emit(`store ${lt} ${result}, ptr ${this.vars.get(s.sym!.id)!}`);
+    });
+  }
+
+  /** group.local() など（generateGroup の中だけ）。 */
+  groupMath(e: Expr & { kind: 'math' }): string {
+    const g = this.grp;
+    if (!g) throw new Error(`internal: ${e.fn} outside a group function`);
+    switch (e.fn) {
+      case 'group.simdLane': {
+        const v = this.tmp();
+        this.emit(`${v} = and i32 ${g.lid}, 31`);
+        return v;
+      }
+      case 'group.local':
+        return g.lid;
+      case 'group.id':
+        return '%gid';
+      case 'group.size':
+        return '%gsize';
+      case 'group.count':
+        return '%gcount';
+      case 'group.barrier':
+        return '';
+    }
+    throw new Error(`internal: ${e.fn}`);
+  }
+
   // ---- 文 ----
 
   /** 文の並びを順に生成する。各文に「すぐ次の文」を知らせる（続けて書いた dispatch を1回の提出にまとめるため）。 */
@@ -1799,7 +2407,8 @@ class FnGen {
     const simple = (e: Expr): boolean =>
       e.kind === 'int' || e.kind === 'float' || e.kind === 'bool' || (e.kind === 'ident' && !e.sym?.alias);
     const plain = (e: Expr): boolean =>
-      e.kind === 'dispatch' && e.device !== 'cpu' && !e.async && simple(e.count) && e.args.every((a) => simple(a.expr));
+      e.kind === 'dispatch' && e.device !== 'cpu' && !e.async && simple(e.count) && (!e.group || simple(e.group)) &&
+      e.args.every((a) => simple(a.expr));
     return plain(s) && plain(next.expr);
   }
 
@@ -1823,11 +2432,14 @@ class FnGen {
           this.withTemps(() => this.spawn(s));
           return;
         }
+        // 共有配列はグループの始めに 0 で埋めてある（groupRangeFn）。
+        if (s.sym?.shared) return;
         this.withTemps(() => {
           const ty = s.sym!.ty;
           // 初期値のない宣言はゼロで初期化する。
           const v = s.init ? this.consume(s.init) : 'zeroinitializer';
-          const a = this.alloca(ty);
+          // barrier をまたぐ変数は、スレッドごとの置き場所（segment が向けてある）に入れる。
+          const a = this.grp?.perThread.has(s.sym!.id) ? this.vars.get(s.sym!.id)! : this.alloca(ty);
           this.emit(`store ${llTy(ty)} ${v}, ptr ${a}${isScalar(ty) ? `, !tbaa ${VAL}` : ''}`);
           this.vars.set(s.sym!.id, a);
           this.own(s.sym!.id, a, ty);
@@ -1934,6 +2546,11 @@ class FnGen {
         return;
 
       case 'return': {
+        if (this.grp) {
+          // グループの関数では、いまのスレッドの残りを飛ばす（barrier を使う kernel では return は型検査が禁じている）。
+          this.br(this.grp.next);
+          return;
+        }
         // 戻り値を取り出してから、一時値と、すべてのスコープの変数を解放する。
         const v = s.value ? this.consume(s.value) : '';
         for (const list of [...this.temps].reverse()) {
@@ -2065,7 +2682,8 @@ class FnGen {
    */
   prep(e: Expr): () => string {
     if (e.kind === 'ident') {
-      const p = this.vars.get(e.sym!.id)!;
+      // 最上位の定数の配列は、読み取り専用のグローバルな領域を直接指す。
+      const p = e.sym!.global ? this.m.constArray(e.sym!) : this.vars.get(e.sym!.id)!;
       return () => p;
     }
 
@@ -2706,6 +3324,56 @@ class FnGen {
         const [data, len] = dataParts();
         return flag(`@um_write_file(ptr ${path}, ${usz} ${plen}, ptr ${data}, ${usz} ${len})`);
       }
+      case 'appendFile': {
+        const pathParts = this.heapParts(e.args[0].expr);
+        const dataParts = this.heapParts(e.args[1].expr);
+        const [path, plen] = pathParts();
+        const [data, len] = dataParts();
+        return flag(`@um_append_file(ptr ${path}, ${usz} ${plen}, ptr ${data}, ${usz} ${len})`);
+      }
+      case 'fileSize': {
+        const [path, plen] = this.heapParts(e.args[0].expr)();
+        const slot = `%g${++this.n}`;
+        this.allocas.push(`  ${slot} = alloca i64`);
+        this.emit(`store i64 0, ptr ${slot}`);
+        const ok = this.tmp();
+        this.emit(`${ok} = call i32 @um_file_size(ptr ${path}, ${usz} ${plen}, ptr ${slot})`);
+        const t = llTy(e.ty!);
+        const v = this.tmp();
+        const some = this.tmp();
+        const a = this.tmp();
+        const b = this.tmp();
+        this.emit(`${v} = load i64, ptr ${slot}`);
+        this.emit(`${some} = icmp ne i32 ${ok}, 0`);
+        this.emit(`${a} = insertvalue ${t} undef, i1 ${some}, 0`);
+        this.emit(`${b} = insertvalue ${t} ${a}, i64 ${v}, 1`);
+        return b;
+      }
+      case 'readFileRange': {
+        // 3つの引数を評価し終えてから、名前の場所と長さを読む。
+        const pathParts = this.heapParts(e.args[0].expr);
+        const off = this.expr(e.args[1].expr);
+        const want = this.expr(e.args[2].expr);
+        const [path, plen] = pathParts();
+        const [d, l] = outSlots();
+        const ok = this.tmp();
+        this.emit(`${ok} = call i32 @um_read_file_range(ptr ${path}, ${usz} ${plen}, i64 ${off}, i64 ${want}, ptr ${d}, ptr ${l})`);
+        return optional(ok, d, l);
+      }
+      case 'args': {
+        const [d, l] = outSlots();
+        this.emit(`call void @um_args(ptr ${d}, ptr ${l})`);
+        const data = this.tmp();
+        const len = this.tmp();
+        this.emit(`${data} = load ptr, ptr ${d}`);
+        this.emit(`${len} = load ${usz}, ptr ${l}`);
+        return this.arrayValue(data, len, len);
+      }
+      case 'eprint': {
+        const [data, len] = this.heapParts(e.args[0].expr)();
+        this.emit(`call void @um_eprint(ptr ${data}, ${usz} ${len})`);
+        return '';
+      }
     }
     throw new Error(`internal: builtin ${name}`);
   }
@@ -2792,6 +3460,25 @@ class FnGen {
       this.emit(`${b} = icmp ne i32 ${r}, 0`);
       return b;
     }
+    if (e.callee === '__gpu_flags') {
+      // `gpu.flags(f)`。Metal 以外では印に意味がないので、引数の式だけ評価して 0 を返す。
+      const f = this.expr(e.args[0].expr);
+      if (this.m.gpu !== 'metal') return '0';
+      const r = this.tmp();
+      this.emit(`${r} = call i32 @um_gpu_set_flags(i32 ${f})`);
+      return r;
+    }
+    if (e.callee === '__gpu_untracked') {
+      // `gpu.untracked(b)`。Metal 以外では、引数の式を評価するだけ。
+      const a = e.args[0].expr;
+      const [data] = this.strParts(a, this.expr(a));
+      if (this.m.gpu === 'metal') this.emit(`call void @um_gpu_untracked(ptr ${data})`);
+      return '';
+    }
+    if (e.callee === '__gpu_commit') {
+      if (this.m.gpu === 'metal') this.emit('call void @um_gpu_commit()');
+      return '';
+    }
     if (e.callee === 'print') {
       const a = e.args[0].expr;
       const at = a.ty!;
@@ -2847,7 +3534,32 @@ class FnGen {
   dispatch(e: Expr & { kind: 'dispatch' }): string {
     const sig = this.m.prog.fns.get(e.kernel)!;
     const params = sig.params.slice(1);
-    const n = this.expr(e.count);
+    let n = this.expr(e.count);
+    // dispatchGroups: count はグループの数。全体のスレッド数 n = グループの数 × 大きさ。
+    let groups = '';
+    let size = '';
+    if (e.group) {
+      groups = n;
+      size = this.expr(e.group);
+      const zero = this.tmp();
+      const big = this.tmp();
+      const badSize = this.tmp();
+      this.emit(`${zero} = icmp eq i32 ${size}, 0`);
+      this.emit(`${big} = icmp ugt i32 ${size}, ${MAX_GROUP_SIZE}`);
+      this.emit(`${badSize} = or i1 ${zero}, ${big}`);
+      this.check(badSize, PANIC_GROUP, e.pos.line);
+      const g64 = this.tmp();
+      const s64 = this.tmp();
+      const t64 = this.tmp();
+      const over = this.tmp();
+      this.emit(`${g64} = zext i32 ${groups} to i64`);
+      this.emit(`${s64} = zext i32 ${size} to i64`);
+      this.emit(`${t64} = mul i64 ${g64}, ${s64}`);
+      this.emit(`${over} = icmp ugt i64 ${t64}, 4294967295`);
+      this.check(over, PANIC_GROUP, e.pos.line);
+      n = this.tmp();
+      this.emit(`${n} = trunc i64 ${t64} to i32`);
+    }
     const args = this.prepArgs({ ...sig, params }, e.args).map((a) => a());
 
     // 書き込み先の Buffer は count 個以上の要素を持っていなければならない。
@@ -2882,9 +3594,21 @@ class FnGen {
       this.emit(`store i64 0, ptr ${ticket}`);
     }
     const endL = this.newLabel('dispatch.end');
-    if (this.m.gpu && device !== 'cpu') {
+    // WebGPU（WGSL）には 64 ビットの整数がない。それを使う kernel は、自動の dispatch と gpu.submit では CPU で実行し、
+    // GPU に固定した gpu.dispatch はエラーにする。
+    const no64 = this.m.gpu === 'webgpu' && device !== 'cpu' && kernelUses64(this.m.prog, sig.decl);
+    if (no64 && device === 'gpu') {
+      throw new CompileError('kernel-type', `kernel '${e.kernel}' uses 64-bit integers, which WebGPU does not support`, e.pos,
+        'WGSL has no 64-bit integers: 64-bit kernels run on the GPU only with Metal (native macOS); use `dispatch` (runs on the CPU here) or `cpu.dispatch`');
+    }
+    // WGSL にできない kernel（定数の配列を使う）は、wasm32 では CPU の経路だけを作る。GPU を指定していればエラー。
+    const k = this.m.gpu && device !== 'cpu' && !no64 ? this.m.gpuKernel(e.kernel, !!e.group) : null;
+    if (this.m.gpu && device === 'gpu' && !k && !no64) {
+      throw new CompileError(WEBGPU_CONST_ARRAY, `kernel '${e.kernel}' uses a constant array, which WebGPU (WGSL) does not support`, e.pos,
+        'constant arrays in kernels run on the CPU and on Metal only; on wasm32 use `dispatch` (it runs such a kernel on the CPU) or pass the table in a `Buffer<T>`');
+    }
+    if (k) {
       // wasm32 では GPU（WebGPU）でも実行できる。auto は実行時にランタイムが選び、gpu は GPU がなければ停止する。
-      const k = this.m.gpuKernel(e.kernel);
       const use = this.tmp();
       const yes = this.tmp();
       const gpuL = this.newLabel('dispatch.gpu');
@@ -2908,7 +3632,7 @@ class FnGen {
         this.terminated = true;
       }
       this.label(gpuL);
-      const got = this.gpuDispatch(k, n, params, args, submit);
+      const got = this.gpuDispatch(k, n, params, args, submit, size);
       if (submit) this.emit(`store i64 ${got}, ptr ${ticket}`);
       // Metal は dispatch を積むだけなので、ここで提出して完了を待つ。次の文も dispatch なら待ちをそちらに任せる。
       else if (this.m.gpu === 'metal' && !this.gpuDefer) this.emit('call void @um_gpu_flush()');
@@ -2917,24 +3641,28 @@ class FnGen {
     }
 
     // CPU での実行。引数を1つの塊にまとめ、区間を実行する関数に渡す。
+    // group.* を使う kernel は、グループを単位に実行する（区間はグループの番号。groupRangeFn）。
     const types = args.map((a) => a.slice(0, a.indexOf(' ')));
-    const range = this.m.rangeFn(sig, types);
+    const byGroup = !!e.group && sig.decl.usesGroup === true;
+    const range = byGroup ? this.m.groupRangeFn(sig, types) : this.m.rangeFn(sig, types);
     const ctx = `%g${++this.n}`;
     this.allocas.push(`  ${ctx} = alloca ${range.ctxTy}`);
-    args.forEach((a, i) => {
+    const fields = byGroup ? [`i32 ${size}`, `i32 ${groups}`, ...args] : args;
+    fields.forEach((a, i) => {
       const slot = this.tmp();
       this.emit(`${slot} = getelementptr inbounds ${range.ctxTy}, ptr ${ctx}, i32 0, i32 ${i}`);
       this.emit(`store ${a}, ptr ${slot}`);
     });
+    const items = byGroup ? groups : n;
     if (this.m.target === 'native') {
       // ネイティブではランタイムが区間に分けて、複数のスレッドで実行する。
-      this.emit(`call void @um_parallel_for(ptr ${range.fn}, ptr ${ctx}, i32 ${n})`);
+      this.emit(`call void @um_parallel_for(ptr ${range.fn}, ptr ${ctx}, i32 ${items})`);
     } else {
-      this.emit(`call void ${range.fn}(i32 0, i32 ${n}, ptr ${ctx})`);
+      this.emit(`call void ${range.fn}(i32 0, i32 ${items}, ptr ${ctx})`);
     }
     if (this.m.gpu === 'metal' && e.device === 'auto') {
       // 自動判断のために、CPU で実行し終えたことをランタイムに知らせる（かかった時間を測って次の判断に使う）。
-      this.emit(`call void @um_gpu_cpu_done(i32 ${this.m.gpuKernel(e.kernel).id}, i32 ${n})`);
+      this.emit(`call void @um_gpu_cpu_done(i32 ${this.m.gpuKernel(e.kernel, !!e.group)!.id}, i32 ${n})`);
     }
     this.br(endL);
     this.label(endL);
@@ -3163,26 +3891,45 @@ class FnGen {
   }
 
   /**
-   * GPU での実行をランタイムに頼む。値の引数は 4 バイト単位で隙間なく並べた塊にし、
+   * GPU での実行をランタイムに頼む。値の引数は GPU 側の struct と同じ並び（gpuLayout）の塊にし、
    * Buffer は（データの場所、要素数、要素の大きさ、書き込みの有無）の表にして渡す。
    */
-  gpuDispatch(k: { id: number; global: string; bytes: number }, n: string, params: FnSig['params'], args: string[], submit = false): string {
+  gpuDispatch(k: { id: number; global: string; bytes: number }, n: string, params: FnSig['params'], args: string[], submit = false, group = ''): string {
     const prog = this.m.prog;
     const values = params.map((p, i) => ({ p, arg: args[i] })).filter((x) => x.p.ty.k !== 'heap');
     const buffers = params.map((p, i) => ({ p, arg: args[i] })).filter((x) => x.p.ty.k === 'heap');
-    const words = values.reduce((sum, x) => sum + sizeWords(prog, x.p.ty), 0);
+    // 値の塊は、ランタイムが (2 + Buffer の数) 語の見出し（count、row、各 Buffer の長さ）のすぐ後ろに写す。
+    // GPU 側の引数の struct（UmParams）と同じ並びにするため、各値の位置を見出しを含めた先頭からの境界に揃える
+    // （64 ビットの整数は 8 バイト境界）。末尾も struct 全体の境界まで詰める。
+    const head = (2 + buffers.length) * 4;
+    let pos = head;
+    let maxAlign = 4;
+    const offsets = values.map(({ p }) => {
+      const l = gpuLayout(prog, p.ty);
+      pos = Math.ceil(pos / l.align) * l.align;
+      const at = pos - head;
+      pos += l.size;
+      maxAlign = Math.max(maxAlign, l.align);
+      return at;
+    });
+    pos = Math.ceil(pos / maxAlign) * maxAlign;
+    const bytes = pos - head;
 
     const block = `%g${++this.n}`;
-    this.allocas.push(`  ${block} = alloca [${Math.max(words, 1)} x i32]`);
-    let offset = 0;
-    for (const { p, arg } of values) {
+    this.allocas.push(`  ${block} = alloca [${Math.max(bytes / 4, 1)} x i32], align 8`);
+    if (bytes > values.reduce((sum, x) => sum + gpuLayout(prog, x.p.ty).size, 0)) {
+      // 詰め物の場所も決まった値にする（GPU には写すだけだが、未初期化のメモリを渡さない）。
+      this.m.intrinsics.add('declare void @llvm.memset.p0.i32(ptr, i8, i32, i1)');
+      this.emit(`call void @llvm.memset.p0.i32(ptr ${block}, i8 0, i32 ${bytes}, i1 false)`);
+    }
+    values.forEach(({ p, arg }, vi) => {
       const slot = this.tmp();
-      this.emit(`${slot} = getelementptr inbounds i32, ptr ${block}, i32 ${offset}`);
-      const size = sizeWords(prog, p.ty);
+      this.emit(`${slot} = getelementptr inbounds i8, ptr ${block}, i32 ${offsets[vi]}`);
+      const size = gpuLayout(prog, p.ty).size;
       if (arg.startsWith('ptr ')) {
-        // struct と固定長配列は、CPU 側の並びのまま写す（WGSL 側と同じ並び）。
+        // struct と固定長配列は、CPU 側の並びのまま写す（GPU 側と同じ並び。gpuLayout）。
         this.m.intrinsics.add('declare void @llvm.memcpy.p0.p0.i32(ptr, ptr, i32, i1)');
-        this.emit(`call void @llvm.memcpy.p0.p0.i32(ptr ${slot}, ${arg}, i32 ${size * 4}, i1 false)`);
+        this.emit(`call void @llvm.memcpy.p0.p0.i32(ptr ${slot}, ${arg}, i32 ${size}, i1 false)`);
       } else if (p.ty.k === 'bool') {
         const w = this.tmp();
         this.emit(`${w} = zext ${arg} to i32`);
@@ -3190,8 +3937,7 @@ class FnGen {
       } else {
         this.emit(`store ${arg}, ptr ${slot}`);
       }
-      offset += size;
-    }
+    });
 
     // Buffer の表: 1つにつき4語（データの場所、長さ、1要素のバイト数、書き込むかどうか）。
     // 1語はポインタの幅（wasm32 では 32 ビット、ネイティブでは 64 ビット）。
@@ -3209,7 +3955,7 @@ class FnGen {
       this.emit(`${lp} = getelementptr inbounds %um.Array, ptr ${buf}, i32 0, i32 1`);
       this.emit(`${len} = load ${W}, ptr ${lp}, !tbaa ${HDR}`);
       const et = (p.ty as Ty & { k: 'heap' }).elem;
-      const elemBytes = et.k === 'int' && et.bits < 32 ? et.bits / 8 : sizeWords(prog, et) * 4;
+      const elemBytes = et.k === 'int' && et.bits < 32 ? et.bits / 8 : gpuLayout(prog, et).size;
       // 4語目: 0 = 読むだけ、1 = 自分の添字の要素にだけ書く、2 = どの要素にも書きうる（RacyBuffer）。
       const racy = p.ty.k === 'heap' && p.ty.racy === true;
       [addr, len, String(elemBytes), p.mode === 'mut' ? (racy ? '2' : '1') : '0'].forEach((v, j) => {
@@ -3219,7 +3965,9 @@ class FnGen {
       });
     });
 
-    const call = `(i32 ${k.id}, ptr ${k.global}, i32 ${k.bytes}, i32 ${n}, ptr ${block}, i32 ${words * 4}, ptr ${table}, i32 ${buffers.length})`;
+    const call = `(i32 ${k.id}, ptr ${k.global}, i32 ${k.bytes}, i32 ${n}, ptr ${block}, i32 ${bytes}, ptr ${table}, i32 ${buffers.length})`;
+    // dispatchGroups: グループの大きさを、すぐ次の dispatch / submit に渡す（ランタイムがスレッドごとに覚えて、使ったら消す）。
+    if (group) this.emit(`call void @um_gpu_group(i32 ${group})`);
     if (submit) {
       const t = this.tmp();
       this.emit(`${t} = call i64 @um_gpu_submit${call}`);
@@ -3231,6 +3979,7 @@ class FnGen {
 
   math(e: Expr & { kind: 'math' }): string {
     const ty = e.ty!;
+    if (e.fn.startsWith('group.')) return this.groupMath(e);
     if (e.fn === 'prefetch') return this.prefetch(e);
     if (e.fn.startsWith('simd.')) return this.simd(e);
     if (isSmall(ty) && (e.fn === 'min' || e.fn === 'max')) {

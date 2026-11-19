@@ -1,0 +1,14 @@
+// simdgroup の集計は WebGPU（wasm32）では使えない（Metal と CPU だけ）。
+kernel function k(i: u32, out: mut Buffer<i32>, xs: Buffer<i32>): void {
+  const s = group.simdSum(xs[i]);
+  out[i] = s;
+}
+
+export function main(): i32 {
+  let b = new Buffer<i32>(64);
+  let xs = new Buffer<i32>(64);
+  dispatchGroups(k, 2, 32, mut b, xs);
+  return 0;
+}
+
+// error: kernel-restriction

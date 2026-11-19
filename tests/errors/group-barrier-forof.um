@@ -1,0 +1,18 @@
+// for-of の中には barrier を置けない（添字のループを使う）。
+kernel function k(i: u32, out: mut Buffer<u32>, xs: Buffer<u32>): void {
+  let acc: u32 = 0;
+  for (const x of xs) {
+    acc += x;
+    group.barrier();
+  }
+  out[i] = acc;
+}
+
+export function main(): i32 {
+  let b = new Buffer<u32>(64);
+  let xs = new Buffer<u32>(4);
+  dispatchGroups(k, 2, 32, mut b, xs);
+  return 0;
+}
+
+// error: kernel-restriction

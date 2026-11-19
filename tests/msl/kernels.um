@@ -123,6 +123,20 @@ kernel function misc(i: u32, out: mut Buffer<i32>, a: Buffer<i32>, fl: Buffer<f3
   out[i] = r;
 }
 
+// 64 ビットの整数（MSL の long / ulong）。
+kernel function wide(i: u32, out: mut Buffer<u64>, a: Buffer<u32>, b: Buffer<i32>, k: u64): void {
+  const x = ((a[i] as u64) << 32) | (a[i + 1] as u64);
+  const y = ((b[i] as i64) << 40) - (b[i] as i64);
+  let r = x * k + x / ((i as u64) % 7) + x % ((i as u64) % 5);
+  r = r ^ (x << (i as u64)) ^ (x >> ((i as u64) + 60));
+  r = r + ((y / (b[i] as i64)) as u64) + ((y % 3) as u64) + ((y >> ((i as i64) % 70)) as u64) + ((y << (i as i64)) as u64);
+  r = r + Math.popcount(x) + Math.clz(x >> 3) + Math.ctz(x) + (Math.abs(y) as u64) + Math.min(x, k) + (Math.max(y, -5) as u64);
+  r = r + Math.shl(x, i) + Math.shr(x, (i as i32) - 9) + (Math.shr(y, i + 3) as u64);
+  r = r + (-x) + (~x) + ((x as f32) as u64) / 9 + (((y as f32) as i64) as u64) + ((x as i32) as u64) + (((x >> 2) as i64) as u64);
+  r = r + ((x < k) as u64) + ((y >= 0) as u64) * 2 + (((x as f32) * 0.5) as u64) % 11;
+  out[i] = r + (a[x] as u64) + (a[(i as i64) - 2] as u64);
+}
+
 // 決まった並びの乱数（線形合同法）。harness.cpp にも同じものがある。
 class Rng {
   state: u32;
@@ -149,6 +163,14 @@ function hashU32(a: Buffer<u32>): u64 {
   let h: u64 = 0;
   for (const v of a) {
     h = h * 1000003 + (v as u64);
+  }
+  return h;
+}
+
+function hashU64(a: Buffer<u64>): u64 {
+  let h: u64 = 0;
+  for (const v of a) {
+    h = h * 1000003 + v;
   }
   return h;
 }
@@ -250,5 +272,9 @@ export function main(): i32 {
   let a10 = new Buffer<i32>(n);
   cpu.dispatch(misc, n, mut a10, ia, fs);
   print(hashI32(a10));
+
+  let a11 = new Buffer<u64>(n);
+  cpu.dispatch(wide, n, mut a11, ua, ib, 0x9e3779b97f4a7c15);
+  print(hashU64(a11));
   return 0;
 }

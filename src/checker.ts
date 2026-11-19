@@ -1,6 +1,6 @@
 import { CompileError, CompileErrors } from './diag.ts';
 import type { Pos } from './diag.ts';
-import { displayNames, isAgg, isNumeric, tyEq, tyStr } from './ast.ts';
+import { displayNames, GROUP_COLLECTIVE, isAgg, isCollectiveLet, isNumeric, tyEq, tyStr } from './ast.ts';
 import type { Arg, ClassDecl, ConstDecl, Expr, FnDecl, InterfaceDecl, Mode, Module, Stmt, StructDecl, Sym, Ty, TypeNode } from './ast.ts';
 
 export interface StructInfo {
@@ -83,6 +83,12 @@ function overlaps(a: string[], b: string[]): boolean {
   return true;
 }
 
+/** 最上位の定数の配列か、その要素（行）を指す式か: `T`、`T[i]`、`T[i][j]`。 */
+export function isConstPlace(e: Expr): boolean {
+  if (e.kind === 'ident') return !!e.sym?.global;
+  return e.kind === 'index' && isConstPlace(e.base);
+}
+
 function placeText(e: Expr): string {
   if (e.kind === 'ident') return e.name;
   if (e.kind === 'field') return `${placeText(e.base)}.${e.name}`;
@@ -156,7 +162,7 @@ const TYPE_HINTS: Record<string, [string, string]> = {
   undefined: ['ts-feature', '`undefined` does not exist'],
 };
 
-const BUILTINS = new Set(['print', 'dispatch', 'String']);
+const BUILTINS = new Set(['print', 'dispatch', 'dispatchGroups', 'String']);
 
 // 128 ビットの SIMD のベクトルの型の名前。同じ要素の固定長配列の別名（i16x8 は i16[8] と同じ型）。
 const SIMD_TYPES: Record<string, string> = {
@@ -176,7 +182,7 @@ export function simdInfo(t: Ty | undefined): { elem: Ty & { k: 'int' | 'float' }
  * 入出力の組み込み関数。同じ名前の関数をプログラムが定義していれば、そちらが優先される。
  * 型検査は呼び出しの名前を `__io_名前` に書き換え、コード生成がランタイムの呼び出しにする。kernel の中では使えない。
  */
-const IO_BUILTINS = new Set(['readLine', 'inputReady', 'clock', 'stringFromBytes', 'readFile', 'writeFile']);
+const IO_BUILTINS = new Set(['readLine', 'inputReady', 'clock', 'stringFromBytes', 'readFile', 'writeFile', 'fileSize', 'readFileRange', 'appendFile', 'args', 'eprint']);
 
 /** 最上位の定数。値は最初に使われたとき（遅くとも宣言の収集の終わり）に求める。 */
 interface ConstInfo {
@@ -185,7 +191,8 @@ interface ConstInfo {
   ty?: Ty;
   value?: ConstValue;
 }
-type ConstValue = bigint | number | boolean | string;
+/** 定数の値。固定長配列の定数（`const T: u32[8] = [...]`）は要素の値の配列（入れ子の配列は入れ子のまま）。 */
+type ConstValue = bigint | number | boolean | string | ConstValue[];
 
 /** すでに報告済みの定数の誤りを、使う側でもう一度報告しないための印。 */
 const QUIET = 'const-already-reported';
@@ -209,6 +216,12 @@ function bigToF32(v: bigint): number {
 
 /** 固定長配列と struct が持てる値（数値・bool）の個数の上限。 */
 const MAX_VALUE_SCALARS = 4096;
+
+/**
+ * 最上位の定数の配列（`const T: u64[81] = [...]`）が持てる値の個数の上限。読み取り専用のグローバルな領域に置き、
+ * 添字で読むだけならコピーしないので、値として扱う固定長配列より大きくてよい（コンパイルの時間とメモリの歯止め）。
+ */
+const MAX_CONST_SCALARS = 1 << 22;
 
 /** Math.xxx として呼べる組み込み。float はすべての浮動小数点型、num は整数も受け付ける。 */
 const MATH: Record<string, { argc: number; kind: 'float' | 'num' | 'int' }> = {
@@ -296,6 +309,12 @@ class Checker {
   idxParam: Sym | null = null;
   /** kernel から kernel への呼び出し。再帰の検出に使う。 */
   kernelCalls: { caller: FnDecl; callee: FnDecl; pos: Pos }[] = [];
+  /** dispatch / dispatchGroups の呼び出し。group.* を使う kernel が dispatchGroups で実行されているかを最後に確かめる。 */
+  groupDispatches: { kernel: FnDecl; groups: boolean; pos: Pos }[] = [];
+  /** kernel を普通の関数として呼んでいる所（kernel の中からも外からも）。group.* を使う kernel は呼べない。 */
+  kernelUses: { callee: FnDecl; pos: Pos }[] = [];
+  /** 真の間は、共有配列の名前を読んでよい（添字の土台を検査している間）。 */
+  sharedBase = false;
   ptrBits: 32 | 64;
   usize: Ty;
   /** このターゲットに GPU バックエンドがあるか。 */
@@ -317,13 +336,18 @@ class Checker {
     return isCopyTy(this.structs, t);
   }
 
-  /** kernel の中で値として扱える型: bool / i32 / u32 / f32 と、それらの struct・固定長配列。MSL と WGSL の両方にある範囲。 */
+  /**
+   * kernel の中で値として扱える型: bool / i32 / u32 / i64 / u64 / f32 と、それらの struct・固定長配列。
+   * 64 ビットの整数は CPU と Metal（MSL の long / ulong）だけ。WebGPU（WGSL）には 64 ビットの整数がないので、
+   * それを使う kernel は wasm32 では CPU で実行する（codegen.ts の kernelUses64）。
+   */
   isKernelValue(t: Ty, nested = false): boolean {
     if (t.k === 'bool') return true;
     // 8 / 16 ビットの整数は、単独の値（変数、引数、Buffer の要素）としてだけ使える。
     // struct や固定長配列の中には置けない（WGSL の struct は 4 バイト単位で、並びが CPU と合わないため）。
     if (isSmallInt(t)) return !nested;
-    if (t.k === 'int' || t.k === 'float') return t.bits === 32 && !(t.k === 'int' && t.usize);
+    if (t.k === 'int') return (t.bits === 32 || t.bits === 64) && !t.usize;
+    if (t.k === 'float') return t.bits === 32;
     if (t.k === 'array') return this.isKernelValue(t.elem, true);
     if (t.k === 'struct') {
       const info = this.structs.get(t.name)!;
@@ -371,6 +395,14 @@ class Checker {
   checkValueSize(t: Ty, pos: Pos): void {
     if (t.k !== 'array' && t.k !== 'struct') return;
     const n = this.scalarCount(t);
+    if (this.constTy && t.k === 'array') {
+      // 最上位の定数の配列の型: 値としてコピーしないので上限が大きい（値として使う所は checkExpr が別に確かめる）。
+      if (n > MAX_CONST_SCALARS) {
+        this.err('too-large', `type ${tyStr(t)} holds ${n} values, more than the limit of ${MAX_CONST_SCALARS} for a top-level constant array`, pos,
+          'split the table into several constants, or load it at run time into a `Buffer<T>` / `T[]`');
+      }
+      return;
+    }
     if (n > MAX_VALUE_SCALARS) {
       this.err('too-large', `type ${tyStr(t)} holds ${n} values, more than the limit of ${MAX_VALUE_SCALARS} for a fixed-length array or struct`, pos,
         'fixed-length arrays and structs are copied by value; for large data use a growable array (`T[]`, e.g. `new Array<T>(n)`) or a `Buffer<T>`');
@@ -381,7 +413,7 @@ class Checker {
   checkElem(t: Ty, pos: Pos): void {
     this.checkValueSize(t, pos);
     if (t.k === 'heap') this.checkValueSize(t.elem, pos);
-    // RacyBuffer の要素は1命令でちぎれずに読み書きできる型だけ。64 ビットの整数は kernel の外でだけ使える（checkKernelSignature）。
+    // RacyBuffer の要素は1命令でちぎれずに読み書きできる型だけ。
     const racyOk = (e: Ty) => (e.k === 'int' && !e.usize) || (e.k === 'float' && e.bits === 32);
     if (t.k === 'heap' && t.racy && !racyOk(t.elem)) {
       this.err('kernel-type', `'${tyStr(t.elem)}' cannot be an element of a RacyBuffer`, pos,
@@ -389,7 +421,7 @@ class Checker {
     }
     if (t.k === 'heap' && t.buffer && !t.racy && !this.isShareable(t.elem)) {
       this.err('kernel-type', `'${tyStr(t.elem)}' cannot be an element of a Buffer`, pos,
-        'Buffer elements are shared with the GPU: use i8, u8, i16, u16, i32, u32, f32, or a struct / fixed-length array of i32, u32 and f32');
+        'Buffer elements are shared with the GPU: use i8, u8, i16, u16, i32, u32, i64, u64, f32, or a struct / fixed-length array of i32, u32, i64, u64 and f32');
     }
     if (t.k === 'array' || t.k === 'heap') {
       // 可変長配列は、ヒープを持つ要素（文字列、配列、それらを持つ struct）を所有できる。固定長配列はまだできない。
@@ -656,7 +688,7 @@ class Checker {
     }
     c.state = 'busy';
     // 関数の検査の途中で呼ばれることがあるので、検査中の状態を退避する。
-    const saved = { scopes: this.scopes, file: this.curFile, kernel: this.inKernel, ctor: this.ctorInit, target: this.assignTarget, narrowed: this.narrowed };
+    const saved = { scopes: this.scopes, file: this.curFile, kernel: this.inKernel, ctor: this.ctorInit, target: this.assignTarget, narrowed: this.narrowed, init: this.constInit };
     this.scopes = [new Map()];
     this.curFile = d.file ?? 0;
     this.inKernel = false;
@@ -664,14 +696,25 @@ class Checker {
     this.assignTarget = null;
     this.narrowed = new Set();
     try {
-      const ty = this.resolve(d.tyNode);
-      const okTy = ty.k === 'int' || ty.k === 'bool' || (ty.k === 'float' && ty.bits >= 32) || isStr(ty);
+      this.constTy = true;
+      let ty: Ty;
+      try {
+        ty = this.resolve(d.tyNode);
+      } finally {
+        this.constTy = false;
+      }
+      let leaf = ty;
+      while (leaf.k === 'array') leaf = leaf.elem;
+      const scalarOk = leaf.k === 'int' || leaf.k === 'bool' || (leaf.k === 'float' && leaf.bits >= 32);
+      const okTy = scalarOk || (isStr(ty) && leaf === ty);
       if (!okTy) {
         this.err('not-implemented', `a top-level constant of type ${tyStr(ty)} is not implemented yet`, d.pos,
-          ty.k === 'float' ? 'declare it as `f32` and convert where it is used (`X as f16`)'
-            : 'top-level constants can be integers, `f32`, `f64`, `bool` or `string`; build other values in a function that returns them');
+          leaf.k === 'float' ? 'declare it as `f32` and convert where it is used (`X as f16`)'
+            : leaf.k === 'heap' && !isStr(leaf) ? `a constant table must have a fixed length: write \`${tyStr(leaf.elem)}[N]\` (e.g. \`const T: i32[3] = [1, 2, 3];\`)`
+            : 'top-level constants can be integers, `f32`, `f64`, `bool`, `string`, or fixed-length arrays (`T[N]`, `T[N][M]`) of integers, `f32`, `f64` and `bool`; build other values in a function that returns them');
       }
       this.constShape(d.init);
+      this.constInit = true;
       this.expect(d.init, ty);
       c.value = this.constEval(d.init);
       c.ty = ty;
@@ -686,8 +729,27 @@ class Checker {
       this.ctorInit = saved.ctor;
       this.assignTarget = saved.target;
       this.narrowed = saved.narrowed;
+      this.constInit = saved.init;
     }
     return c;
+  }
+
+  /** 定数の型を求めている途中か（配列の大きさの上限を、定数の配列のものにする）。 */
+  constTy = false;
+  /** 定数の初期化の式を検査している途中か（定数の配列を値として使っても大きさを問わない）。 */
+  constInit = false;
+  /** 添字の対象になっている式（`T[i]` の `T`）。定数の配列は、ここではコピーせずに読むので大きさを問わない。 */
+  constIndexBases = new WeakSet<Expr>();
+  /** 定数の配列を指す変数（定数ごとに1つ。コード生成は読み取り専用のグローバルな領域にする）。 */
+  constSyms = new Map<string, Sym>();
+
+  constSym(c: ConstInfo): Sym {
+    let s = this.constSyms.get(c.decl.name);
+    if (!s) {
+      s = { id: this.nextSym++, name: c.decl.name, ty: c.ty!, mutable: false, owned: false, loopDepth: 0, global: { name: c.decl.name, value: c.value } };
+      this.constSyms.set(c.decl.name, s);
+    }
+    return s;
   }
 
   constOrdering = false;
@@ -707,6 +769,8 @@ class Checker {
           if (this.consts.has(e.name)) out.push(e.name);
         } else if (e.kind === 'unary' || e.kind === 'cast') todo.push(e.expr);
         else if (e.kind === 'binary') todo.push(e.right, e.left);
+        else if (e.kind === 'arrayLit') todo.push(...e.elems);
+        else if (e.kind === 'index') todo.push(e.index, e.base);
       }
       return out;
     };
@@ -745,7 +809,7 @@ class Checker {
 
   /** 定数の初期化に書ける形かどうかを確かめる。 */
   constShape(e: Expr): void {
-    const hint = 'a top-level constant may use literals, other top-level constants, operators, `as` and parentheses; compute anything else inside a function';
+    const hint = 'a top-level constant may use literals, array literals, other top-level constants (and their elements `T[i]`), operators, `as` and parentheses; compute anything else inside a function';
     switch (e.kind) {
       case 'int':
       case 'float':
@@ -764,9 +828,17 @@ class Checker {
         if (e.op === '??') break;
         this.constShape(e.left);
         return this.constShape(e.right);
+      case 'arrayLit':
+        // 固定長配列の定数の要素（入れ子の配列も可）。可変長配列の定数はない（型の検査が弾く）。
+        for (const x of e.elems) this.constShape(x);
+        return;
+      case 'index':
+        // 定数の配列の要素: `T[3]`、`T[N - 1][0]`。
+        this.constShape(e.base);
+        return this.constShape(e.index);
     }
     const what = e.kind === 'call' || e.kind === 'mcall' || e.kind === 'new' || e.kind === 'newArray' ? 'a call'
-      : e.kind === 'arrayLit' ? 'an array literal' : e.kind === 'object' ? 'an object literal' : e.kind === 'cond' ? '`? :`'
+      : e.kind === 'object' ? 'an object literal' : e.kind === 'cond' ? '`? :`'
       : e.kind === 'null' ? '`null`' : 'this expression';
     this.err('const-expr', `${what} cannot be used in a top-level constant`, e.pos, hint);
   }
@@ -774,6 +846,21 @@ class Checker {
   /** 型検査を終えた定数式の値を求める。意味は生成コード（kernel でない関数）と同じ。 */
   constEval(e: Expr): ConstValue {
     const ty = e.ty!;
+    if (e.kind === 'arrayLit') return e.elems.map((x) => this.constEval(x));
+    if (e.kind === 'ident') {
+      // 定数の配列（ほかの定数はリテラルに置き換え済み）。値は共有せず、写しを返す。
+      const g = e.sym?.global;
+      if (!g) throw new Error(`internal: constant expression ident ${e.name}`);
+      return structuredClone(g.value as ConstValue[]);
+    }
+    if (e.kind === 'index') {
+      const base = this.constEval(e.base) as ConstValue[];
+      const i = this.constEval(e.index) as bigint;
+      if (i < 0n || i >= BigInt(base.length)) {
+        this.err('index-range', `index ${i} is out of bounds for ${tyStr(e.base.ty!)} in a top-level constant`, e.index.pos);
+      }
+      return base[Number(i)];
+    }
     if (ty.k === 'float' && ty.bits < 32) {
       this.err('not-implemented', `${tyStr(ty)} cannot be used in a top-level constant yet`, e.pos, 'compute with `f32` and convert where the constant is used');
     }
@@ -1264,7 +1351,7 @@ class Checker {
   }
 
   checkKernelSignature(d: FnDecl): void {
-    const hint = 'kernel functions run on the GPU too: use bool, i32, u32, f32, structs / fixed-length arrays of those, and Buffer<T>';
+    const hint = 'kernel functions run on the GPU too: use bool, i32, u32, i64, u64, f32, structs / fixed-length arrays of those, and Buffer<T>';
     let writes = false;
     for (const p of d.params) {
       const ty = p.ty!;
@@ -1273,10 +1360,6 @@ class Checker {
         this.err('kernel-type', `parameter '${p.name}' has type ${tyStr(ty)}, which is not available in a kernel function`, p.pos, hint);
       }
       if (p.mode === 'own') this.err('kernel-restriction', 'a kernel function cannot take ownership (`own`)', p.pos);
-      if (ty.k === 'heap' && ty.racy && ty.elem.k === 'int' && ty.elem.bits === 64) {
-        this.err('kernel-type', `parameter '${p.name}' is a ${tyStr(ty)}, which a kernel cannot take`, p.pos,
-          '64-bit atomics are missing on many GPUs (and WGSL has no 64-bit integers); split each value into two u32 elements');
-      }
       if (p.mode === 'mut' && !isBuffer) {
         this.err('kernel-restriction', `parameter '${p.name}' is \`mut\`, but a kernel can only write to a Buffer`, p.pos,
           'pass a `mut Buffer<T>` and write the result to `buf[i]`');
@@ -1374,6 +1457,7 @@ class Checker {
     this.scopes.push(new Map());
     for (const s of d.body) this.checkStmt(s);
     this.scopes.pop();
+    if (d.isKernel && d.usesGroup) this.checkGroupBody(d);
     if (this.ctorInit) {
       const missing = this.structs.get(d.cls!)!.fields.filter((f) => !this.ctorInit!.has(f.name)).map((f) => f.name);
       this.ctorInit = null;
@@ -1728,6 +1812,12 @@ class Checker {
           this.checkSpawn(s);
           return;
         }
+        if (s.init && this.isGroupCall(s.init, 'shared')) {
+          this.checkShared(s);
+          return;
+        }
+        // simdgroup の集計（group.simdSum など）は、let / const の初期化式としてだけ書ける。
+        if (s.init && this.isGroupCall(s.init) && GROUP_COLLECTIVE.has(s.init.name)) this.collectiveInit = s.init;
         let ty: Ty;
         if (!s.init) {
           // `let x: T;` はゼロで初期化する。コンストラクタを飛ばすことになる class と、ヒープを持つ型は除く。
@@ -1965,6 +2055,10 @@ class Checker {
           ? 'threads read it until they are joined; start the threads in an inner block `{ ... }` and change it after that block (a `RacyBuffer` element can be written at any time)'
           : 'collect the changes in another variable and apply them after the loop, or use an index loop');
     }
+    if (sym?.global) {
+      this.err('immutable', `cannot ${verb} '${placeText(place)}' because '${sym.name}' is a top-level constant`, place.pos,
+        `a constant array is read-only data; copy it into a variable first (\`let t: ${tyStr(sym.ty)} = ${sym.name};\`) or keep the table in a \`let\` / \`Buffer\``);
+    }
     if (sym && !sym.mutable) {
       this.err('immutable', `cannot ${verb} '${sym.name}' because it is not mutable`, place.pos,
         sym.param ? `declare the parameter as \`${sym.name}: mut ${tyStr(sym.ty)}\` and pass \`mut ...\` at the call site`
@@ -2012,14 +2106,21 @@ class Checker {
     const t = this.infer(e, want);
     e.ty = t;
     // 型注釈を通らずに推論された配列の型（配列リテラルなど）にも、要素と大きさの制限を適用する。
-    if (t.k === 'array' || t.k === 'heap') this.checkElem(t, e.pos);
+    // 最上位の定数の配列（とその行）は、添字を付けて読む所と定数の初期化の中では大きさを問わない
+    // （グローバルな領域を直接読み、コピーしない）。値として使う所（変数に入れる、引数に渡す）だけ普通の上限を当てる。
+    if (t.k === 'array' && (this.constInit || (this.constIndexBases.has(e) && isConstPlace(e)))) {
+      // 要素の型は宣言のときに確かめてある。
+    } else if (t.k === 'array' && isConstPlace(e) && this.scalarCount(t) > MAX_VALUE_SCALARS) {
+      this.err('too-large', `constant array ${placeText(e)} holds ${this.scalarCount(t)} values, too many to copy as a value (the limit is ${MAX_VALUE_SCALARS})`, e.pos,
+        `read its elements with an index instead, e.g. \`${placeText(e)}[i]\``);
+    } else if (t.k === 'array' || t.k === 'heap') this.checkElem(t, e.pos);
     if (this.inKernel) this.checkSmallInKernel(e, t);
     if (this.inKernel && t.k !== 'void' && !this.isKernelValue(t)) {
       // Buffer そのものは引数の名前としてだけ現れてよい（添字や length の対象）。
       const bufferParam = t.k === 'heap' && !!t.buffer && e.kind === 'ident';
       if (!bufferParam) {
         this.err('kernel-type', `type ${tyStr(t)} is not available in a kernel function`, e.pos,
-          'kernel functions run on the GPU too: use bool, i32, u32, f32 and structs / fixed-length arrays of those (convert with `as`)');
+          'kernel functions run on the GPU too: use bool, i32, u32, i64, u64, f32 and structs / fixed-length arrays of those (convert with `as`)');
       }
     }
     return t;
@@ -2102,9 +2203,15 @@ class Checker {
           this.err('unknown-name', '`this` is only available inside a class', e.pos);
         }
         if (!sym && this.consts.has(e.name)) {
-          // 最上位の定数: コンパイル時に求めた値（型の決まったリテラル）に置き換える。
           this.visible(e.name, e.pos);
-          this.rewrite(e, this.constLiteral(this.constInfo(e.name), e.pos));
+          const c = this.constInfo(e.name);
+          if (c.ty!.k === 'array') {
+            // 定数の配列: 読み取り専用のグローバルな領域を指す名前として残す（使う所ごとに値を複製しない）。
+            e.sym = this.constSym(c);
+            return c.ty!;
+          }
+          // 最上位の定数: コンパイル時に求めた値（型の決まったリテラル）に置き換える。
+          this.rewrite(e, this.constLiteral(c, e.pos));
           return this.infer(e, want);
         }
         if (sym && e.name === 'this' && this.ctorInit) {
@@ -2122,6 +2229,11 @@ class Checker {
             : this.fns.has(e.name) ? `'${e.name}' is a function; call it with \`${e.name}(...)\`` : undefined;
           this.err('unknown-name', `unknown name '${e.name}'`, e.pos, hint);
         }
+        if (sym?.shared && !this.sharedBase) {
+          this.err('kernel-restriction', `'${e.name}' is a group shared array, so it can only be indexed (\`${e.name}[j]\`)`, e.pos,
+            'read and write single elements; copy the elements you need into a local variable');
+        }
+        this.sharedBase = false;
         if (sym.thread && this.joinArg !== e) {
           this.err('thread', `'${e.name}' is a thread handle; it can only be passed to \`thread.join(${e.name})\``, e.pos,
             'a handle stays in the `const` that started the thread and is joined at the end of its block; to start many threads, use `thread.spawnEach(f, own items, ...)`');
@@ -2287,7 +2399,10 @@ class Checker {
       }
 
       case 'index': {
+        this.constIndexBases.add(e.base);
+        this.sharedBase = e.base.kind === 'ident';
         const bt = this.checkExpr(e.base);
+        this.sharedBase = false;
         if (bt.k !== 'array' && bt.k !== 'heap') this.err('type-mismatch', `${tyStr(bt)} cannot be indexed`, e.pos);
         const beforeIndex = new Set(this.moved);
         const it = this.checkExpr(e.index);
@@ -2535,6 +2650,7 @@ class Checker {
 
   inferCall(e: Expr & { kind: 'call' }, want?: Ty): Ty {
     if (e.callee === 'dispatch' && !this.fns.has('dispatch')) return this.inferDispatch(e, e.args, 'auto');
+    if (e.callee === 'dispatchGroups' && !this.fns.has('dispatchGroups')) return this.inferDispatch(e, e.args, 'auto', false, true);
     if (e.callee === 'print') {
       this.noKernel('`print`', e.pos);
       if (e.args.length !== 1) this.err('arg-count', '`print` takes exactly one argument', e.pos);
@@ -2578,6 +2694,7 @@ class Checker {
       }
       this.kernelCalls.push({ caller: this.curFn, callee: sig.decl, pos: e.pos });
     }
+    if (sig.decl.isKernel) this.kernelUses.push({ callee: sig.decl, pos: e.pos });
     this.checkArgs(sig, e.args, e.pos);
     return sig.ret;
   }
@@ -2590,6 +2707,11 @@ class Checker {
    *   stringFromBytes(bytes: u8[]): string バイト列を写した新しい文字列。
    *   readFile(path: string): u8[] | null  ファイル全体。読めなければ null。
    *   writeFile(path: string, bytes: u8[]): bool
+   *   fileSize(path: string): i64 | null  ふつうのファイルの大きさ。
+   *   readFileRange(path: string, offset: i64, length: i64): u8[] | null  offset から最大 length バイト。
+   *   appendFile(path: string, bytes: u8[]): bool  終わりに書き足す（なければ作る）。
+   *   args(): string[]                     コマンドライン引数（プログラム名を除く）。
+   *   eprint(text: string): void           標準エラー出力に1行。
    * 引数は借りるだけ。結果は呼び出した側が所有する新しい値。
    */
   inferIo(e: Expr & { kind: 'call' }, name: string): Ty {
@@ -2602,6 +2724,11 @@ class Checker {
       stringFromBytes: { params: [['bytes', bytes]], ret: STR },
       readFile: { params: [['path', STR]], ret: this.optionalOf(bytes, e.pos) },
       writeFile: { params: [['path', STR], ['bytes', bytes]], ret: BOOL },
+      fileSize: { params: [['path', STR]], ret: this.optionalOf(I64, e.pos) },
+      readFileRange: { params: [['path', STR], ['offset', I64], ['length', I64]], ret: this.optionalOf(bytes, e.pos) },
+      appendFile: { params: [['path', STR], ['bytes', bytes]], ret: BOOL },
+      args: { params: [], ret: { k: 'heap', elem: STR } },
+      eprint: { params: [['text', STR]], ret: VOID },
     };
     const shape = shapes[name];
     const decl: FnDecl = { kind: 'fn', name, exported: false, params: [], body: [], pos: e.pos };
@@ -2615,8 +2742,12 @@ class Checker {
    * `dispatch(kernel, count, ...args)`: kernel を添字 0 から count 未満について実行する。
    * 式の節を dispatch に書き換える。
    */
-  inferDispatch(e: Expr, args: Arg[], device: 'auto' | 'cpu' | 'gpu', submit = false): Ty {
+  inferDispatch(e: Expr, args: Arg[], device: 'auto' | 'cpu' | 'gpu', submit = false, groups = false): Ty {
     this.noKernel(submit ? '`gpu.submit`' : '`dispatch`', e.pos);
+    if (groups && args.length < 3) {
+      this.err('arg-count', '`dispatchGroups` needs a kernel, the number of groups and the group size', e.pos,
+        'e.g. `dispatchGroups(reduce, n / 256, 256, mut out, xs)` runs n / 256 groups of 256 threads');
+    }
     if (device === 'gpu' && !this.gpu && !submit) {
       this.err('not-implemented', '`gpu.dispatch` is not implemented for this target yet', e.pos,
         'the GPU backends are Metal (build natively on a Mac with UM_METAL=1) and WebGPU (wasm32); otherwise use `dispatch(...)` (automatic) or `cpu.dispatch(...)`');
@@ -2638,7 +2769,17 @@ class Checker {
     }
     if (args[1].mode !== 'none') this.err('arg-mode', 'the element count is passed by value', args[1].expr.pos);
     this.expect(args[1].expr, U32);
-    const rest = args.slice(2);
+    if (groups) {
+      if (args[2].mode !== 'none') this.err('arg-mode', 'the group size is passed by value', args[2].expr.pos);
+      this.expect(args[2].expr, U32);
+      const g = args[2].expr;
+      if (g.kind === 'int' && (g.value < 1n || g.value > 1024n)) {
+        this.err('kernel-restriction', `the group size must be 1 to 1024, not ${g.value}`, g.pos,
+          'a group runs on one GPU core; use 64 to 256 threads (WebGPU guarantees 256, Metal allows up to 1024)');
+      }
+    }
+    const rest = args.slice(groups ? 3 : 2);
+    this.groupDispatches.push({ kernel: sig.decl, groups, pos: k.pos });
     this.checkArgs({ ...sig, params: sig.params.slice(1) }, rest, e.pos, undefined, true);
     for (const p of sig.params.slice(1)) {
       // 値の引数は 4 バイト単位で GPU に渡すので、8 / 16 ビットの整数は直接は渡さない。
@@ -2676,6 +2817,7 @@ class Checker {
     node.args = rest;
     node.device = device;
     if (submit) node.async = true;
+    if (groups) (node as unknown as { group: Expr }).group = args[2].expr;
     return submit ? U64 : VOID;
   }
 
@@ -3055,6 +3197,13 @@ class Checker {
     if (e.recv.kind === 'ident' && (e.recv.name === 'cpu' || e.recv.name === 'gpu') && e.name === 'dispatch' && !this.lookup(e.recv.name)) {
       return this.inferDispatch(e, e.args, e.recv.name);
     }
+    if (e.recv.kind === 'ident' && (e.recv.name === 'cpu' || e.recv.name === 'gpu') && e.name === 'dispatchGroups' && !this.lookup(e.recv.name)) {
+      return this.inferDispatch(e, e.args, e.recv.name, false, true);
+    }
+    if (e.recv.kind === 'ident' && e.recv.name === 'gpu' && e.name === 'submitGroups' && !this.lookup('gpu')) {
+      return this.inferDispatch(e, e.args, 'gpu', true, true);
+    }
+    if (this.isGroupCall(e)) return this.inferGroup(e);
     // `gpu.submit(kernel, count, ...)`: 終わるのを待たずに実行を頼み、券を返す。
     // `gpu.ready(t)`: 券 t の仕事が終わって結果が読めるなら true。`gpu.wait(t)`: 終わるまで待つ。
     if (e.recv.kind === 'ident' && e.recv.name === 'gpu' && !this.lookup('gpu') && (e.name === 'submit' || e.name === 'ready' || e.name === 'wait')) {
@@ -3070,12 +3219,55 @@ class Checker {
       node.callee = e.name === 'ready' ? '__gpu_ready' : '__gpu_wait';
       return e.name === 'ready' ? BOOL : VOID;
     }
+    // `gpu.flags(f)`: このスレッドの、このあとの `gpu.submit` に付ける印を f にし、前の値を返す
+    // （1 = 検算をしない、2 = 急ぎの列、4 = 提出を見送る。README の gpu.submit を参照）。
+    // `gpu.commit()`: 見送ってためてある提出を、いま GPU に渡す。どちらも Metal 以外では何もしない。
+    if (e.recv.kind === 'ident' && e.recv.name === 'gpu' && !this.lookup('gpu') && (e.name === 'flags' || e.name === 'commit')) {
+      this.noKernel(`\`gpu.${e.name}\``, e.pos);
+      const node = e as unknown as { kind: string; callee: string; args: Arg[] };
+      if (e.name === 'commit') {
+        if (e.args.length !== 0) this.err('arg-count', '`gpu.commit` takes no arguments', e.pos);
+        node.kind = 'call';
+        node.callee = '__gpu_commit';
+        return VOID;
+      }
+      if (e.args.length !== 1) {
+        this.err('arg-count', '`gpu.flags` takes exactly one argument (the flags for the following `gpu.submit` calls)', e.pos,
+          'pass the flags as a u32: 1 = no checksum, 2 = urgent queue, 4 = hold the commit (0 = the default behaviour)');
+      }
+      if (e.args[0].mode !== 'none') this.err('arg-mode', 'the flags are passed by value', e.args[0].expr.pos);
+      this.expect(e.args[0].expr, U32);
+      node.kind = 'call';
+      node.callee = '__gpu_flags';
+      return U32;
+    }
+    // `gpu.untracked(b)`: Buffer b を、gpu.submit の経路で Metal の書き込みの追跡から外す（README「追跡しない Buffer」）。
+    // Metal 以外では何もしない。
+    if (e.recv.kind === 'ident' && e.recv.name === 'gpu' && !this.lookup('gpu') && e.name === 'untracked') {
+      this.noKernel('`gpu.untracked`', e.pos);
+      if (e.args.length !== 1) {
+        this.err('arg-count', '`gpu.untracked` takes exactly one argument (a Buffer or RacyBuffer)', e.pos);
+      } else {
+        if (e.args[0].mode !== 'none') this.err('arg-mode', 'the buffer is only read; pass it without `mut`', e.args[0].expr.pos);
+        const t = this.checkExpr(e.args[0].expr);
+        if (t.k !== 'heap' || !(t.buffer || t.racy)) {
+          this.err('type-mismatch', `\`gpu.untracked\` takes a Buffer or RacyBuffer, not ${tyStr(t)}`, e.args[0].expr.pos);
+        }
+      }
+      const node = e as unknown as { kind: string; callee: string; args: Arg[] };
+      node.kind = 'call';
+      node.callee = '__gpu_untracked';
+      return VOID;
+    }
     if (this.isThreadCall(e)) return this.inferThread(e);
     // `Shape.Circle(1.5)`: enum の値を作る。
     if (e.recv.kind === 'ident' && !this.lookup(e.recv.name) && this.isEnumName(e.recv.name)) {
       return this.enumValue(e, e.recv.name, e.name, e.args, want);
     }
-    this.noKernel('a method call', e.pos);
+    // kernel の中で使えるメソッドは、RacyBuffer のアトミック演算だけ。
+    const rs = e.recv.kind === 'ident' ? this.lookup(e.recv.name) : undefined;
+    const atomic = rs?.ty.k === 'heap' && rs.ty.racy === true && ['load', 'store', 'fetchAdd', 'compareExchange'].includes(e.name);
+    if (!atomic) this.noKernel('a method call', e.pos);
     const rt = this.checkExpr(e.recv);
     if (rt.k === 'heap') return this.inferArrayMethod(e, rt);
     if (rt.k === 'array') {
@@ -3136,6 +3328,16 @@ class Checker {
       if ((e.name === 'fetchAdd' || e.name === 'compareExchange') && rt.elem.k === 'float') {
         this.err('type-mismatch', `\`${e.name}\` needs integer elements, but this RacyBuffer holds ${tyStr(rt.elem)}`, e.pos,
           'for f32, keep the bits in a RacyBuffer<u32> (NaN and -0 make bit equality and `==` disagree)');
+      }
+      if (this.inKernel) {
+        // GPU のアトミック演算は 32 ビットの整数だけ（MSL の atomic_int / atomic_uint、WGSL の atomic<i32> / atomic<u32>）。
+        const int32 = rt.elem.k === 'int' && rt.elem.bits === 32;
+        const word = int32 || (rt.elem.k === 'float' && rt.elem.bits === 32);
+        if (!(e.name === 'load' || e.name === 'store' ? word : int32)) {
+          this.err('kernel-type', `\`${e.name}\` on a RacyBuffer<${tyStr(rt.elem)}> is not available in a kernel function`, e.pos,
+            'in a kernel, atomic operations need i32 or u32 elements (load / store also take f32)');
+        }
+        if (e.name !== 'load') this.requireMutable(e.recv, 'modify');
       }
       e.key = `Racy.${e.name}`;
       return e.name === 'store' ? VOID : rt.elem;
@@ -3254,12 +3456,335 @@ class Checker {
     }
   }
 
+  // ---- グループ（threadgroup / workgroup）----
+
+  /** `group.名前(...)` の呼び出しか（group という名前の変数があれば違う）。 */
+  isGroupCall(e: Expr, name?: string): e is Expr & { kind: 'mcall' } {
+    return e.kind === 'mcall' && e.recv.kind === 'ident' && e.recv.name === 'group' && !this.lookup('group') && (!name || e.name === name);
+  }
+
   /**
-   * どのメソッドが this を書き換えるかを決め、書き換えるメソッドの呼び出しを検査する。
-   * 「自分で書き換える」か「this に対して、書き換えるメソッドを呼ぶ」なら書き換えるメソッド。
+   * `group.local()` / `group.id()` / `group.size()` / `group.count()` / `group.barrier()`。
+   * kernel の中でだけ使え、使った kernel は dispatchGroups でだけ実行できる。式は math の節に書き換える。
    */
+  inferGroup(e: Expr & { kind: 'mcall' }): Ty {
+    const names = ['local', 'id', 'size', 'count', 'barrier', 'simdLane', ...GROUP_COLLECTIVE];
+    if (!this.inKernel) {
+      this.err('kernel-restriction', `\`group.${e.name}\` can only be used in a kernel function`, e.pos,
+        'group features describe the threads of a GPU group; run the kernel with `dispatchGroups(k, groups, size, ...)`');
+    }
+    if (e.name === 'shared') {
+      this.err('kernel-restriction', '`group.shared()` can only initialize a `let` at the top level of a kernel', e.pos,
+        'e.g. `let tile: f32[256] = group.shared();`');
+    }
+    if (!names.includes(e.name)) {
+      this.err('unknown-method', `\`group\` has no function '${e.name}'`, e.pos, `available: ${names.join(', ')}, shared`);
+    }
+    this.curFn.usesGroup = true;
+    if (GROUP_COLLECTIVE.has(e.name)) return this.inferCollective(e);
+    if (e.args.length !== 0) this.err('arg-count', `\`group.${e.name}\` takes no arguments`, e.pos);
+    if (e.name === 'barrier') this.curFn.usesBarrier = true;
+    const node = e as unknown as { kind: string; fn: string; args: Expr[] };
+    node.kind = 'math';
+    node.fn = `group.${e.name}`;
+    node.args = [];
+    return e.name === 'barrier' ? VOID : U32;
+  }
+
+  /** let / const の初期化式として書かれた simdgroup の集計（checkStmt の let が印を付ける）。 */
+  collectiveInit: Expr | null = null;
+
+  /**
+   * simdgroup（グループの中の連続した 32 スレッド）の集計: `group.simdSum(x)` / `simdMin(x)` / `simdMax(x)`（x は i32 / u32 / f32）と
+   * `group.simdShuffle(x, lane)`（同じ simdgroup の lane 番目のスレッドの x）。Metal の simd_sum などになる（WebGPU は対応しない）。
+   * simdgroup の全スレッドの値を使うので、barrier と同じく、グループの全スレッドが通る場所にだけ置ける（checkGroupBody）。
+   * CPU では barrier と同じく区切りになる（codegen.ts の groupStmt）。
+   */
+  inferCollective(e: Expr & { kind: 'mcall' }): Ty {
+    if (this.collectiveInit !== e) {
+      this.err('kernel-restriction', `\`group.${e.name}\` can only be the initial value of a \`let\` or \`const\``, e.pos,
+        `e.g. \`const s = group.${e.name}(${e.name === 'simdShuffle' ? 'x, 0' : 'x'});\``);
+    }
+    this.collectiveInit = null;
+    this.curFn.usesBarrier = true;
+    const want = e.name === 'simdShuffle' ? 2 : 1;
+    if (e.args.length !== want) {
+      this.err('arg-count', `\`group.${e.name}\` takes ${want === 2 ? 'two arguments (the value and the lane)' : 'one argument'}`, e.pos);
+    }
+    for (const a of e.args) if (a.mode !== 'none') this.err('arg-mode', 'the value is passed by value', a.expr.pos);
+    const t = this.checkExpr(e.args[0].expr);
+    const ok = (t.k === 'int' && t.bits === 32) || (t.k === 'float' && t.bits === 32);
+    if (!ok) this.err('kernel-type', `\`group.${e.name}\` works on i32, u32 or f32, not ${tyStr(t)}`, e.args[0].expr.pos);
+    if (want === 2) this.expect(e.args[1].expr, U32);
+    const node = e as unknown as { kind: string; fn: string; args: Expr[] };
+    node.kind = 'math';
+    node.fn = `group.${e.name}`;
+    node.args = e.args.map((a) => a.expr);
+    return t;
+  }
+
+  /** `let tile: f32[256] = group.shared();`: グループの全スレッドが共有する配列。グループの始めに 0 になる。 */
+  checkShared(s: Stmt & { kind: 'let' }): void {
+    const init = s.init as Expr & { kind: 'mcall' };
+    if (!this.inKernel) {
+      this.err('kernel-restriction', '`group.shared()` can only be used in a kernel function', s.pos);
+    }
+    if (init.args.length !== 0) this.err('arg-count', '`group.shared` takes no arguments; the size comes from the type', init.pos);
+    if (s.isConst) this.err('kernel-restriction', 'a shared array is written by the threads, so declare it with `let`', s.pos);
+    if (!s.tyAnn) {
+      this.err('needs-type', 'a shared array needs its type', s.pos, `e.g. \`let ${s.name}: f32[256] = group.shared();\``);
+    }
+    const ty = this.resolve(s.tyAnn);
+    const okElem = ty.k === 'array' && ((ty.elem.k === 'int' && ty.elem.bits === 32) || (ty.elem.k === 'float' && ty.elem.bits === 32));
+    if (!okElem) {
+      this.err('kernel-type', `a shared array must be a fixed-length array of i32, u32 or f32, not ${tyStr(ty)}`, s.pos,
+        `e.g. \`let ${s.name}: f32[256] = group.shared();\``);
+    }
+    const t = ty as Ty & { k: 'array' };
+    // WebGPU が必ず用意する大きさ（maxComputeWorkgroupStorageSize の既定値）。
+    this.sharedBytes = (this.sharedFn === this.curFn ? this.sharedBytes : 0) + t.len * 4;
+    this.sharedFn = this.curFn;
+    if (this.sharedBytes > 16384) {
+      this.err('kernel-restriction', `the shared arrays of kernel '${this.curFn.name}' need ${this.sharedBytes} bytes, more than 16384`, s.pos,
+        'WebGPU guarantees 16 KiB of group shared memory; use smaller arrays');
+    }
+    this.curFn.usesGroup = true;
+    const node = init as unknown as { kind: string; fn: string; args: Expr[]; ty: Ty };
+    node.kind = 'math';
+    node.fn = 'group.shared';
+    node.args = [];
+    node.ty = ty;
+    s.sym = this.declare(s.name, ty, true, s.pos);
+    s.sym.shared = true;
+  }
+
+  sharedBytes = 0;
+  sharedFn: FnDecl | null = null;
+
+  /**
+   * group.* を使う kernel の本体の形を確かめる（本体の型検査のあとで呼ぶ）。
+   *   - 共有配列の宣言は本体の直下だけ（グループの始めに1回だけ 0 にする）。
+   *   - group.barrier() は、グループの全スレッドが同じ回数だけ通る場所にだけ置ける。GPU では、通らない
+   *     スレッドがあると止まりうる（WGSL はコンパイルを断る）。そこで「グループの全スレッドで同じ値になる式」
+   *     （一様な式）を控えめに求め、barrier を囲む if / while / for の条件はそれに限る。
+   *   - barrier を含むループの中の break / continue と、barrier を使う kernel の return は使えない。
+   * CPU での実行（codegen.ts の groupFn）は、この形を前提に、barrier の間の文を全スレッドについて順に実行し、
+   * barrier を含む文の条件はスレッド 0 の値で決める。
+   */
+  checkGroupBody(d: FnDecl): void {
+    const err = (pos: Pos, msg: string, hint: string) => this.errors.push(new CompileError('kernel-restriction', msg, pos, hint));
+    const isShared = (s: Stmt) => s.kind === 'let' && s.init?.kind === 'math' && s.init.fn === 'group.shared';
+    const kids = (s: Stmt): (Stmt | undefined)[] => {
+      switch (s.kind) {
+        case 'block':
+          return s.body;
+        case 'if':
+          return [s.then, s.else];
+        case 'while':
+          return [s.body];
+        case 'for':
+          return [s.init, s.step, s.body];
+        case 'forOf':
+          return [s.body];
+        default:
+          return [];
+      }
+    };
+
+    // 共有配列は本体の直下でだけ宣言できる。
+    const sharedAt = (s: Stmt | undefined, top: boolean): void => {
+      if (!s) return;
+      if (isShared(s) && !top) {
+        err(s.pos, 'a shared array must be declared at the top level of the kernel body',
+          'move `let ... = group.shared();` to the start of the kernel (it is zeroed once when the group starts)');
+      }
+      for (const k of kids(s)) sharedAt(k, false);
+    };
+    for (const s of d.body) sharedAt(s, true);
+    if (!d.usesBarrier) return;
+
+    // 一様でない変数を集める（増える一方なので、変わらなくなるまで繰り返す）。
+    // 添字の引数・group.local()・Buffer と共有配列の要素は一様でない。値の引数・group.id() / size() / count()・
+    // Buffer の長さ・定数は一様。一様でない条件の下での代入と、一様でない値の代入で、変数は一様でなくなる。
+    const idx = d.params[0]?.sym;
+    const nonUni = new Set<number>(idx ? [idx.id] : []);
+    const uni = (e: Expr): boolean => {
+      switch (e.kind) {
+        case 'int':
+        case 'float':
+        case 'bool':
+          return true;
+        case 'ident':
+          return !!e.sym && !nonUni.has(e.sym.id) && !e.sym.shared;
+        case 'unary':
+        case 'cast':
+          return uni(e.expr);
+        case 'binary':
+          return uni(e.left) && uni(e.right);
+        case 'cond':
+          return uni(e.cond) && uni(e.then) && uni(e.else);
+        case 'field':
+          return e.base.ty!.k === 'heap' || uni(e.base);
+        case 'index':
+          return e.base.ty!.k === 'array' && uni(e.base) && uni(e.index);
+        case 'call':
+          return e.args.every((a) => a.expr.ty!.k !== 'heap' && uni(a.expr));
+        case 'math':
+          if (e.fn.startsWith('group.')) return e.fn === 'group.id' || e.fn === 'group.size' || e.fn === 'group.count';
+          return e.args.every(uni);
+        case 'object':
+          return e.fields.every((f) => uni(f.value));
+        case 'arrayLit':
+          return e.elems.every(uni);
+        default:
+          return false;
+      }
+    };
+    // 代入先の場所が一様か（`a[j] = v` の j が一様でなければ、a は一様でなくなる）。
+    const placeUni = (e: Expr): boolean => {
+      if (e.kind === 'index') return uni(e.index) && placeUni(e.base);
+      if (e.kind === 'field') return placeUni(e.base);
+      return true;
+    };
+    let changed = true;
+    const mark = (sym: Sym | undefined) => {
+      if (sym && !nonUni.has(sym.id)) {
+        nonUni.add(sym.id);
+        changed = true;
+      }
+    };
+    // ループ: 条件が一様でも、一様でない条件の下の break / continue があれば、回る回数がスレッドごとに違う。
+    const loop = (cond: () => boolean, parts: (Stmt | undefined)[], ctrl: boolean): void => {
+      const c = ctrl && cond();
+      const exits = parts.map((p) => walk(p, c)).some((x) => x);
+      if (exits && c) for (const p of parts) walk(p, false);
+    };
+    // ctrl: ここまでの制御が一様か。戻り値: いまのループを、一様でない条件の下で抜けうる（break / continue）か。
+    const walk = (s: Stmt | undefined, ctrl: boolean): boolean => {
+      if (!s) return false;
+      switch (s.kind) {
+        case 'let':
+          if (!isShared(s) && (!ctrl || (s.init !== undefined && !uni(s.init)))) mark(s.sym);
+          return false;
+        case 'assign': {
+          if (s.target.kind === 'index' && s.target.base.ty!.k === 'heap') return false;
+          const root = rootSym(s.target);
+          if (root?.shared) return false;
+          if (!ctrl || !uni(s.value) || !placeUni(s.target)) mark(root);
+          return false;
+        }
+        case 'block':
+          return s.body.map((x) => walk(x, ctrl)).some((x) => x);
+        case 'if': {
+          const c = ctrl && uni(s.cond);
+          const a = walk(s.then, c);
+          const b = walk(s.else, c);
+          return a || b;
+        }
+        case 'while':
+          loop(() => uni(s.cond), [s.body], ctrl);
+          return false;
+        case 'for':
+          walk(s.init, ctrl);
+          loop(() => !s.cond || uni(s.cond), [s.body, s.step], ctrl);
+          return false;
+        case 'forOf':
+          // 回る回数は長さで決まる（Buffer の長さも一様）。要素は、一様な固定長配列からだけ一様。
+          if (!ctrl || s.iter.ty!.k === 'heap' || !uni(s.iter)) mark(s.sym);
+          loop(() => true, [s.body], ctrl);
+          return false;
+        case 'break':
+        case 'continue':
+        case 'return':
+          return !ctrl;
+        default:
+          return false;
+      }
+    };
+    while (changed) {
+      changed = false;
+      for (const s of d.body) walk(s, true);
+    }
+
+    // barrier と simdgroup の集計（どちらもグループの全スレッドがそろって通る）。
+    const hasBarrier = (s: Stmt | undefined): boolean => {
+      if (!s) return false;
+      if (s.kind === 'expr') return s.expr.kind === 'math' && s.expr.fn === 'group.barrier';
+      if (isCollectiveLet(s)) return true;
+      return kids(s).some(hasBarrier);
+    };
+    const uniformHint = 'conditions around a barrier may only use constants, value parameters, `group.id()`, `group.size()`, `group.count()`, ' +
+      'buffer lengths and variables computed only from those; move the barrier out of the `if` or loop';
+    // inLoop: いちばん内側のループが barrier を含むか（その中の break / continue は使えない）。
+    const place = (s: Stmt | undefined, ctrl: boolean, inLoop: boolean): void => {
+      if (!s) return;
+      switch (s.kind) {
+        case 'expr':
+          if (hasBarrier(s) && !ctrl) {
+            err(s.pos, '`group.barrier()` must be reached by every thread of the group, but it is under a condition or loop that can differ between threads', uniformHint);
+          }
+          return;
+        case 'let':
+          if (isCollectiveLet(s) && !ctrl) {
+            const fn = (s.init as Expr & { kind: 'math' }).fn;
+            err(s.pos, `\`${fn}\` must be reached by every thread of the group, but it is under a condition or loop that can differ between threads`,
+              uniformHint.replace('around a barrier', `around \`${fn}\``).replace('the barrier', 'it'));
+          }
+          return;
+        case 'return':
+          err(s.pos, '`return` cannot be used in a kernel that uses `group.barrier()` or `group.simd*`',
+            'every thread must reach each barrier; put the rest of the body in an `if` instead');
+          return;
+        case 'break':
+        case 'continue':
+          if (inLoop) {
+            err(s.pos, `\`${s.kind}\` cannot be used in a loop that contains \`group.barrier()\` or \`group.simd*\``,
+              'every thread must run the loop the same number of times; express the end in the loop condition');
+          }
+          return;
+        case 'block':
+          for (const x of s.body) place(x, ctrl, inLoop);
+          return;
+        case 'if': {
+          const c = ctrl && uni(s.cond);
+          place(s.then, c, inLoop);
+          place(s.else, c, inLoop);
+          return;
+        }
+        case 'while':
+          place(s.body, ctrl && uni(s.cond), hasBarrier(s.body));
+          return;
+        case 'for':
+          place(s.init, ctrl, inLoop);
+          place(s.body, ctrl && (!s.cond || uni(s.cond)), hasBarrier(s.body));
+          return;
+        case 'forOf':
+          if (hasBarrier(s.body)) {
+            err(s.pos, '`group.barrier()` and `group.simd*` cannot be inside a for-of loop',
+              'every thread of the group must reach the barrier; use an index loop `for (let k = 0; k < n; k++)`');
+            return;
+          }
+          place(s.body, ctrl, false);
+          return;
+        default:
+          return;
+      }
+    };
+    for (const s of d.body) place(s, true, false);
+  }
+
   /** kernel どうしの再帰を禁止する（GPU のシェーダは再帰できない）。 */
   finishKernels(): void {
+    for (const c of this.kernelUses) {
+      if (!c.callee.usesGroup) continue;
+      this.errors.push(new CompileError('kernel-restriction', `kernel '${c.callee.name}' uses \`group\`, so it cannot be called like a function`, c.pos,
+        `group features (group.*, shared arrays) belong to the kernel that is run with \`dispatchGroups(${c.callee.name}, groups, size, ...)\`; move the shared code into a helper kernel without them`));
+    }
+    for (const g of this.groupDispatches) {
+      if (g.groups || !g.kernel.usesGroup) continue;
+      this.errors.push(new CompileError('kernel-restriction', `kernel '${g.kernel.name}' uses \`group\`, so it must be run in groups`, g.pos,
+        `write \`dispatchGroups(${g.kernel.name}, groups, size, ...)\` (or \`gpu.dispatchGroups\` / \`cpu.dispatchGroups\` / \`gpu.submitGroups\`)`));
+    }
     const edges = new Map<FnDecl, FnDecl[]>();
     for (const c of this.kernelCalls) edges.set(c.caller, [...(edges.get(c.caller) ?? []), c.callee]);
     const reaches = (from: FnDecl, target: FnDecl, seen: Set<FnDecl>): boolean => {
@@ -3281,6 +3806,10 @@ class Checker {
     }
   }
 
+  /**
+   * どのメソッドが this を書き換えるかを決め、書き換えるメソッドの呼び出しを検査する。
+   * 「自分で書き換える」か「this に対して、書き換えるメソッドを呼ぶ」なら書き換えるメソッド。
+   */
   finishMethods(decls: FnDecl[]): void {
     for (const d of decls) d.mutatesThis = this.directMut.has(d);
     for (let changed = true; changed; ) {

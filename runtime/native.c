@@ -152,6 +152,7 @@ _Noreturn void um_panic(int32_t code, int32_t line) {
     case 7: msg = "the GPU is not available"; break;
     case 8: msg = "could not start a thread"; break;
     case 9: msg = "readLine and inputReady can only be called from the main thread"; break;
+    case 10: msg = "invalid group size (it must be 1 to 1024, and groups times size must fit in u32)"; break;
   }
   // 複数のスレッドが同時に停止しても、メッセージは1回だけ。2番目以降は、終わるまで寝る。
   if (atomic_exchange(&um_panicking, 1)) {
@@ -885,4 +886,146 @@ int32_t um_write_file(const char *path, size_t plen, const unsigned char *data, 
     done += (size_t)r;
   }
   return close(fd) == 0;
+}
+
+// ---- ファイルの一部と追記（fileSize / readFileRange / appendFile） ----
+
+// ふつうのファイルの大きさ（バイト数）。読めないもの、ふつうのファイルでないもの（フォルダなど）は 0 を返す。
+int32_t um_file_size(const char *path, size_t plen, int64_t *out) {
+  *out = 0;
+  char *z = path_copy(path, plen);
+  if (!z) return 0;
+  struct stat st;
+  int r = stat(z, &st);
+  free(z);
+  if (r != 0 || !S_ISREG(st.st_mode) || st.st_size < 0) return 0;
+  *out = (int64_t)st.st_size;
+  return 1;
+}
+
+// offset バイト目から最大 want バイトを読む。ファイルの終わりで止まるので、短く（長さ 0 にも）なりうる。
+// ふつうのファイルでないもの（/dev/urandom など）は、offset が 0 のときだけ先頭から読む。
+// 読めたら 1 を返し、*out に新しく確保した領域（空なら NULL）、*len に長さを書く。読めなければ 0。
+int32_t um_read_file_range(const char *path, size_t plen, int64_t offset, int64_t want, unsigned char **out, size_t *len) {
+  *out = NULL;
+  *len = 0;
+  if (offset < 0 || want < 0 || offset > INT64_MAX - want) return 0;
+  char *z = path_copy(path, plen);
+  if (!z) return 0;
+  int fd = open(z, O_RDONLY | O_CLOEXEC);
+  free(z);
+  if (fd < 0) return 0;
+  struct stat st;
+  if (fstat(fd, &st) != 0 || S_ISDIR(st.st_mode)) {
+    close(fd);
+    return 0;
+  }
+  int regular = S_ISREG(st.st_mode);
+  if (!regular && offset != 0) {
+    close(fd);
+    return 0;
+  }
+  // ふつうのファイルなら、ファイルに残っている分より多くは確保しない。
+  if (regular) {
+    int64_t rest = st.st_size > offset ? (int64_t)st.st_size - offset : 0;
+    if (want > rest) want = rest;
+  }
+  if ((uint64_t)want > (uint64_t)(SIZE_MAX / 2)) {
+    close(fd);
+    return 0;
+  }
+  size_t cap = (size_t)want, n = 0;
+  unsigned char *buf = cap > 0 ? malloc(cap) : NULL;
+  if (cap > 0 && !buf) {
+    close(fd);
+    return 0;
+  }
+  while (n < cap) {
+    size_t step = cap - n > UM_IO_CHUNK ? UM_IO_CHUNK : cap - n;
+    ssize_t r = regular ? pread(fd, buf + n, step, (off_t)(offset + (int64_t)n)) : read(fd, buf + n, step);
+    if (r < 0 && errno == EINTR) continue;
+    if (r < 0) {
+      free(buf);
+      close(fd);
+      return 0;
+    }
+    if (r == 0) break;  // 読んでいるあいだにファイルが短くなった、または入力の終わり。
+    n += (size_t)r;
+  }
+  close(fd);
+  if (n == 0) {
+    free(buf);
+    return 1;
+  }
+  if (n < cap) {
+    unsigned char *fit = realloc(buf, n);
+    if (fit) buf = fit;
+  }
+  *out = buf;
+  *len = n;
+  return 1;
+}
+
+// ファイルの終わりにバイト列を書き足す（なければ作る）。すべて書けたら 1、そうでなければ 0。
+int32_t um_append_file(const char *path, size_t plen, const unsigned char *data, size_t len) {
+  char *z = path_copy(path, plen);
+  if (!z) return 0;
+  int fd = open(z, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+  free(z);
+  if (fd < 0) return 0;
+  size_t done = 0;
+  while (done < len) {
+    ssize_t r = write(fd, data + done, len - done > UM_IO_CHUNK ? UM_IO_CHUNK : len - done);
+    if (r < 0 && errno == EINTR) continue;
+    if (r <= 0) {
+      close(fd);
+      return 0;
+    }
+    done += (size_t)r;
+  }
+  return close(fd) == 0;
+}
+
+// ---- コマンドライン引数（args）と標準エラー出力（eprint） ----
+
+// 生成コードの main(argc, argv) が最初に渡す。args() はプログラム名（argv[0]）を除いた残り。
+static int um_argc;
+static char **um_argv;
+void um_set_args(int32_t argc, char **argv) {
+  um_argc = argc;
+  um_argv = argv;
+}
+
+// %um.Array（要素の場所、長さ、容量）と同じ並び。
+typedef struct {
+  unsigned char *data;
+  size_t len, cap;
+} um_bytes;
+
+// 引数を string[] として新しく確保して渡す（*out は要素の場所、*len は個数。なければ NULL と 0）。
+void um_args(um_bytes **out, size_t *len) {
+  *out = NULL;
+  *len = 0;
+  if (um_argc <= 1 || !um_argv) return;
+  size_t n = (size_t)um_argc - 1;
+  um_bytes *a = um_alloc(n, sizeof(um_bytes));
+  for (size_t i = 0; i < n; i++) {
+    const char *s = um_argv[i + 1];
+    size_t l = s ? strlen(s) : 0;
+    unsigned char *p = um_alloc(l, 1);
+    if (l > 0) memcpy(p, s, l);
+    a[i].data = p;
+    a[i].len = l;
+    a[i].cap = l;
+  }
+  *out = a;
+  *len = n;
+}
+
+// 標準エラー出力に1行書く（改行を付ける）。標準エラー出力はまとめずにすぐ書く。
+void um_eprint(const char *data, size_t len) {
+  flockfile(stderr);
+  if (len > 0) fwrite(data, 1, len, stderr);
+  fputc('\n', stderr);
+  funlockfile(stderr);
 }

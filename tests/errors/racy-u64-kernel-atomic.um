@@ -1,0 +1,11 @@
+// kernel の中では 64 ビットの RacyBuffer の要素を読み書きできるが、アトミック演算（fetchAdd など）は使えない
+// （Apple の GPU にも WebGPU にも 64 ビットのアトミックな加算がない）。
+kernel function k(i: u32, out: mut RacyBuffer<u64>): void {
+  out.fetchAdd(i, 1);
+}
+
+export function main(): i32 {
+  return 0;
+}
+
+// error: kernel-type

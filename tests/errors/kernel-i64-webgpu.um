@@ -1,0 +1,13 @@
+// 64 ビットの整数を使う kernel は CPU と Metal でだけ GPU で実行できる。WebGPU（WGSL）には 64 ビットの整数がないので、
+// wasm32 で GPU に固定して実行（gpu.dispatch）しようとするとエラー。自動（dispatch）なら CPU で実行する。
+kernel function k(i: u32, out: mut Buffer<u64>, big: u64): void {
+  out[i] = big << 40;
+}
+
+export function main(): i32 {
+  let b = new Buffer<u64>(4);
+  gpu.dispatch(k, 4, mut b, 3);
+  return 0;
+}
+
+// error: kernel-type

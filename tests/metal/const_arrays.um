@@ -1,0 +1,45 @@
+// 最上位の定数の配列を kernel の中で読む（MSL ではプログラムの範囲の `constant` の変数）。
+// gpu.dispatch で GPU に実行させ、CPU で同じ式を計算した値と一致することを確かめる。
+// 範囲外の添字は、固定長配列と同じく最後の要素に切り詰められる（GPU でも CPU でも同じ）。
+// expect: 0
+// expect: 7
+// expect: 2.5
+const DIRS: u32 = 4;
+const STEP: i32[4] = [-9, -1, 1, 9];
+const W: u32[8][4] = [[1, 2, 3, 4, 5, 6, 7, 8], [8, 7, 6, 5, 4, 3, 2, 1], [0, 1, 0, 1, 0, 1, 0, 1], [3, 3, 3, 3, 3, 3, 3, 7]];
+const SCALE: f32[2] = [0.5, 2.5];
+const ON: bool[2] = [false, true];
+
+kernel function k(i: u32, out: mut Buffer<i32>, last: mut Buffer<u32>, f: mut Buffer<f32>): void {
+  const d = i % DIRS;
+  let v = STEP[d] * (W[d][i & 7] as i32);
+  if (ON[i & 1]) {
+    v = v + 1;
+  }
+  out[i] = v;
+  last[i] = W[3][i + 100];
+  f[i] = SCALE[i & 1];
+}
+
+export function main(): i32 {
+  const n: u32 = 4096;
+  let out = new Buffer<i32>(n);
+  let last = new Buffer<u32>(n);
+  let f = new Buffer<f32>(n);
+  gpu.dispatch(k, n, mut out, mut last, mut f);
+  let bad = 0;
+  for (let i: u32 = 0; i < n; i++) {
+    const d = i % DIRS;
+    let v = STEP[d] * (W[d][i & 7] as i32);
+    if (ON[i & 1]) {
+      v = v + 1;
+    }
+    if (out[i] != v) {
+      bad++;
+    }
+  }
+  print(bad);
+  print(last[5]);
+  print(f[1]);
+  return 0;
+}

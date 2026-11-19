@@ -3,9 +3,9 @@ import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileS
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { check } from './checker.ts';
-import { generate } from './codegen.ts';
+import { generate, kernelUses64 } from './codegen.ts';
 import { emitMsl } from './msl.ts';
-import { emitWgsl } from './wgsl.ts';
+import { emitWgsl, WEBGPU_CONST_ARRAY } from './wgsl.ts';
 import type { TargetKind } from './codegen.ts';
 import { parse } from './parser.ts';
 import type { Decl, Module } from './ast.ts';
@@ -162,15 +162,25 @@ export function compileToLL(src: string, target: TargetName, sanitize: boolean |
   return generate(prog, t.kind, sanitize, metal, appleArm);
 }
 
-/** dispatch できる kernel それぞれの WGSL を返す（確認用。wasm には同じものが埋め込まれる）。 */
+/**
+ * dispatch できる kernel それぞれの WGSL を返す（確認用。wasm には同じものが埋め込まれる）。
+ * 64 ビットの整数を使う kernel は WGSL にできない（WebGPU では CPU で実行する）ので含めない。
+ */
 export function compileWgsl(src: string, file?: string): Map<string, string> {
   const prog = check(parseProgram(src, file), 32, true);
   const out = new Map<string, string>();
   for (const sig of prog.fns.values()) {
     const d = sig.decl;
     const first = d.params[0]?.ty;
-    if (d.isKernel && d.ret!.k === 'void' && first?.k === 'int' && first.bits === 32 && !first.signed) {
-      out.set(d.name, emitWgsl(prog, d).source);
+    if (d.isKernel && d.ret!.k === 'void' && first?.k === 'int' && first.bits === 32 && !first.signed && !kernelUses64(prog, d)) {
+      try {
+        // group.* を使う kernel は dispatchGroups 用の形にする。
+        out.set(d.name, emitWgsl(prog, d, d.usesGroup === true).source);
+      } catch (e) {
+        // 定数の配列を使う kernel は WGSL にしない（wasm32 では CPU で実行する）。
+        if (e instanceof CompileError && e.code === WEBGPU_CONST_ARRAY) continue;
+        throw e;
+      }
     }
   }
   return out;
@@ -184,7 +194,8 @@ export function compileMsl(src: string, file?: string): Map<string, string> {
     const d = sig.decl;
     const first = d.params[0]?.ty;
     if (d.isKernel && d.ret!.k === 'void' && first?.k === 'int' && first.bits === 32 && !first.signed) {
-      out.set(d.name, emitMsl(prog, d));
+      // group.* を使う kernel は dispatchGroups 用の形にする。
+      out.set(d.name, emitMsl(prog, d, d.usesGroup === true));
     }
   }
   return out;

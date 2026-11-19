@@ -1,0 +1,16 @@
+// barrier を使う kernel では return を使えない（戻ったスレッドが barrier に来なくなる）。
+kernel function k(i: u32, out: mut Buffer<u32>): void {
+  if (i == 3) {
+    return;
+  }
+  group.barrier();
+  out[i] = 1;
+}
+
+export function main(): i32 {
+  let b = new Buffer<u32>(64);
+  dispatchGroups(k, 2, 32, mut b);
+  return 0;
+}
+
+// error: kernel-restriction

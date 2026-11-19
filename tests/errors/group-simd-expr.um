@@ -1,0 +1,14 @@
+// group.simdSum などは let / const の初期化式としてだけ書ける（式の途中には書けない）。
+// target: host
+kernel function k(i: u32, out: mut Buffer<i32>, xs: Buffer<i32>): void {
+  out[i] = group.simdSum(xs[i]) + 1;
+}
+
+export function main(): i32 {
+  let b = new Buffer<i32>(64);
+  let xs = new Buffer<i32>(64);
+  dispatchGroups(k, 2, 32, mut b, xs);
+  return 0;
+}
+
+// error: kernel-restriction

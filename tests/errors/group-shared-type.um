@@ -1,0 +1,14 @@
+// 共有配列の要素は i32 / u32 / f32 だけ。
+kernel function k(i: u32, out: mut Buffer<u32>): void {
+  let t: bool[32] = group.shared();
+  t[group.local()] = true;
+  out[i] = 1;
+}
+
+export function main(): i32 {
+  let b = new Buffer<u32>(64);
+  dispatchGroups(k, 2, 32, mut b);
+  return 0;
+}
+
+// error: kernel-type

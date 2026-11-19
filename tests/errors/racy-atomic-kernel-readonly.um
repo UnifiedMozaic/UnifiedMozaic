@@ -1,0 +1,14 @@
+// kernel の中で書き換えるアトミック演算（store / fetchAdd / compareExchange）は、mut の RacyBuffer にだけ使える。
+kernel function k(i: u32, out: mut Buffer<u32>, hits: RacyBuffer<u32>): void {
+  hits.fetchAdd(0, 1);
+  out[i] = hits.load(0);
+}
+
+export function main(): i32 {
+  let o = new Buffer<u32>(4);
+  let h = new RacyBuffer<u32>(1);
+  dispatch(k, 4, mut o, h);
+  return 0;
+}
+
+// error: immutable

@@ -75,6 +75,13 @@ export interface Sym {
    * 持ち手は `thread.join(h)` に渡すことしかできない（型は内部の印で、値として扱わない）。
    */
   thread?: { ret: Ty; each: boolean };
+  /**
+   * 最上位の定数の配列（`const T: u32[8] = [...]`）を指す名前。value はコンパイル時に求めた要素の値（入れ子の配列は入れ子）。
+   * コード生成は読み取り専用のグローバルな領域（LLVM の constant、MSL の constant）にし、変数の領域は作らない。
+   */
+  global?: { name: string; value: unknown };
+  /** グループの共有配列（`let t: f32[256] = group.shared();`）。添字での読み書きにだけ使える。 */
+  shared?: boolean;
 }
 
 export interface Arg {
@@ -98,7 +105,7 @@ export type Expr = { pos: Pos; ty?: Ty; /** コンパイラが enum / match か�
   | { kind: 'newArray'; elemNode: TypeNode; args: Arg[]; buffer?: boolean; racy?: boolean }
   // kernel を 0 から count 未満の各添字について実行する。device は実行先の指定（auto は自動判断）。
   // async が付くのは `gpu.submit(...)`: 終わるのを待たずに戻り、券（u64）を返す。
-  | { kind: 'dispatch'; kernel: string; count: Expr; args: Arg[]; device: 'auto' | 'cpu' | 'gpu'; async?: boolean }
+  | { kind: 'dispatch'; kernel: string; count: Expr; args: Arg[]; device: 'auto' | 'cpu' | 'gpu'; async?: boolean; group?: Expr }
   // スレッド。型検査が `thread.xxx(...)` をこれに書き換える。
   //   spawn: fn(args...) を新しいスレッドで実行する。each: args[0] の配列の要素ごとに1本（args[0] は移動）。
   //   join: args[0] は持ち手の変数。cpus: 論理 CPU 数。yield: CPU をほかのスレッドに譲る（値なし）。
@@ -170,6 +177,10 @@ export interface FnDecl {
   pos: Pos;
   /** GPUでも実行できる関数。本体に制限があり、整数演算と添字はGPUと同じ意味になる。 */
   isKernel?: boolean;
+  /** kernel が group.* か共有配列を使うか（dispatchGroups でだけ実行できる）。型検査が設定する。 */
+  usesGroup?: boolean;
+  /** kernel が group.barrier() を使うか。 */
+  usesBarrier?: boolean;
   /** メソッドとコンストラクタだけが持つ。 */
   cls?: string;
   isCtor?: boolean;
@@ -241,4 +252,12 @@ export interface Module {
   imports?: Import[];
   /** 複数のファイルをまとめたとき: ファイル番号 → そのファイルが import した名前。 */
   importedNames?: Map<number, Set<string>>;
+}
+
+/** simdgroup の集計（`group.simdSum(x)` など）。barrier と同じく、グループの全スレッドが通る場所に置く集団の操作。 */
+export const GROUP_COLLECTIVE: ReadonlySet<string> = new Set(['simdSum', 'simdMin', 'simdMax', 'simdShuffle']);
+
+/** 文が simdgroup の集計を初期化式に持つ let / const か。 */
+export function isCollectiveLet(s: Stmt | undefined): boolean {
+  return !!s && s.kind === 'let' && s.init?.kind === 'math' && s.init.fn.startsWith('group.simd') && s.init.fn !== 'group.simdLane';
 }

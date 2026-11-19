@@ -22,6 +22,7 @@ const PANIC_MESSAGES = {
   7: 'the GPU is not available',
   8: 'could not start a thread',
   9: 'readLine and inputReady can only be called from the main thread',
+  10: 'invalid group size (it must be 1 to 1024, and groups times size must fit in u32)',
 };
 
 // src/wgsl.ts の WORKGROUP_SIZE と揃えること。
@@ -46,7 +47,16 @@ async function requestDevice() {
   if (!gpu || !jspi) return null;
   try {
     const adapter = await gpu.requestAdapter();
-    return adapter ? await adapter.requestDevice() : null;
+    if (!adapter) return null;
+    // dispatchGroups の大きなグループ（既定の上限は 256 スレッド）のために、アダプタが許す上限まで求める。
+    const want = ['maxComputeInvocationsPerWorkgroup', 'maxComputeWorkgroupSizeX', 'maxComputeWorkgroupStorageSize'];
+    const requiredLimits = {};
+    for (const k of want) if (typeof adapter.limits?.[k] === 'number') requiredLimits[k] = adapter.limits[k];
+    try {
+      return await adapter.requestDevice({ requiredLimits });
+    } catch {
+      return await adapter.requestDevice();
+    }
   } catch {
     return null;
   }
@@ -61,6 +71,8 @@ class GpuRunner {
     this.pipelines = new Map();
     /** 実行した回数（デバッグ用）。 */
     this.dispatches = 0;
+    /** 次の dispatch のグループの大きさ（um_gpu_group が設定し、dispatch が使って 0 に戻す）。0 は普通の dispatch。 */
+    this.group = 0;
   }
 
   bytes() {
@@ -68,8 +80,10 @@ class GpuRunner {
     return new Uint8Array(this.memory.buffer);
   }
 
-  async pipeline(id, wgslPtr, wgslLen, descs) {
-    let p = this.pipelines.get(id);
+  async pipeline(id, wgslPtr, wgslLen, descs, group) {
+    // dispatchGroups の kernel は、グループの大きさ（シェーダの定数 um_wg）ごとに別のパイプラインになる。
+    const key = group ? `${id}:${group}` : id;
+    let p = this.pipelines.get(key);
     if (p) return p;
     const code = new TextDecoder().decode(this.bytes().slice(wgslPtr, wgslPtr + wgslLen));
     const module = this.device.createShaderModule({ code });
@@ -81,17 +95,22 @@ class GpuRunner {
     const groupLayout = this.device.createBindGroupLayout({ entries });
     const pipeline = await this.device.createComputePipelineAsync({
       layout: this.device.createPipelineLayout({ bindGroupLayouts: [groupLayout] }),
-      compute: { module, entryPoint: 'um_main' },
+      compute: group ? { module, entryPoint: 'um_main', constants: { um_wg: group } } : { module, entryPoint: 'um_main' },
     });
     p = { pipeline, groupLayout };
-    this.pipelines.set(id, p);
+    this.pipelines.set(key, p);
     return p;
   }
 
   async dispatch(id, wgslPtr, wgslLen, count, paramsPtr, paramBytes, descPtr, nbufs) {
+    const group = this.group;
+    this.group = 0;
     count >>>= 0;
     if (count === 0) return;
     const device = this.device;
+    if (group > device.limits.maxComputeInvocationsPerWorkgroup || group > device.limits.maxComputeWorkgroupSizeX) {
+      throw new Error(`UnifiedMozaic: the group size ${group} is larger than this GPU allows (${device.limits.maxComputeInvocationsPerWorkgroup})`);
+    }
     const table = new Uint32Array(this.memory.buffer, descPtr, nbufs * 4);
     const descs = [];
     for (let i = 0; i < nbufs; i++) {
@@ -101,10 +120,10 @@ class GpuRunner {
     device.pushErrorScope('validation');
     let made = [];
     try {
-      const { pipeline, groupLayout } = await this.pipeline(id, wgslPtr, wgslLen, descs);
+      const { pipeline, groupLayout } = await this.pipeline(id, wgslPtr, wgslLen, descs, group);
 
-      // 要素数をワークグループの2次元の格子に割り当てる。
-      const groups = Math.ceil(count / WORKGROUP_SIZE);
+      // 要素数をワークグループの2次元の格子に割り当てる。dispatchGroups では、グループがそのままワークグループ。
+      const groups = group ? count / group : Math.ceil(count / WORKGROUP_SIZE);
       const x = Math.min(groups, MAX_GROUPS);
       const y = Math.ceil(groups / x);
 
@@ -112,8 +131,9 @@ class GpuRunner {
       const header = 2 + nbufs;
       const params = new Uint8Array(header * 4 + paramBytes);
       const words = new Uint32Array(params.buffer, 0, header);
-      words[0] = count;
-      words[1] = x * WORKGROUP_SIZE;
+      // dispatchGroups の形（src/wgsl.ts）では、個数はグループの数、1行はグループの数で数える。
+      words[0] = group ? groups : count;
+      words[1] = group ? x : x * WORKGROUP_SIZE;
       descs.forEach((d, i) => (words[2 + i] = d.len));
       params.set(this.bytes().subarray(paramsPtr, paramsPtr + paramBytes), header * 4);
 
@@ -181,6 +201,11 @@ class GpuRunner {
  *   inputReady?: () => boolean,
  *   readFile?: (path: string) => Uint8Array | null,
  *   writeFile?: (path: string, bytes: Uint8Array) => boolean,
+ *   fileSize?: (path: string) => number | bigint | null,
+ *   readFileRange?: (path: string, offset: number, length: number) => Uint8Array | null,
+ *   appendFile?: (path: string, bytes: Uint8Array) => boolean,
+ *   args?: string[],
+ *   eprint?: (line: string) => void,
  * }} [options] print の出力先（関数を直接渡してもよい）と GPU の設定、入出力の口。
  *   gpu: false で GPU を使わない。gpuThreshold: 自動判断で GPU に回す最小の要素数（既定 4096）。
  *   readLine: プログラムの readLine() に渡す次の1行（改行を除く）を返す。もうなければ null。同期的に返すこと。
@@ -189,6 +214,11 @@ class GpuRunner {
  *     （readLine の口は待たずに返すもので、それもなければ入力は終わっているため）。
  *   readFile / writeFile: プログラムの readFile() / writeFile() の実体。渡さなければ、ファイルは読めず（null）、書けない（false）。
  *     名前は UTF-8 として文字列にして渡す（0 のバイトを含む名前と、UTF-8 として読めない名前は、口を呼ばずに失敗にする）。
+ *   fileSize / readFileRange / appendFile: プログラムの fileSize() / readFileRange() / appendFile() の実体。
+ *     渡さなければ readFile（と writeFile）の口で代わりに行う（ファイル全体を読むので遅い）。どちらもなければ失敗（null / false）。
+ *     readFileRange が length より長いデータを返したときは、length バイトに切り詰める。
+ *   args: プログラムの args() が返す引数（プログラム名を含めない）。渡さなければ空。
+ *   eprint: プログラムの eprint() の出力先。渡さなければ console.error。
  * @returns {Promise<WebAssembly.Exports & { um_gpu?: { available: boolean, dispatches: () => number } }>}
  */
 export async function instantiate(bytes, options = {}) {
@@ -281,10 +311,77 @@ export async function instantiate(bytes, options = {}) {
         return 0;
       }
     },
+    um_host_file_size: (ptr, len) => {
+      const path = pathOf(ptr, len);
+      if (path === null) return -1n;
+      try {
+        if (options.fileSize) {
+          const n = options.fileSize(path);
+          if (n === null || n === undefined) return -1n;
+          const b = BigInt(n);
+          return b < 0n || b > 0x7fffffffffffffffn ? -1n : b;
+        }
+        if (!options.readFile) return -1n;
+        const all = options.readFile(path);
+        return all instanceof Uint8Array ? BigInt(all.length) : -1n;
+      } catch {
+        return -1n;
+      }
+    },
+    um_host_read_file_range: (ptr, len, offset, length) => {
+      const path = pathOf(ptr, len);
+      if (path === null || offset < 0n || length < 0n) return -1;
+      // wasm 側は長さを符号つき 32 ビットで受け取る。それより長く頼まれても、それ以上は渡せない。
+      const want = Number(length > 0x7fffffffn ? 0x7fffffffn : length);
+      try {
+        let data;
+        if (options.readFileRange) {
+          if (offset > BigInt(Number.MAX_SAFE_INTEGER)) return -1;
+          data = options.readFileRange(path, Number(offset), want);
+        } else if (options.readFile) {
+          const all = options.readFile(path);
+          if (!(all instanceof Uint8Array)) return -1;
+          const from = offset > BigInt(all.length) ? all.length : Number(offset);
+          data = all.subarray(from, from + want);
+        } else {
+          return -1;
+        }
+        if (data instanceof Uint8Array && data.length > want) data = data.subarray(0, want);
+        return prepare(data);
+      } catch {
+        return -1;
+      }
+    },
+    um_host_append_file: (ptr, len, dataPtr, dataLen) => {
+      const path = pathOf(ptr, len);
+      if (path === null) return 0;
+      const bytes = mem(dataPtr, dataLen).slice();
+      try {
+        if (options.appendFile) return options.appendFile(path, bytes) ? 1 : 0;
+        if (!options.writeFile) return 0;
+        const old = options.readFile ? options.readFile(path) : null;
+        if (!(old instanceof Uint8Array)) return options.writeFile(path, bytes) ? 1 : 0;
+        const joined = new Uint8Array(old.length + bytes.length);
+        joined.set(old);
+        joined.set(bytes, old.length);
+        return options.writeFile(path, joined) ? 1 : 0;
+      } catch {
+        return 0;
+      }
+    },
+    um_host_argc: () => (Array.isArray(options.args) ? options.args.length : 0),
+    um_host_arg: (i) => prepare(new TextEncoder().encode(String(options.args[i]))),
+    um_host_eprint: (ptr, len) => {
+      const text = new TextDecoder().decode(mem(ptr, len).slice());
+      (options.eprint ?? ((s) => console.error(s)))(text);
+    },
     um_gpu_available: () => (runner ? 1 : 0),
     // 自動判断: いまは「GPU があり、要素数がしきい値以上」なら GPU。実測による補正は今後入れる。
     um_gpu_pick: (_id, count) => (runner && count >>> 0 >= threshold ? 1 : 0),
     // GPU がない環境では呼ばれない（生成コードが先に um_gpu_available / um_gpu_pick を確かめる）。
+    um_gpu_group: (size) => {
+      if (runner) runner.group = size >>> 0;
+    },
     um_gpu_dispatch: device
       ? new WebAssembly.Suspending((...args) => runner.dispatch(...args))
       : () => {

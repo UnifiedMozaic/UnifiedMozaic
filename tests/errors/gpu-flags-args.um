@@ -1,0 +1,6 @@
+// error: arg-count
+// gpu.flags は引数を 1 つ（このあとの gpu.submit に付ける印）取る。
+export function main(): i32 {
+  gpu.flags();
+  return 0;
+}

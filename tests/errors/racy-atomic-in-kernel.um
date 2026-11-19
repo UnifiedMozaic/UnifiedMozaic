@@ -1,20 +1,12 @@
-// kernel の中ではアトミック演算を使えない。
-kernel function k(i: u32, out: mut RacyBuffer<u32>): void {
+// kernel の中のアトミック演算は 32 ビットの要素だけ（GPU のアトミックは 32 ビット）。
+kernel function k(i: u32, out: mut RacyBuffer<u8>): void {
   out.fetchAdd(0, 1);
 }
 
-function f(x: i32): i32 {
-  return x;
-}
-
-function g(xs: i32[]): i32 {
-  return xs[0];
-}
-
 export function main(): i32 {
-  let b = new RacyBuffer<u32>(4);
+  let b = new RacyBuffer<u8>(4);
   dispatch(k, 4, mut b);
   return 0;
 }
 
-// error: kernel-restriction
+// error: kernel-type

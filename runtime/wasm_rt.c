@@ -240,6 +240,66 @@ int um_write_file(const char *path, size_t plen, const unsigned char *data, size
   return um_host_write_file(path, plen, data, len) != 0;
 }
 
+// ---- ファイルの一部と追記、コマンドライン引数、標準エラー出力 ----
+// i64 の引数と結果は、ホストでは BigInt になる。
+
+// ふつうのファイルの大きさ。なければ（読めなければ）負の値。
+long long um_host_file_size(const char *path, size_t plen) __attribute__((import_module("env"), import_name("um_host_file_size")));
+// ファイルの一部を用意して、そのバイト数を返す。読めなければ -1。
+int um_host_read_file_range(const char *path, size_t plen, long long offset, long long len)
+    __attribute__((import_module("env"), import_name("um_host_read_file_range")));
+int um_host_append_file(const char *path, size_t plen, const unsigned char *data, size_t len)
+    __attribute__((import_module("env"), import_name("um_host_append_file")));
+// 引数の個数と、i 番目の引数を用意してそのバイト数を返す。
+int um_host_argc(void) __attribute__((import_module("env"), import_name("um_host_argc")));
+int um_host_arg(int i) __attribute__((import_module("env"), import_name("um_host_arg")));
+void um_host_eprint(const char *data, size_t len) __attribute__((import_module("env"), import_name("um_host_eprint")));
+
+int um_file_size(const char *path, size_t plen, long long *out) {
+  long long n = um_host_file_size(path, plen);
+  *out = n < 0 ? 0 : n;
+  return n >= 0;
+}
+
+int um_read_file_range(const char *path, size_t plen, long long offset, long long len, unsigned char **out, size_t *outlen) {
+  if (offset < 0 || len < 0) {
+    *out = 0;
+    *outlen = 0;
+    return 0;
+  }
+  return take_pending(um_host_read_file_range(path, plen, offset, len), out, outlen);
+}
+
+int um_append_file(const char *path, size_t plen, const unsigned char *data, size_t len) {
+  return um_host_append_file(path, plen, data, len) != 0;
+}
+
+// %um.Array（要素の場所、長さ、容量）と同じ並び。
+typedef struct {
+  unsigned char *data;
+  size_t len, cap;
+} um_bytes;
+
+void um_args(um_bytes **out, size_t *len) {
+  *out = 0;
+  *len = 0;
+  int n = um_host_argc();
+  if (n <= 0) return;
+  um_bytes *a = um_alloc((size_t)n, sizeof(um_bytes));
+  for (int i = 0; i < n; i++) {
+    unsigned char *p;
+    size_t l;
+    take_pending(um_host_arg(i), &p, &l);
+    a[i].data = p;
+    a[i].len = l;
+    a[i].cap = l;
+  }
+  *out = a;
+  *len = (size_t)n;
+}
+
+void um_eprint(const char *data, size_t len) { um_host_eprint(data, len); }
+
 // ---- スレッド ----
 // wasm32 にはスレッドがないので、thread.spawn / spawnEach は控えておくだけにし、合流の時点（thread.join か
 // ブロックの終わりの自動の合流）でその場で最後まで実行する（spawnEach は要素の順）。起動の時点で実行しないのは、

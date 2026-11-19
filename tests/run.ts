@@ -97,6 +97,8 @@ async function runWasm(src: string, tag: string): Promise<{ out: string[]; panic
       disk.set(path, bytes);
       return true;
     },
+    // fileSize / readFileRange / appendFile は、readFile / writeFile の口で代わりに行われる。
+    eprint: () => {},
   });
   try {
     await (exports.main as () => unknown)();
@@ -455,6 +457,47 @@ if (process.platform !== 'win32') {
     const errs = e instanceof CompileErrors ? e.errors : e instanceof CompileError ? [e] : null;
     if (errs && errs.length === 1 && errs[0].code === 'const-cycle') ok('cycle of 3000 constants');
     else fail('cycle of 3000 constants', errs ? errs.map((x) => `${x.code} (${x.message})`).join(', ') : String(e));
+  }
+}
+
+// コマンドライン引数 args() と標準エラー出力 eprint()。引数は空白・空文字列・UTF-8 をそのまま渡す。
+{
+  const src = [
+    'export function main(): i32 {',
+    '  const a = args();',
+    '  print(a.length);',
+    '  for (const s of a) {',
+    '    print("[" + s + "]");',
+    '  }',
+    '  eprint("err " + String(a.length));',
+    '  return 0;',
+    '}',
+  ].join('\n');
+  const argv = ['a b', '', 'é'];
+  const want = ['3', '[a b]', '[]', '[é]'];
+  try {
+    const exe = join(tmp, 'args_test.bin');
+    build(compileToLL(src, 'host'), 'host', exe);
+    const r = spawnSync(exe, argv, { encoding: 'utf8', cwd: tmp });
+    const out = r.stdout.split('\n').filter((l) => l !== '');
+    if (same(out, want) && r.stderr === 'err 3\n') ok('args() and eprint() [host]');
+    else fail('args() and eprint() [host]', `stdout: ${out.join(' | ')}\nstderr: ${r.stderr}`);
+  } catch (e) {
+    fail('args() and eprint() [host]', String(e));
+  }
+  if (hasWasm) {
+    try {
+      const wasm = join(tmp, 'args_test.wasm');
+      build(compileToLL(src, 'wasm32'), 'wasm32', wasm);
+      const out: string[] = [];
+      const err: string[] = [];
+      const exports = await instantiate(readFileSync(wasm), { gpu: false, print: (s: string) => out.push(s), eprint: (s: string) => err.push(s), args: argv });
+      await (exports.main as () => unknown)();
+      if (same(out, want) && same(err, ['err 3'])) ok('args() and eprint() [wasm32]');
+      else fail('args() and eprint() [wasm32]', `stdout: ${out.join(' | ')}\nstderr: ${err.join(' | ')}`);
+    } catch (e) {
+      fail('args() and eprint() [wasm32]', String(e));
+    }
   }
 }
 

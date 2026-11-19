@@ -1,0 +1,19 @@
+// Buffer から読んだ値で回る回数が決まるループの中にも、barrier は置けない（スレッドごとに回数が違いうる）。
+kernel function k(i: u32, out: mut Buffer<u32>, ns: Buffer<u32>): void {
+  let acc: u32 = 0;
+  const n = ns[i];
+  for (let r: u32 = 0; r < n; r++) {
+    acc += r;
+    group.barrier();
+  }
+  out[i] = acc;
+}
+
+export function main(): i32 {
+  let b = new Buffer<u32>(64);
+  let ns = new Buffer<u32>(64);
+  dispatchGroups(k, 2, 32, mut b, ns);
+  return 0;
+}
+
+// error: kernel-restriction

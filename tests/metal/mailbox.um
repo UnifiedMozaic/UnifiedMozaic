@@ -1,0 +1,167 @@
+// gpu.flags の 8（郵便受けの列）: 待機命令に乗る並び（検算なし・急ぎの列）を、合図で待たせる代わりに、先に走らせて
+// おいた命令に共有メモリの番号で知らせて走らせる（runtime/metal.m の「郵便受けの列」）。結果は、同じ kernel を CPU で
+// 実行した結果と同じになる。形は kernel の並びだけで決まるので、Buffer の組を変えても、並びの長さを変えても、ほかの経路の
+// 仕事を挟んでも、複数のスレッドから投げても、Buffer を作り直しても同じ。
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: 0
+
+kernel function stage1(i: u32, a: mut RacyBuffer<i32>, pos: RacyBuffer<i32>, bias: i32): void {
+  let acc = bias;
+  for (let k: u32 = 0; k < 16; k++) {
+    acc = acc + pos[i * 16 + k] * ((k as i32) - 7) + ((acc >> 3) ^ (k as i32));
+  }
+  a[i] = acc;
+}
+
+kernel function stage2(i: u32, b: mut RacyBuffer<i32>, a: RacyBuffer<i32>, mul: i32): void {
+  b[i] = a[i] * mul + (i as i32);
+}
+
+kernel function stage3(i: u32, out: mut RacyBuffer<i32>, b: RacyBuffer<i32>, a: RacyBuffer<i32>): void {
+  out[i] = (b[i] ^ (a[i] >> 2)) + 1;
+}
+
+struct Place {
+  id: u32;
+  pos: RacyBuffer<i32>;
+  a: RacyBuffer<i32>;
+  b: RacyBuffer<i32>;
+  out: RacyBuffer<i32>;
+  ca: RacyBuffer<i32>;
+  cb: RacyBuffer<i32>;
+  cout: RacyBuffer<i32>;
+}
+
+function place(id: u32, n: u32): Place {
+  return {
+    id: id,
+    pos: new RacyBuffer<i32>(n * 16),
+    a: new RacyBuffer<i32>(n),
+    b: new RacyBuffer<i32>(n),
+    out: new RacyBuffer<i32>(n),
+    ca: new RacyBuffer<i32>(n),
+    cb: new RacyBuffer<i32>(n),
+    cout: new RacyBuffer<i32>(n),
+  };
+}
+
+function fill(pos: RacyBuffer<i32>, seed: u32): void {
+  for (let i: u32 = 0; i < pos.length; i++) {
+    pos[i] = ((i * 2654435761 + seed * 40503) >> 7) as i32 % 1000;
+  }
+}
+
+function differ(x: RacyBuffer<i32>, y: RacyBuffer<i32>): u32 {
+  let bad: u32 = 0;
+  for (let i: u32 = 0; i < x.length; i++) {
+    if (x[i] != y[i]) {
+      bad += 1;
+    }
+  }
+  return bad;
+}
+
+// 置き場 p で、3 つの kernel の並び（full）か、後ろ 2 つだけの並びを、郵便受けの印つきで投げて待ち、CPU の結果と比べる。
+// 後ろ 2 つだけのときは、a は前の回のものをそのまま使う。
+function run(p: Place, seed: u32, full: bool, count: u32): u32 {
+  const mul = (seed % 7) as i32 + 2;
+  gpu.flags(1 | 2 | 4 | 8);
+  if (full) {
+    fill(p.pos, seed);
+    gpu.submit(stage1, count, mut p.a, p.pos, seed as i32);
+  }
+  gpu.submit(stage2, count, mut p.b, p.a, mul);
+  gpu.flags(1 | 2 | 8);
+  const t = gpu.submit(stage3, count, mut p.out, p.b, p.a);
+  gpu.flags(0);
+  gpu.wait(t);
+  if (full) {
+    cpu.dispatch(stage1, count, mut p.ca, p.pos, seed as i32);
+  }
+  cpu.dispatch(stage2, count, mut p.cb, p.ca, mul);
+  cpu.dispatch(stage3, count, mut p.cout, p.cb, p.ca);
+  return differ(p.out, p.cout) + differ(p.a, p.ca) + differ(p.b, p.cb);
+}
+
+function lane(p: own Place, rounds: u32): u32 {
+  let bad: u32 = 0;
+  for (let r: u32 = 0; r < rounds; r++) {
+    bad += run(p, p.id * 100000 + r, r % 5 != 3, p.out.length - (r % 3) * 7);
+  }
+  return bad;
+}
+
+export function main(): i32 {
+  const n: u32 = 256;
+
+  // 1. 同じ並びを繰り返す（8 回で待機に乗る）。置き場を 3 つ、入り混じった順で使う（Buffer はポインタの表で渡される）。
+  let ps: Place[] = [place(0, n), place(1, n), place(2, n)];
+  let bad: u32 = 0;
+  for (let r: u32 = 0; r < 300; r++) {
+    const k = ((r * 2654435761) >> 13) % 3;
+    bad += run(ps[k], r, true, n - (r % 4) * 5);
+  }
+  print(bad);
+
+  // 2. 短い並び（後ろ 2 つ。長い並びの待機命令に相乗りする）と長い並びを混ぜる。
+  bad = 0;
+  for (let r: u32 = 0; r < 300; r++) {
+    const k = r % 3;
+    bad += run(ps[k], 1000 + r, r % 3 != 1, n);
+  }
+  print(bad);
+
+  // 3. ほかの経路の仕事を挟む（同期の dispatch、印なしの submit、検算なしだけの submit）。見張りはどかされる。
+  bad = 0;
+  let side = place(9, n);
+  for (let r: u32 = 0; r < 120; r++) {
+    bad += run(ps[r % 3], 2000 + r, true, n);
+    fill(side.pos, r);
+    if (r % 3 == 0) {
+      gpu.dispatch(stage1, n, mut side.a, side.pos, r as i32);
+    } else if (r % 3 == 1) {
+      gpu.wait(gpu.submit(stage1, n, mut side.a, side.pos, r as i32));
+    } else {
+      gpu.flags(1);
+      const t = gpu.submit(stage1, n, mut side.a, side.pos, r as i32);
+      gpu.flags(0);
+      gpu.wait(t);
+    }
+    cpu.dispatch(stage1, n, mut side.ca, side.pos, r as i32);
+    bad += differ(side.a, side.ca);
+  }
+  print(bad);
+
+  // 4. 6 スレッドが、それぞれの置き場で同時に投げる（形は 1 つ。どのスレッドの仕事も同じ待機命令で受ける）。
+  {
+    let lanes: Place[] = [];
+    for (let k: u32 = 0; k < 6; k++) {
+      lanes.push(place(10 + k, n));
+    }
+    const g = thread.spawnEach(lane, own lanes, 200);
+    const bads = thread.join(g);
+    bad = 0;
+    for (const b of bads) {
+      bad += b;
+    }
+    print(bad);
+  }
+
+  // 5. 置き場を作り直す（前の Buffer は解放される。控えていた形は空けられ、また待機に乗る）。間も空ける。
+  bad = 0;
+  for (let round: u32 = 0; round < 3; round++) {
+    let fresh = place(20 + round, n);
+    for (let r: u32 = 0; r < 40; r++) {
+      bad += run(fresh, 3000 + round * 100 + r, r % 4 != 2, n);
+    }
+    const until = clock() + 0.3;
+    while (clock() < until) {
+    }
+    bad += run(fresh, 3900 + round, true, n);
+  }
+  print(bad);
+  return 0;
+}

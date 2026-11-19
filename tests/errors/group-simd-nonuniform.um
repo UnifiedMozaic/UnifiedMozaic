@@ -1,0 +1,19 @@
+// group.simdSum などの集計は、barrier と同じく、グループの全スレッドが通る場所にだけ置ける。
+// target: host
+kernel function k(i: u32, out: mut Buffer<i32>, xs: Buffer<i32>): void {
+  let v: i32 = 0;
+  if (group.local() < 4) {
+    const s = group.simdSum(xs[i]);
+    v = s;
+  }
+  out[i] = v;
+}
+
+export function main(): i32 {
+  let b = new Buffer<i32>(64);
+  let xs = new Buffer<i32>(64);
+  dispatchGroups(k, 2, 32, mut b, xs);
+  return 0;
+}
+
+// error: kernel-restriction

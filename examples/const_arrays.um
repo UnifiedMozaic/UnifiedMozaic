@@ -1,0 +1,66 @@
+// 最上位の定数の配列: `const 名前: T[N] = [...];`、入れ子は `T[N][M]`（TypeScript と同じ順で、`T[N][M]` は「T[N] が M 個」）。
+// 要素はコンパイル時に求める定数式（他の定数・演算子・`as`・ほかの定数の配列の要素 `A[i]` も書ける）。
+// 置き場所はプログラムの読み取り専用のデータで、ヒープを使わず、使う所ごとのコピーもしない。
+// 添字は固定長配列と同じく検査され、`i & 7` や `i % 81` のように範囲内と分かる添字では検査が省かれる。
+// kernel の中でも読める（CPU と Metal。wasm32 の dispatch はこの kernel を CPU で実行する）。
+// expect: 1099511627776
+// expect: 15
+// expect: 10
+// expect: 21
+// expect: 2
+// expect: 99
+// expect: -1
+// expect: true
+// expect: 0.75
+// expect: 204
+const N: usize = 4;
+// 64 ビットの盤面の表（マス → ビット）。
+const BIT: u64[4] = [(1 as u64) << 0, (1 as u64) << 13, (1 as u64) << 27, (1 as u64) << 40];
+const LAST_BIT: u64 = BIT[N - 1];
+// 方向ごとの移動量（2 段の表は [方向][番号]: `i32[3][4]` は「i32[3] が 4 個」）。
+const STEP: i32[3][4] = [[1, 2, 3], [-1, -2, -3], [10, 20, 30], [0, 0, 0]];
+const ROW_SUM: i32 = STEP[2][0] + STEP[2][1] - STEP[2][0] * 2;
+const FLAGS: bool[2] = [false, true];
+const WEIGHT: f32[4] = [0.25, 0.5, 0.75, 1.0];
+// 定数の配列から別の定数の配列を作る。
+const MIRROR: i32[3][2] = [STEP[1], STEP[0]];
+
+function rowTotal(row: i32[3]): i32 {
+  let s = 0;
+  for (let i = 0; i < 3; i++) {
+    s += row[i];
+  }
+  return s;
+}
+
+kernel function fill(i: u32, out: mut Buffer<i32>): void {
+  out[i] = STEP[i & 3][i % 3] * 3 + MIRROR[1][i % 3];
+}
+
+export function main(): i32 {
+  print(LAST_BIT);
+  // i & 3 は 0〜3 なので、BIT[...] の添字の検査は生成されない。
+  let bits: u64 = 0;
+  for (let i: u32 = 0; i < 16; i++) {
+    bits |= BIT[i & 3];
+  }
+  print(Math.popcount(bits) * 5 - 5);
+  print(ROW_SUM);
+  print(rowTotal(STEP[2]) - 39);
+  print(rowTotal(MIRROR[1]) / 3);
+  // 行を変数に写せば書き換えられる（定数そのものは変わらない）。
+  let row = STEP[0];
+  row[2] = 99;
+  print(row[2]);
+  print(STEP[1][0]);
+  print(FLAGS[1]);
+  print(WEIGHT[2]);
+  let out = new Buffer<i32>(12);
+  dispatch(fill, 12, mut out);
+  let total = 0;
+  for (let i: u32 = 0; i < 12; i++) {
+    total += out[i];
+  }
+  print(total);
+  return 0;
+}

@@ -1,0 +1,5 @@
+// error: kernel-restriction
+// gpu.flags / gpu.commit は CPU で GPU に仕事を頼むための呼び出しなので、kernel の中では使えない。
+kernel function k(i: u32, out: mut Buffer<u32>): void {
+  out[i] = gpu.flags(1);
+}

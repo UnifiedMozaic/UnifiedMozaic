@@ -1,0 +1,116 @@
+// gpu.untracked: 作業用の Buffer を Metal の書き込みの追跡から外す。同時に走る仕事どうしが別々の部分だけを
+// 使っていれば、結果は追跡するときと同じ。別々に提出した仕事どうしの順番は守られないので、前の仕事の結果を
+// 読む仕事は、HOLD でつないで 1 つの提出にまとめるか、前の券を待ってから投げる。
+// expect: true
+// expect: true
+// expect: true
+// expect: true
+
+const N: u32 = 4096;
+
+kernel function put(i: u32, out: mut RacyBuffer<u32>, base: u32, v: u32): void {
+  out[base + i] = v * 1000003 + i;
+}
+
+// 前の仕事が書いた値を読んで書き換える（同じ部分。前の仕事のあとに走らないと結果が変わる）。
+kernel function step(i: u32, out: mut RacyBuffer<u32>, base: u32): void {
+  out[base + i] = out[base + i] * 3 + 1;
+}
+
+function want(v: u32, i: u32, steps: u32): u32 {
+  let x = v * 1000003 + i;
+  for (let s: u32 = 0; s < steps; s++) {
+    x = x * 3 + 1;
+  }
+  return x;
+}
+
+function check(b: RacyBuffer<u32>, part: u32, v: u32, steps: u32): bool {
+  for (let i: u32 = 0; i < N; i++) {
+    if (b[part * N + i] != want(v, i, steps)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function main(): i32 {
+  let scratch = new RacyBuffer<u32>(4 * N);
+  gpu.untracked(scratch);
+
+  // 1. 4 つの部分に、急ぎの列と今までの列で交互に投げる（検算あり・なしの両方）。
+  let ok1 = true;
+  for (let r: u32 = 0; r < 40; r++) {
+    let ts: u64[4] = [0, 0, 0, 0];
+    for (let p: u32 = 0; p < 4; p++) {
+      const old = gpu.flags((p % 2) * 2 | (r % 2));
+      ts[p] = gpu.submit(put, N, mut scratch, p * N, r * 4 + p);
+      gpu.flags(old);
+    }
+    for (let p: u32 = 0; p < 4; p++) {
+      gpu.wait(ts[p]);
+    }
+    for (let p: u32 = 0; p < 4; p++) {
+      if (!check(scratch, p, r * 4 + p, 0)) {
+        ok1 = false;
+      }
+    }
+  }
+  print(ok1);
+
+  // 2. HOLD でつないだ並び（書いてから読む）。順番が守られていれば、steps 回分の値になる。
+  let ok2 = true;
+  for (let r: u32 = 0; r < 40; r++) {
+    const old = gpu.flags(1 | 2 | 4);
+    gpu.submit(put, N, mut scratch, 0, r);
+    gpu.submit(step, N, mut scratch, 0);
+    gpu.submit(step, N, mut scratch, 0);
+    gpu.flags(1 | 2);
+    const t = gpu.submit(step, N, mut scratch, 0);
+    gpu.flags(old);
+    gpu.wait(t);
+    if (!check(scratch, 0, r, 3)) {
+      ok2 = false;
+    }
+  }
+  print(ok2);
+
+  // 3. 検算あり・今までの列で、HOLD でつないだ並び。
+  let ok3 = true;
+  for (let r: u32 = 0; r < 20; r++) {
+    const old = gpu.flags(4);
+    gpu.submit(put, N, mut scratch, N, r);
+    gpu.submit(step, N, mut scratch, N);
+    gpu.flags(0);
+    const t = gpu.submit(step, N, mut scratch, N);
+    gpu.flags(old);
+    gpu.wait(t);
+    if (!check(scratch, 1, r, 2)) {
+      ok3 = false;
+    }
+  }
+  print(ok3);
+
+  // 4. 解放すると印は消える（同じ場所に作り直した Buffer は追跡される）。普通の Buffer にも使える。
+  let ok4 = true;
+  for (let r: u32 = 0; r < 5; r++) {
+    let tmp = new RacyBuffer<u32>(N);
+    let ro = new Buffer<u32>(N);
+    if (r % 2 == 0) {
+      gpu.untracked(tmp);
+      gpu.untracked(ro);
+    }
+    // 別々に提出するときは、前の券を待ってから次を投げる。
+    const t1 = gpu.submit(put, N, mut tmp, 0, r);
+    gpu.wait(t1);
+    const t = gpu.submit(step, N, mut tmp, 0);
+    gpu.wait(t);
+    for (let i: u32 = 0; i < N; i++) {
+      if (tmp[i] != want(r, i, 1)) {
+        ok4 = false;
+      }
+    }
+  }
+  print(ok4);
+  return 0;
+}

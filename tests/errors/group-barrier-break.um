@@ -1,0 +1,18 @@
+// barrier を含むループの中では break を使えない。
+kernel function k(i: u32, out: mut Buffer<u32>, n: u32): void {
+  for (let r: u32 = 0; r < n; r++) {
+    group.barrier();
+    if (r == 3) {
+      break;
+    }
+  }
+  out[i] = 1;
+}
+
+export function main(): i32 {
+  let b = new Buffer<u32>(64);
+  dispatchGroups(k, 2, 32, mut b, 8);
+  return 0;
+}
+
+// error: kernel-restriction

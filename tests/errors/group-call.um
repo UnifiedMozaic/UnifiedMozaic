@@ -1,0 +1,16 @@
+// group.* を使う kernel は、関数として呼べない（呼んだ側のグループが決まらない）。
+kernel function lane(x: u32): u32 {
+  return x + group.local();
+}
+
+kernel function k(i: u32, out: mut Buffer<u32>): void {
+  out[i] = lane(i);
+}
+
+export function main(): i32 {
+  let b = new Buffer<u32>(64);
+  dispatchGroups(k, 2, 32, mut b);
+  return 0;
+}
+
+// error: kernel-restriction

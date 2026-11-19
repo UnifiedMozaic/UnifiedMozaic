@@ -1,0 +1,96 @@
+// グループ（dispatchGroups）: kernel をグループに分けて実行する。グループの中のスレッドは、共有配列
+// （`group.shared()`）を一緒に使い、`group.barrier()` でそろってから次へ進める。
+// `group.local()` はグループの中の番号、`group.id()` はグループの番号、`group.size()` は大きさ、
+// `group.count()` はグループの数。kernel の添字は group.id() * group.size() + group.local()。
+// GPU があれば GPU で、なければ CPU でグループを1つずつ（barrier の間を全スレッドについて順に）実行する。
+// kernel の中では RacyBuffer のアトミック演算（load / store / fetchAdd / compareExchange）も使える。
+// expect: 32640
+// expect: 98176
+// expect: 163712
+// expect: 229248
+// expect: true
+// expect: 5003
+// expect: 1
+// expect: 7
+// expect: 256
+// expect: 1
+
+kernel function groupSum(i: u32, out: mut RacyBuffer<u32>, xs: Buffer<u32>): void {
+  let t: u32[256] = group.shared();
+  const l = group.local();
+  t[l] = xs[i];
+  group.barrier();
+  for (let s = group.size() / 2; s > 0; s = s / 2) {
+    if (l < s) {
+      t[l] = t[l] + t[l + s];
+    }
+    group.barrier();
+  }
+  if (l == 0) {
+    out[group.id()] = t[0];
+  }
+}
+
+kernel function ids(i: u32, out: mut Buffer<u32>): void {
+  out[i] = (group.id() * group.size() + group.local()) * 1000 + group.count();
+}
+
+// barrier を使わない kernel では return も使える（そのスレッドだけが終わる）。
+kernel function early(i: u32, out: mut Buffer<u32>): void {
+  if (group.local() >= 2) {
+    out[i] = 7;
+    return;
+  }
+  out[i] = group.local();
+}
+
+kernel function histogram(i: u32, hist: mut RacyBuffer<u32>, xs: Buffer<u32>): void {
+  hist.fetchAdd(xs[i] % 4, 1);
+}
+
+kernel function claim(i: u32, slot: mut RacyBuffer<i32>, wins: mut RacyBuffer<u32>): void {
+  if (slot.compareExchange(0, 0, (i as i32) + 1) == 0) {
+    wins.fetchAdd(0, 1);
+  }
+}
+
+export function main(): i32 {
+  const n: u32 = 4 * 256;
+  let xs = new Buffer<u32>(n);
+  for (let k: u32 = 0; k < n; k++) {
+    xs[k] = k;
+  }
+  let sums = new RacyBuffer<u32>(4);
+  dispatchGroups(groupSum, 4, 256, mut sums, xs);
+  for (const s of sums) {
+    print(s);
+  }
+  let again = new RacyBuffer<u32>(4);
+  cpu.dispatchGroups(groupSum, 4, 256, mut again, xs);
+  let same = true;
+  for (let g: u32 = 0; g < 4; g++) {
+    if (again[g] != sums[g]) {
+      same = false;
+    }
+  }
+  print(same);
+
+  let o = new Buffer<u32>(12);
+  dispatchGroups(ids, 3, 4, mut o);
+  print(o[5]);
+
+  let e = new Buffer<u32>(8);
+  dispatchGroups(early, 2, 4, mut e);
+  print(e[5]);
+  print(e[6]);
+
+  let h = new RacyBuffer<u32>(4);
+  dispatch(histogram, n, mut h, xs);
+  print(h[3]);
+
+  let slot = new RacyBuffer<i32>(1);
+  let wins = new RacyBuffer<u32>(1);
+  dispatch(claim, 1000, mut slot, mut wins);
+  print(wins[0]);
+  return 0;
+}

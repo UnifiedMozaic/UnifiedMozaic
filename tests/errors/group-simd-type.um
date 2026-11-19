@@ -1,0 +1,15 @@
+// group.simdSum などは i32 / u32 / f32 だけ。
+// target: host
+kernel function k(i: u32, out: mut Buffer<u8>, xs: Buffer<u8>): void {
+  const s = group.simdMax(xs[i]);
+  out[i] = s;
+}
+
+export function main(): i32 {
+  let b = new Buffer<u8>(64);
+  let xs = new Buffer<u8>(64);
+  dispatchGroups(k, 2, 32, mut b, xs);
+  return 0;
+}
+
+// error: kernel-type

@@ -1,0 +1,6 @@
+// error: type-mismatch
+// readFileRange の位置は i64。文字列は渡せない。
+export function main(): i32 {
+  const part = readFileRange("data.bin", "0", 4);
+  return 0;
+}

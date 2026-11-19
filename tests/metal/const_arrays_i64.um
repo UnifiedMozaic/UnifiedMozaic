@@ -1,0 +1,24 @@
+// 64 ビットの整数の定数の配列を kernel の中で読む（MSL では ulong / long の constant の変数）。
+// 32 ビットに収まらない値（2^40、u64 の最大値、負の大きな i64）が GPU でも切れずに読めることを確かめる。
+// expect: 1099511627776
+// expect: 18446744073709551615
+// expect: 5
+// expect: -5000000000
+// expect: 7
+// expect: -5000000000
+const BIG: u64[3] = [(1 as u64) << 40, ~(0 as u64), 5];
+const NEG: i64[2] = [-5000000000 as i64, 7];
+
+kernel function rd(i: u32, out: mut Buffer<u64>, sout: mut Buffer<i64>): void {
+  out[i] = BIG[i];
+  sout[i] = NEG[i & 1];
+}
+
+export function main(): i32 {
+  let out = new Buffer<u64>(3);
+  let sout = new Buffer<i64>(3);
+  gpu.dispatch(rd, 3, mut out, mut sout);
+  for (const v of out) { print(v); }
+  for (const v of sout) { print(v); }
+  return 0;
+}

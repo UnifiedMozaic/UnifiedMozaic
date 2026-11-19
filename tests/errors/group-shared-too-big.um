@@ -1,0 +1,16 @@
+// 共有配列は合わせて 16 KiB まで（WebGPU が必ず用意する大きさ）。
+kernel function k(i: u32, out: mut Buffer<u32>): void {
+  let a: f32[3000] = group.shared();
+  let b: f32[2000] = group.shared();
+  a[group.local()] = 1;
+  b[group.local()] = 2;
+  out[i] = 1;
+}
+
+export function main(): i32 {
+  let o = new Buffer<u32>(64);
+  dispatchGroups(k, 2, 32, mut o);
+  return 0;
+}
+
+// error: kernel-restriction

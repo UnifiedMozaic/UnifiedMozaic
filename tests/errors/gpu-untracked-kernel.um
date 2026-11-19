@@ -1,0 +1,13 @@
+// gpu.untracked は kernel の中では使えない。
+kernel function k(i: u32, out: mut Buffer<u32>): void {
+  gpu.untracked(out);
+  out[i] = i;
+}
+
+export function main(): i32 {
+  let b = new Buffer<u32>(8);
+  dispatch(k, 8, mut b);
+  return 0;
+}
+
+// error: kernel-restriction

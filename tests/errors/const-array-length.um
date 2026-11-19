@@ -1,0 +1,6 @@
+// error: type-mismatch
+// 要素の個数は型の長さと一致しなければならない。
+const T: u32[3][2] = [[1, 2, 3], [4, 5]];
+export function main(): i32 {
+  return 0;
+}

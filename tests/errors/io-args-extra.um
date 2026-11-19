@@ -1,0 +1,6 @@
+// error: arg-count
+// args() は引数を取らない。
+export function main(): i32 {
+  const a = args(1);
+  return a.length;
+}

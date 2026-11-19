@@ -1,0 +1,8 @@
+// error: index-range
+// 定数の初期化の中の添字も、コンパイル時に範囲を確かめる。
+const N: u32 = 3;
+const T: u32[3] = [1, 2, 3];
+const LAST: u32 = T[N];
+export function main(): i32 {
+  return 0;
+}

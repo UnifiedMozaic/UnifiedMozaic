@@ -1,0 +1,16 @@
+// 共有配列は kernel の本体の直下でだけ宣言できる。
+kernel function k(i: u32, out: mut Buffer<u32>): void {
+  if (i < 100) {
+    let t: u32[32] = group.shared();
+    t[group.local()] = i;
+  }
+  out[i] = 1;
+}
+
+export function main(): i32 {
+  let b = new Buffer<u32>(64);
+  dispatchGroups(k, 2, 32, mut b);
+  return 0;
+}
+
+// error: kernel-restriction

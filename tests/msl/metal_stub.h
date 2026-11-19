@@ -12,8 +12,11 @@
 #define device
 #define constant
 #define thread
+#define threadgroup
 
 typedef unsigned int uint;
+// MSL の long / ulong は 64 ビット（この stub を使う LP64 の C++ の long も 64 ビット）。
+typedef unsigned long ulong;
 
 namespace metal {
 
@@ -51,20 +54,59 @@ inline T select(T a, T b, bool c) {
   return c ? b : a;
 }
 
-// 整数の popcount / clz / ctz は、引数と同じ型を返す。0 の clz / ctz は 32。
+// 整数の popcount / clz / ctz は、引数と同じ型を返す。0 の clz / ctz はビット幅（32 / 64）。
 template <class T>
 inline T popcount(T x) {
+  if (sizeof(T) == 8) return T(__builtin_popcountll((unsigned long long)x));
   return T(__builtin_popcount(uint(x)));
 }
 
 template <class T>
 inline T clz(T x) {
+  if (sizeof(T) == 8) return (unsigned long long)x == 0ull ? T(64) : T(__builtin_clzll((unsigned long long)x));
   return uint(x) == 0u ? T(32) : T(__builtin_clz(uint(x)));
 }
 
 template <class T>
 inline T ctz(T x) {
+  if (sizeof(T) == 8) return (unsigned long long)x == 0ull ? T(64) : T(__builtin_ctzll((unsigned long long)x));
   return uint(x) == 0u ? T(32) : T(__builtin_ctz(uint(x)));
+}
+
+// グループの barrier。C++ では1スレッドずつ実行するので何もしない（構文の確認用）。
+enum class mem_flags { mem_none = 0, mem_device = 1, mem_threadgroup = 2 };
+inline void threadgroup_barrier(mem_flags) {}
+
+// アトミック（relaxed だけ）。C++ では1スレッドずつ実行するので普通の読み書きにする。
+enum memory_order { memory_order_relaxed };
+struct atomic_int {
+  int v;
+};
+struct atomic_uint {
+  uint v;
+};
+inline int atomic_load_explicit(atomic_int *p, memory_order) { return p->v; }
+inline uint atomic_load_explicit(atomic_uint *p, memory_order) { return p->v; }
+inline void atomic_store_explicit(atomic_int *p, int x, memory_order) { p->v = x; }
+inline void atomic_store_explicit(atomic_uint *p, uint x, memory_order) { p->v = x; }
+inline int atomic_fetch_add_explicit(atomic_int *p, int x, memory_order) {
+  int old = p->v;
+  p->v = int(uint(old) + uint(x));
+  return old;
+}
+inline uint atomic_fetch_add_explicit(atomic_uint *p, uint x, memory_order) {
+  uint old = p->v;
+  p->v = old + x;
+  return old;
+}
+template <class A, class T>
+inline bool atomic_compare_exchange_weak_explicit(A *p, T *expected, T desired, memory_order, memory_order) {
+  if (p->v == *expected) {
+    p->v = desired;
+    return true;
+  }
+  *expected = p->v;
+  return false;
 }
 
 }  // namespace metal

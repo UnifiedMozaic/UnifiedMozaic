@@ -71,8 +71,8 @@ node src/cli.ts build examples/structs.um --emit-llvm -o structs.ll
 | 文 | `let` / `const`（`let x: T;` はゼロで初期化）、代入と複合代入、`++` / `--`、`if` / `else`、`while`、`do ... while`、`for (;;)`、`for...of`、`switch`、`match`、`break`、`continue`、`return` |
 | 式 | 四則演算と剰余、比較、`&&` / `\|\|` / `!`、条件式 `a ? b : c`、`x ?? 既定値`、ビット演算とシフト、`as` による変換、関数とメソッドの呼び出し、`new`、`this`、フィールドと添字、オブジェクトリテラル、配列リテラル、`new Array<T>(n)`、`xs.length`、テンプレート文字列 `` `x = ${x}` ``、`String(x)` |
 | 配列のメソッド | `push`、`pop`、`clear`、`clone`、一括の書き込み `fill(v)` / `fill(v, start, end)`（Buffer / RacyBuffer にも。下の「一括の書き込み」） |
-| 組み込み | `print(x)`（数、`bool`、文字列）、`dispatch` / `cpu.dispatch` / `gpu.dispatch`、`gpu.submit` / `gpu.ready` / `gpu.wait`、`thread.*`（下の「スレッド」）、`Math.sqrt` / `floor` / `ceil` / `abs` / `min` / `max`、ビット演算の `Math.popcount` / `clz` / `ctz`、マスクつきシフト `Math.shl` / `Math.shr`（下の「マスクつきシフトと範囲チェックの除去」）、先読み `Math.prefetch(arr, i)`（下の「先読み」）、SIMD の `Simd.*`（下の「SIMD のベクトル」） |
-| 入出力の組み込み | `readLine()`、`inputReady()`、`clock()`、`stringFromBytes(bytes)`、`readFile(path)`、`writeFile(path, bytes)`（下の「入出力」） |
+| 組み込み | `print(x)`（数、`bool`、文字列）、`dispatch` / `cpu.dispatch` / `gpu.dispatch`、グループで実行する `dispatchGroups`（下の「グループ（共有配列・barrier）と kernel の中のアトミック演算」）、`gpu.submit` / `gpu.ready` / `gpu.wait`、`gpu.flags` / `gpu.commit` / `gpu.untracked`（下の「Metal（Mac）での GPU 実行」）、`thread.*`（下の「スレッド」）、`Math.sqrt` / `floor` / `ceil` / `abs` / `min` / `max`、ビット演算の `Math.popcount` / `clz` / `ctz`、マスクつきシフト `Math.shl` / `Math.shr`（下の「マスクつきシフトと範囲チェックの除去」）、先読み `Math.prefetch(arr, i)`（下の「先読み」）、SIMD の `Simd.*`（下の「SIMD のベクトル」） |
+| 入出力の組み込み | `readLine()`、`inputReady()`、`clock()`、`stringFromBytes(bytes)`、`readFile(path)`、`writeFile(path, bytes)`、`fileSize(path)`、`readFileRange(path, offset, length)`、`appendFile(path, bytes)`、`args()`、`eprint(text)`（下の「入出力」） |
 
 それぞれの書き方は、下の各節と「そのほかの機能」の例にあります。
 
@@ -124,8 +124,8 @@ export const NAME: string = "um-engine";   // 他のファイルから import �
 function sum(xs: i32[SQUARES]): i32 { ... } // 固定長配列の長さにも使える
 ```
 
-- **型は必ず書きます。** 使える型は整数、`f32`、`f64`、`bool`、`string` です（配列や `struct` の定数、`f4` / `f8` / `f16` の定数はまだありません）。
-- **初期化に書けるのは、リテラル・他の定数・単項と二項の演算子・`as`・かっこだけです。** 関数の呼び出しなどはコンパイルエラーです。定数どうしは書く順番によらず使えます（互いに頼り合うとエラー）。
+- **型は必ず書きます。** 使える型は整数、`f32`、`f64`、`bool`、`string` と、整数・`f32`・`f64`・`bool` の固定長配列（下の「定数の配列」）です（`struct` の定数、`f4` / `f8` / `f16` の定数、可変長配列の定数はまだありません）。
+- **初期化に書けるのは、リテラル・配列リテラル・他の定数（定数の配列の要素 `T[i]` も）・単項と二項の演算子・`as`・かっこだけです。** 関数の呼び出しなどはコンパイルエラーです。定数どうしは書く順番によらず使えます（互いに頼り合うとエラー）。
 - **値の計算は実行時と同じ意味です。** 式は `const x: T = 式` と同じ規則で型を検査します（リテラルは定数の型に合わせます）。整数はラップし、小数から整数への変換は飽和します。`&&` / `||` は、左辺で結果が決まれば右辺を計算しません。実行時なら停止する計算（整数のゼロ除算、ビット幅以上のシフト）はコンパイルエラーです。
 - **使う所では、その型の値として扱われます。** 暗黙の型変換はないので、`i32` の定数を `usize` の所で使うには `as` が要ります。`for (let i = 0; i < N; i++)` の `i` は `N` の型になります。
 - **kernel の中でも使えます**（kernel で使える型の定数に限ります。GPU 向けのコードにも同じ値が入ります）。
@@ -134,6 +134,30 @@ function sum(xs: i32[SQUARES]): i32 { ... } // 固定長配列の長さにも使
 - **グローバル変数（最上位の `let`）はありません。** 変わる値は関数の中に置き、`mut` 引数で渡します。
 
 例: [examples/global_consts.um](../examples/global_consts.um)。
+
+### 定数の配列
+
+固定長配列の定数も書けます。盤面の利きのような表を、コンパイル時に決まる読み取り専用のデータとして持つためのものです。
+
+```ts
+const BIT: u64[4] = [1, (1 as u64) << 13, (1 as u64) << 27, (1 as u64) << 40];
+const STEP: i32[3][4] = [[1, 2, 3], [-1, -2, -3], [10, 20, 30], [0, 0, 0]];  // i32[3] が 4 個
+const LAST: u64 = BIT[3];                          // 要素を別の定数に使える
+const ROWS: i32[3][2] = [STEP[1], STEP[0]];        // 行を別の定数の配列に使える
+
+bits |= BIT[sq & 3];      // 範囲内と分かる添字なので検査なし
+const d = STEP[dir][k];
+```
+
+- **入れ子の順番は TypeScript と同じです。** `T[N][M]` は「`T[N]` が `M` 個」で、`STEP[i]` の `i` は `0`〜`M-1`、`STEP[i][j]` の `j` は `0`〜`N-1` です（C とは逆）。
+- **要素はコンパイル時に求めます。** 規則は普通の定数と同じです（整数はラップ、ゼロ除算などはコンパイルエラー）。要素の個数が型の長さと違うとエラーです。
+- **置き場所はプログラムの読み取り専用のデータです。** ヒープを使わず、使う所ごとのコピーもしません。添字は固定長配列と同じく検査され、`x & 63`、`x % 81`、`if (i < N)` の中のように範囲内と分かる添字では検査が省かれます（下の「マスクつきシフトと範囲チェックの除去」）。
+- **書き換えられません。** 要素への代入と `mut` での貸し出しはコンパイルエラーです。`let t = STEP[0];` のように変数に写せば、その写しは書き換えられます。関数の引数（修飾なし）にはコピーせずに貸します。
+- **大きさ。** 定数の配列は 4,194,304 個まで持てます。ただし、値としてコピーする使い方（変数に入れる、`own` で渡す、kernel の値の引数にする）ができるのは、普通の固定長配列と同じ 4096 個までです。大きな表は添字で読みます。
+- **kernel の中でも読めます**（kernel で使える型の表に限ります）。CPU では同じ読み取り専用のデータを読み、Metal では MSL のプログラムの範囲の `constant` の変数になります（kernel の引数は増えません）。範囲外の添字は固定長配列と同じく最後の要素に切り詰めます。WebGPU（WGSL）には対応しません。wasm32 では、定数の配列を使う kernel の `dispatch` は CPU で実行し、`gpu.dispatch` はコンパイルエラー（`webgpu-const-array`）です。
+- **まだできないこと:** 関数の呼び出しで表を作ること（`const T: u64[81] = makeTable();` のようなコンパイル時の関数の実行）。大きな表は、生成するスクリプトで `.um` の配列リテラルを書き出してください。`struct` の要素の表もまだです。
+
+例: [examples/const_arrays.um](../examples/const_arrays.um)、[tests/metal/const_arrays.um](../tests/metal/const_arrays.um)・[tests/metal/const_arrays_i64.um](../tests/metal/const_arrays_i64.um)（Metal。64 ビットの整数の表も CPU と同じ値になる）。
 
 ## 入出力
 
@@ -153,6 +177,11 @@ while (true) {
 | `stringFromBytes(bytes: u8[]): string` | バイト列を写した新しい文字列を作ります（UTF-8 かどうかは確かめません）。 |
 | `readFile(path: string): u8[] \| null` | ファイル全体をバイト列として読みます。読めなければ `null`。 |
 | `writeFile(path: string, bytes: u8[]): bool` | ファイルを作って（あれば中身を置き換えて）書きます。すべて書けたら `true`。 |
+| `fileSize(path: string): i64 \| null` | ふつうのファイルの大きさ（バイト数）。ないファイルやフォルダなどは `null`。 |
+| `readFileRange(path: string, offset: i64, length: i64): u8[] \| null` | `offset` バイト目から最大 `length` バイトを読みます。ファイルの終わりで止まるので短く（終わりより後ろなら長さ 0 に）なります。負の `offset` / `length` や読めないファイルは `null`。大きなファイルの中を二分探索するときなどに、全体を読まずに済みます。ふつうのファイルでないもの（`/dev/urandom` など）は `offset` が 0 のときだけ読めます。 |
+| `appendFile(path: string, bytes: u8[]): bool` | ファイルの終わりに書き足します（なければ作ります）。すべて書けたら `true`。ログを少しずつ書くのに使います。 |
+| `args(): string[]` | コマンドライン引数。プログラム名（`argv[0]`）は含みません。引数がなければ長さ 0。 |
+| `eprint(text: string)` | 標準エラー出力に1行書きます（改行を付けます）。`print` と違って、まとめずにすぐ書きます。 |
 
 - **引数は借りるだけで、結果は新しい値です。** `string | null` と `u8[] | null` は、`const` に入れて `if (x != null)` で確かめてから使います。
 - **同じ名前の関数をプログラムが定義していれば、そちらが優先されます。** kernel の中では使えません。
@@ -160,9 +189,9 @@ while (true) {
 - **名前に 0 のバイトを含むファイルは読めず、書けません**（`null` / `false`）。
 - **標準入力が「待たない」設定（O_NONBLOCK）でも、`readLine()` は行が届くまで待ちます**（まだ届いていないことを、入力の終わりとは扱いません）。
 - **2 GiB 以上のファイルや行も読み書きできます**（OS への依頼を 1 GiB ずつに分けます）。
-- **wasm32 では、入出力は読み込む側が渡した口だけを通ります。** `instantiate(bytes, { readLine, inputReady, readFile, writeFile })` で渡します。渡さなければ `readLine()` は `null`、`inputReady()` は `true`（入力は終わっている）、`readFile()` は `null`、`writeFile()` は `false` です。ファイルの名前は UTF-8 の文字列として口に渡すので、UTF-8 として読めない名前は wasm32 では失敗（`null` / `false`）になります。`runtime/run-node.mjs` は標準入力とファイルをそのままつなぎます（Node には待たずに読めるかを確かめる方法がないので、`inputReady()` は読み込み済みの分だけで答えます）。wasm32 の入出力は、`node tests/run.ts` が `runtime/run-node.mjs` で実行して、ネイティブと同じ結果になることを確かめています。
+- **wasm32 では、入出力は読み込む側が渡した口だけを通ります。** `instantiate(bytes, { readLine, inputReady, readFile, writeFile, fileSize, readFileRange, appendFile, args, eprint })` で渡します。渡さなければ `readLine()` は `null`、`inputReady()` は `true`（入力は終わっている）、`readFile()` は `null`、`writeFile()` は `false`、`args()` は空、`eprint()` は `console.error` です。`fileSize` / `readFileRange` / `appendFile` の口がなければ、`readFile` / `writeFile` の口で代わりに行います（ファイル全体を読むので遅くなります）。wasm32 の `readFileRange` が一度に返せるのは 2 GiB 未満までです。ファイルの名前は UTF-8 の文字列として口に渡すので、UTF-8 として読めない名前は wasm32 では失敗（`null` / `false`）になります。`runtime/run-node.mjs` は標準入力とファイルをそのままつなぎ、`--` のあとの引数を `args()` に渡します（Node には待たずに読めるかを確かめる方法がないので、`inputReady()` は読み込み済みの分だけで答えます）。wasm32 の入出力は、`node tests/run.ts` が `runtime/run-node.mjs` で実行して、ネイティブと同じ結果になることを確かめています。
 
-例: [examples/input_lines.um](../examples/input_lines.um)、[examples/bytes_and_files.um](../examples/bytes_and_files.um)。
+例: [examples/input_lines.um](../examples/input_lines.um)、[examples/bytes_and_files.um](../examples/bytes_and_files.um)、[examples/file_ranges.um](../examples/file_ranges.um)。
 
 ## 所有権
 
@@ -213,8 +242,8 @@ export function main(): i32 {
 }
 ```
 
-- **`Buffer<T>` は CPU と GPU が共有するデータの置き場です。** 長さは固定で、要素は `i32` / `u32` / `f32` と、それらの `struct`・固定長配列・ベクトル、それに 8 / 16 ビットの整数 `i8` / `u8` / `i16` / `u16`（要素そのものとしてだけ。struct のフィールドや固定長配列の要素にはできない）に限ります。所有権の扱いは可変長配列と同じです。下の「8 / 16 ビットの整数の Buffer」を参照。
-- **kernel の中で使える型は `bool` / `i32` / `u32` / `f32` と、それらの `struct`・固定長配列、`f32` / `i32` / `u32` のベクトルと行列、値が `i32` / `u32` / `f32` / `bool` だけの enum です。** 8 / 16 ビットの整数は、単独の値として読み書きと変換だけに使えます（下の「8 / 16 ビットの整数の Buffer」）。小数リテラルは `f32` になります。
+- **`Buffer<T>` は CPU と GPU が共有するデータの置き場です。** 長さは固定で、要素は `i32` / `u32` / `i64` / `u64` / `f32` と、それらの `struct`・固定長配列、`f32` / `i32` / `u32` のベクトル、それに 8 / 16 ビットの整数 `i8` / `u8` / `i16` / `u16`（要素そのものとしてだけ。struct のフィールドや固定長配列の要素にはできない）に限ります。所有権の扱いは可変長配列と同じです。下の「8 / 16 ビットの整数の Buffer」を参照。
+- **kernel の中で使える型は `bool` / `i32` / `u32` / `i64` / `u64` / `f32` と、それらの `struct`・固定長配列、`f32` / `i32` / `u32` のベクトルと行列、値が `i32` / `u32` / `f32` / `bool` だけの enum です。** 8 / 16 ビットの整数は、単独の値として読み書きと変換だけに使えます（下の「8 / 16 ビットの整数の Buffer」）。64 ビットの整数を GPU で実行できるのは Metal だけです（下の「kernel の中の 64 ビットの整数」）。小数リテラルは `f32` になります。
 - **kernel が書き込めるのは、`mut` の Buffer の `[i]` だけです。** `i` は第1引数（`u32`）で、各要素を別々の実行が担当するので競合しません。隣の要素は、別の（`mut` でない）Buffer から読みます。どの要素にも書きたいときは `RacyBuffer`（下の「スレッド」）を使います。
 - **kernel は確保・`print`・通常の関数の呼び出し・再帰ができません。** 補助関数も `kernel function` として書きます。
 - **kernel は停止しません（GPU に停止がないため）。** 範囲外の添字は最後の要素に切り詰めます。整数のゼロ除算は `x / 0 = x`、`x % 0 = 0`、シフト量はビット幅で割った余りです。
@@ -224,6 +253,30 @@ export function main(): i32 {
 - **CPU と GPU を同時に走らせるには `gpu.submit` を使います**（下の「Metal（Mac）での GPU 実行」）。
 
 例: [examples/kernels.um](../examples/kernels.um)、[examples/particles_kernel.um](../examples/particles_kernel.um)、[examples/parallel_kernels.um](../examples/parallel_kernels.um)。
+
+### kernel の中の 64 ビットの整数
+
+kernel の中で `i64` / `u64` が使えます（変数、すべての演算、比較、`as`、`Math.popcount` / `clz` / `ctz` / `shl` / `shr` / `min` / `max` / `abs`、補助の kernel の引数と戻り値、struct のフィールドと固定長配列、dispatch する kernel の値の引数、`Buffer<i64>` / `Buffer<u64>` / `RacyBuffer<i64>` / `RacyBuffer<u64>` の要素の読み書き）。81 マスの盤面を `u64` 2 つで持つようなビットボードを、GPU で扱うためのものです。
+
+```ts
+struct Bb { lo: u64; hi: u64; }
+
+kernel function count(i: u32, out: mut Buffer<u32>, boards: Buffer<Bb>): void {
+  let lo = boards[i].lo;
+  let n: u32 = 0;
+  while (lo != 0) {               // 1 のビットを ctz で 1 つずつ取り出す
+    n += Math.ctz(lo) as u32;
+    lo = lo & (lo - 1);
+  }
+  out[i] = n + (Math.popcount(boards[i].hi) as u32);
+}
+```
+
+- **意味は 32 ビットと同じ規則です。** 演算はラップし、シフト量は 64 で割った余り、ゼロ除算は `x / 0 = x`、`x % 0 = 0`、最小値 / -1 = 最小値です。`f32` からの変換は範囲外で飽和し、NaN は 0 です。64 ビットの添字は、範囲外なら最後の要素に切り詰めます。
+- **GPU で実行できるのは Metal だけです。** MSL の `long` / `ulong` をそのまま使います（Apple M4 で `tests/metal/i64.um` が CPU と全要素一致）。WebGPU（WGSL）には 64 ビットの整数がないので、64 ビットの整数を使う kernel（呼ぶ補助の kernel を含む）は、wasm32 では `dispatch` / `gpu.submit` が CPU で実行し、`gpu.dispatch` はコンパイルエラー（`kernel-type`）になります。
+- **64 ビットのアトミック演算（`fetchAdd` / `compareExchange` など）は kernel の外だけです**（Apple の GPU にも 64 ビットのアトミックな加算・比較交換はありません）。kernel の中の `RacyBuffer<u64>` の `b[i]` は普通の 8 バイトの読み書きです。CPU ではちぎれませんが、Metal が 8 バイトの読み書きを 1 回で行うことは仕様では保証されていません（別の実行が同じ要素を同時に書くと、上下 32 ビットが別々の値になりうると考えてください）。
+- **並び**: `i64` / `u64` は 8 バイトで 8 バイト境界です（struct の中では前に詰め物が入ります。CPU と MSL で同じ並び）。dispatch の値の引数も、GPU 側の引数の struct と同じ境界に揃えて渡します（`src/codegen.ts` の `gpuDispatch`）。
+- 例: [tests/metal/i64.um](../tests/metal/i64.um)（Metal）。
 
 ### 8 / 16 ビットの整数の Buffer
 
@@ -247,6 +300,55 @@ gpu.wait(t);
 - **書く Buffer が 8 / 16 ビットの要素だと、Metal の検算による早い完了の確認は使いません**（Metal の完了の知らせを待つ）。
 - `f16` の Buffer はまだありません（WGSL の f16 は拡張機能で、丸めの決まりを CPU と揃えられないため）。
 - 例: [examples/small_ints.um](../examples/small_ints.um)。
+
+### グループ（共有配列・barrier）と kernel の中のアトミック演算
+
+`dispatchGroups(k, groups, size, 引数...)` は、kernel を「大きさ `size` のグループ」を `groups` 個並べて実行します（全体で `groups × size` 個。`cpu.dispatchGroups` / `gpu.dispatchGroups` と、待たない `gpu.submitGroups` もあります）。GPU では1つのグループが1つの threadgroup（Metal）/ workgroup（WebGPU）になり、グループの中のスレッドは共有配列を一緒に使えます。ニューラルネットの層のように同じ入力を何度も読む計算や、和を求める計算を速くするためのものです。
+
+```ts
+kernel function groupSum(i: u32, out: mut RacyBuffer<u32>, xs: Buffer<u32>): void {
+  let t: u32[256] = group.shared();   // グループで共有する配列（グループの始めに 0）
+  const l = group.local();            // グループの中の番号
+  t[l] = xs[i];                       // i = group.id() * group.size() + group.local()
+  group.barrier();                    // グループの全スレッドがここまで来るのを待つ
+  for (let s = group.size() / 2; s > 0; s = s / 2) {
+    if (l < s) {
+      t[l] = t[l] + t[l + s];
+    }
+    group.barrier();
+  }
+  if (l == 0) {
+    out[group.id()] = t[0];
+  }
+}
+dispatchGroups(groupSum, n / 256, 256, mut sums, xs);
+```
+
+- **kernel の中で使えるもの**: `group.local()` / `group.id()` / `group.size()` / `group.count()`（いずれも `u32`）、`group.barrier()`、`let t: T[N] = group.shared();`（T は `i32` / `u32` / `f32`）。これらを使う kernel は `dispatchGroups` でしか実行できず、関数として呼ぶこともできません。
+- **対応する実行先**: グループの機能は CPU と Metal で揃えています。WebGPU（wasm32）で使えるのは共有配列・barrier・kernel の中のアトミック演算までで、simdgroup の集計などの新しい機能は「WebGPU は対応しない」というコンパイルエラーになります。
+- **大きさ**: グループの大きさは 1〜1024 です（それ以外と、`groups × size` が `u32` に収まらないときは停止）。WebGPU が必ず許すのは 256 まで、Metal は kernel ごとに上限があり（ふつう 1024）、超えると GPU の実行がエラーで止まります。共有配列は kernel ごとに合わせて 16 KiB まで（WebGPU が必ず用意する大きさ）です。
+- **共有配列は本体の直下で宣言し、添字で1要素ずつ読み書きします**（配列ごと写したり、関数に渡したりはできません）。範囲外の添字は最後の要素に切り詰めます。
+- **`group.barrier()` はグループの全スレッドが通る場所にだけ置けます**（GPU では、通らないスレッドがあると止まりうるため）。barrier を囲む `if` / `while` / `for` の条件は、グループの全スレッドで同じ値になる式（定数、値の引数、`group.id()` / `size()` / `count()`、Buffer の長さと、それらだけから計算した変数）に限ります。型検査が控えめに確かめ、満たさなければコンパイルエラーです。barrier を含むループの中の `break` / `continue`、barrier を使う kernel の `return`、`for...of` の中の barrier も使えません。
+- **barrier は共有配列の読み書きをそろえます。** barrier なしで、ほかのスレッドが書いた共有配列の要素を読んだときの値は決まりません（メモリは壊れません）。
+- **CPU では、グループを1つずつ実行します**（グループどうしはスレッドプールで並列）。barrier の間の文を、グループの全スレッドについて順に実行し、barrier を含む文の条件はスレッド 0 の値で決めます（上の規則により全スレッドで同じ）。barrier をまたいで生きる変数はスレッドごとの置き場所に置きます。barrier を使わない kernel は、スレッドを1つずつ最後まで実行します。GPU と CPU で、足す順番が同じ計算は同じ結果になります（`tests/metal/groups.um`）。
+- **kernel の中でも `RacyBuffer` のアトミック演算 `load` / `store` / `fetchAdd` / `compareExchange` が使えます**（要素は `i32` / `u32`、`load` / `store` は `f32` も）。書き換える演算は `mut` の RacyBuffer だけです。順序は CPU では seq_cst、GPU では relaxed（Metal の `atomic_*_explicit`、WebGPU の `atomic*`）です。kernel の中でアトミック演算を使う RacyBuffer は、GPU ではアトミックな型の配列として渡し、`b[j]` の読み書きもアトミック（relaxed）になります。
+- **simdgroup の集計**（CPU と Metal だけ。WebGPU は対応しません）: simdgroup は、グループの中の連続した 32 スレッドです（グループの大きさが 32 で割り切れなければ、最後のものは短くなります）。
+  - `const s = group.simdSum(x);`（和）、`group.simdMin(x)`、`group.simdMax(x)`: 同じ simdgroup の全スレッドの x（`i32` / `u32` / `f32`）を集めた値。
+  - `const y = group.simdShuffle(x, lane);`: 同じ simdgroup の lane 番目のスレッドの x（lane が simdgroup の外なら最後のスレッド）。
+  - `group.simdLane()`（`u32`）: simdgroup の中の番号（`group.local() % 32`）。
+  - 集計は `let` / `const` の初期化式としてだけ書けます。barrier と同じく、グループの全スレッドが通る場所にだけ置け（囲む条件は一様な式だけ）、集計を使う kernel では `return` を使えません。CPU では barrier と同じく区切りになります。
+  - Metal の `f32` の和は足す順番が決まっていないので、CPU と丸めが違うことがあります（整数は一致）。Metal では `simd_sum` などの命令になり、共有配列と barrier を使う木の形の和より速くなります。
+  - 例（グループ全体の和）:
+    ```ts
+    let part: i32[32] = group.shared();
+    const s = group.simdSum(xs[i]);
+    if (group.simdLane() == 0) { part[group.local() / 32] = s; }
+    group.barrier();
+    let v: i32 = 0;
+    if (group.local() < (group.size() + 31) / 32) { v = part[group.local()]; }
+    const total = group.simdSum(v);   // どのスレッドでも、グループ全体の和
+    ```
+- 例: [examples/groups.um](../examples/groups.um)、[tests/metal/groups.um](../tests/metal/groups.um)（Metal）。
 
 ### 標準の関数（詰めた小さい整数）
 
@@ -323,6 +425,87 @@ print(out[0]);                                   // ready / wait のあとに読
 
 例: [examples/gpu_submit.um](../examples/gpu_submit.um)（GPU なしでも動きます）。
 
+### gpu.submit の印（`gpu.flags` / `gpu.commit`）
+
+`gpu.submit` は、既定では「書く Buffer ごとに検算の kernel を足して、完了を早く知る」「1 本の列に積み、GPU が忙しければ（提出して終わっていない命令が 4 つ）ためて、まとめて提出する」という動きをします。探索の評価のように小さい仕事を何度も往復させる使い方のために、この動きを呼ぶ側で変えられます（Metal だけ。ほかの環境では何もしません）。
+
+```ts
+const old = gpu.flags(1 | 2 | 4);   // 検算なし、急ぎの列、提出を見送る
+gpu.submit(k1, n, mut a1, x);
+gpu.submit(k2, n, mut a2, a1);
+gpu.flags(1 | 2);                   // 最後は見送らない（ここで 3 つまとめて提出される）
+gpu.submit(k3, n, mut out, a2, tag);
+gpu.flags(old);
+```
+
+- **`gpu.flags(f: u32): u32`** は、呼んだスレッドで、このあとの `gpu.submit` に付ける印を f にして、前の値を返します。印は 0（既定）か、次のビットの組み合わせです。
+  - **1（検算なし）**: 検算の kernel を積みません。完了は Metal の完了の知らせ（GPU が終わってから数十マイクロ秒遅れて届く）と、完了の印（命令の完了の処理が券ごとに書く。`gpu.ready` / `gpu.wait` が最初に見る）で知ります。検算を外すだけだと完了を知るのが遅くなるので、下の「札で完了を判断する」と組にして使います。
+  - **2（急ぎの列）**: 2 本目の Metal の列（最初に使ったときに作る）に積み、ためずにすぐ提出します。今までの列にたまっている大きい仕事の後ろに並びません。
+  - **4（提出を見送る）**: 積むだけで提出しません。同じ列への次の「見送らない」submit、`gpu.commit()`、その券の `gpu.ready` / `gpu.wait`、ためた数が 32 に達したとき、のどれかで提出されます。いくつかの kernel を 1 回の提出（約 0.1 ms の固定の手間）にまとめるためのものです。最後の submit は見送らないようにします。
+  - **8（郵便受け）**: 検算なし（1）の submit を待機命令（常駐）の経路に乗せ（急ぎの列でなくても）、合図で待たせる代わりに「郵便受けの列」で待たせます（下の「郵便受けの列」）。並びのどれか 1 つの submit に付いていれば、その並びが郵便受けの列の形になります。検算ありの submit には効きません。
+- **`gpu.commit()`** は、見送ってためてある提出を（どちらの列も）いま提出します。
+- どちらも kernel の中では使えません。印はスレッドごとです（別のスレッドの submit には効きません）。
+- 印は環境変数で上書きできます（プログラムを作り直さずに比べるため。下の「環境変数」の `UM_GPU_CHECK` / `UM_GPU_URGENT` / `UM_GPU_HOLD` / `UM_GPU_MAILBOX`）。`UM_GPU_STATS=1` で、終わるときに列ごとの submit の数、完了を何で知ったか（検算・status・完了の印）、`waitUntilCompleted` まで待った数と時間、券の表の待ちなどを標準エラー出力に 1 行出します。
+- **列をまたぐ注意**: 2 本の列のあいだでは、Metal は前の命令の書き込みを待ちません。ランタイムは、別の列のまだ終わっていない仕事が書いた領域を使う submit を、その仕事が終わるまで待たせます（安全網）。ただし「別の列で読んでいる最中の領域に書く」場合は見ないので、1 つの領域はいつも同じ列で使ってください。
+- 例: [tests/metal/submit_flags.um](../tests/metal/submit_flags.um)。
+
+**待機命令（常駐）の経路**: 検算なし（1）で急ぎの列（2）の submit は、同じ形（見送り（4）でつないだ kernel の並びと Buffer の組）が 8 回続くと、その形の命令を先に提出して合図を待たせておき、以後は引数を共有メモリに書いて合図を出すだけで走らせます（形ごとに別の Metal の列）。同期の dispatch の常駐の経路（上の「同期の dispatch を速くする仕組み」）の、`gpu.submit` 版です。
+
+- 見送りの submit はそのスレッドの中にためておき、並びの最後（見送らない submit）でまとめて走らせます。そのため、急ぎ・検算なしの見送りの submit は、別のスレッドの submit では提出されません（そのスレッドの次の見送らない submit、`gpu.commit()`、その券の `gpu.ready` / `gpu.wait` で提出されます）。
+- `UM_GPU_ASYNC_RESIDENT=0` で使いません。`=all` で、急ぎでない検算なしの submit にも使います。
+- グループの submit（`gpu.submitGroups`）も同じく対象です（形にグループの大きさを含みます）。同期の `gpu.dispatchGroups` も、普通の dispatch と同じく常駐の経路に乗ります。
+- `UM_GPU_STATS=1` の `resident submits` が、この経路で走らせた submit の数です。
+
+**郵便受けの列（印 8）**: 合図で待たせた命令は、合図を出してから GPU が動き出すまでに 60〜100 マイクロ秒かかります。郵便受けの列では、待機命令を先に走らせておきます。命令の先頭の「見張り」の kernel が共有メモリの郵便受けを見ていて、依頼の番号が書かれたら抜け、続きの kernel が走ります（依頼から kernel の終わりまで、kernel の実行時間 + 数マイクロ秒）。
+
+- 形は kernel の並びだけで決まります（Buffer の組は含めません）。待機命令の kernel は、Buffer を依頼のときに渡されるポインタの表から読むので、同じ kernel を別々の Buffer の組で（置き場ごと・スレッドごとに）どんな順に投げても、同じ待機命令で受けられます。並びが短い仕事（長い並びの一部になっているもの）は、長い並びの待機命令に相乗りします。
+- 結果が CPU から見えるのは、今までどおり命令の区切りです（GPU が終えてから 20〜85 マイクロ秒。続けて投げているほど早い）。
+- 効果（Apple M4、3 つの kernel の並びを繰り返し投げる小さな計測。往復の時間 / 毎秒の件数）: 1 スレッド 113 µs / 8.9 千 → 75 µs / 13.2 千、4 スレッド 150 µs / 24.1 千 → 129 µs / 30.9 千、10 スレッド 298 µs / 30.8 千 → 268 µs / 37.1 千。
+- 見張りが回っているあいだ、同じプロセスのほかの Metal の列の命令は走れません（GPU は列を命令の切れ目でしか切り替えません）。ランタイムは、ほかの経路（普通の dispatch、検算ありの submit など）で命令を出すたびに待機分を空振りさせて見張りをどかします。郵便受けの列の仕事とほかの経路の GPU の仕事を細かく交互に使うプログラムでは効果がありません。
+- 違う kernel の並びをたくさん、入り混じった順で投げて空振りが多くなると、自動でやめて合図の経路に戻ります（その実行のあいだ）。`UM_GPU_STATS=1` の `gpu mailbox` の行に、空振りの数などが出ます。
+- 例: [tests/metal/mailbox.um](../tests/metal/mailbox.um)。
+
+### 追跡しない Buffer（`gpu.untracked`）
+
+Metal は、同じ Buffer に書く仕事どうしを、提出（命令）をまたいで順に実行します（書き込みの追跡）。いくつものスレッドが 1 つの作業用の Buffer の別々の部分を使って仕事を投げると、この追跡のせいで仕事が 1 つずつしか走りません。`gpu.untracked(b)` は、このあとの `gpu.submit` で Buffer（または RacyBuffer）b を追跡しないように Metal に伝えます（Metal だけ。CPU と wasm32 では何もしません。Buffer を解放すると元に戻ります）。
+
+```ts
+let scratch = new RacyBuffer<i32>(threads * PER_JOB);
+gpu.untracked(scratch);
+// スレッドごとに scratch の別々の部分を使う。並びは見送り（4）でつないで 1 つの提出にまとめる。
+gpu.flags(1 | 2 | 4);
+gpu.submit(layer1, n, mut scratch, me * PER_JOB, x);
+gpu.flags(1 | 2);
+const t = gpu.submit(layer2, n, mut out, scratch, me * PER_JOB);
+```
+
+- **安全の決まり（呼ぶ側が守る）**: 同時に走りうる GPU の仕事どうしで、追跡しない Buffer の同じ要素を、一方が書き、もう一方が読む・書くことがあってはいけません。破ると、古い値や混ざった値を読みます（メモリは壊れず、停止もしません）。
+- **別々に提出した仕事どうしの順番は守られません。** 前の submit が書いた値を読む submit は、次のどれかにします。
+  - 前の券を `gpu.wait` / `gpu.ready`（または札）で終わったと確かめてから投げる。
+  - 見送り（4）でつないで 1 つの提出にまとめる。急ぎ・検算なしの並び（`gpu.flags(1 | 2 | 4)` … 最後を `gpu.flags(1 | 2)`、8 個まで）は、ランタイムが必ず 1 つの命令に入れます。それ以外の見送りは、ほかのスレッドが同じ列に submit すると途中で提出されることがあるので、1 つのスレッドだけが投げる場合に限ります。
+  - 1 つの命令の中の順番（並びの前の kernel の書き込みと、検算の kernel）は、ランタイムが守ります。
+- 同期の dispatch 文（`gpu.dispatch` など）は完了を待つので、この決まりには関係しません。
+- 例: [tests/metal/untracked.um](../tests/metal/untracked.um)。
+
+### 札で完了を判断する
+
+kernel が結果の語に世代の番号（札）を一緒に書けば、`gpu.ready` / `gpu.wait` を呼ばずに、CPU が札を見て完了を知れます（Metal の完了の知らせを待ちません）。
+
+```ts
+kernel function eval(i: u32, out: mut RacyBuffer<u32>, x: Buffer<i32>, tag: u32): void {
+  out[i] = ((score(i, x) as u32) & 65535) | (tag << 16);  // 値と札を同じ 32 ビットの 1 語に
+}
+gpu.flags(1);
+gpu.submit(eval, n, mut out, x, tag);
+while ((out[0] >> 16) != tag) { thread.yield(); }   // 札が見えたら、その語の値は正しい
+```
+
+- **値と札は、同じ 32 ビットの 1 語に入れます。** GPU の書き込みは語ごとに別々のタイミングで CPU から見えるので、「別の語に終わりの印を書いて、それが見えたら全部読める」という方法は使えません（印が見えても、ほかの語はまだ古い値のことがあります。`runtime/metal.m` の `um_park_wait` の前のコメント）。1 語の中なら、札が新しければ値も新しい値です。
+- 札が 1 周して古い札と同じになるのを避けるため、札は 1 から増やし、一周するときは結果の Buffer を 0（「まだ何も書いていない」）で埋めてから使います。
+- **すべての語の札が見えたら、その仕事の入力の Buffer は使い回してかまいません**（最後の kernel が前の kernel の結果を読んで全部の語を書いた、つまり前の kernel も終わっている、という形のとき）。
+- 札で判断する呼び手は、補助の kernel の券に `gpu.ready` / `gpu.wait` を呼ばなくてかまいません。券の表（1024 枠）が満杯になると、ランタイムは完了の印が付いた枠をまとめて回収します。見続けても札が見えない（GPU が失敗した、など）ときのために、時間を決めて `gpu.wait` に切り替える逃げ道を用意してください。
+- 例: [tests/metal/submit_flags.um](../tests/metal/submit_flags.um)。
+
 ### 環境変数
 
 実行時に読むもの（Metal のランタイム）:
@@ -335,6 +518,12 @@ print(out[0]);                                   // ready / wait のあとに読
 | `UM_GPU_RESIDENT=status` | 検算による早い完了の確認を使わず、常に Metal の完了の知らせを待ちます |
 | `UM_GPU_TRACE=1` | 実行先・共有した Buffer の数・時間・常駐の開始と停止などを標準エラー出力に出します |
 | `UM_GPU_COPY=1` | 比較用。Buffer を共有せず、毎回コピーして渡します（遅くなります） |
+| `UM_GPU_CHECK=0` / `1` | `gpu.submit` の検算を、印によらず常にしない / 常にします（付けなければ `gpu.flags` の印に従います） |
+| `UM_GPU_URGENT=0` | `gpu.flags` の印 2 があっても、急ぎの列を使いません |
+| `UM_GPU_HOLD=0` | `gpu.flags` の印 4 があっても、提出を見送りません |
+| `UM_GPU_MAILBOX=1` / `0` | 印 8 がなくても待機命令の経路の全部に郵便受けの列を使う / 印 8 があっても使いません |
+| `UM_GPU_ASYNC_RESIDENT=0` / `all` | `gpu.submit` の待機命令の経路を使わない / 急ぎでない検算なしの submit にも使います |
+| `UM_GPU_STATS=1` | 終わるときに、列ごとの submit の数、完了を何で知ったか、待った数と時間、待機命令の経路と郵便受けの列の数などを標準エラー出力に出します |
 
 CPU の並列実行とスレッドについては、下の「スレッド」の `UM_THREADS`、`UM_POOL_SPIN_US`、`UM_THREAD_STACK_MB` を見てください。
 
@@ -342,7 +531,8 @@ CPU の並列実行とスレッドについては、下の「スレッド」の 
 
 - **1つの dispatch に渡せる Buffer は 64 個までです**（超えると停止）。Buffer が 17 個以上か、Buffer 以外の引数が 512 バイトを超える dispatch は、まとめずに1つだけで提出します。
 - **GPU の個数と添字は 32 ビットです**（Buffer の長さは `u32`）。
-- `f16` / `f8` / `f4` / `f64`、64 ビットの整数、SIMD のベクトル、`Math.prefetch` は kernel では使えません。
+- `f16` / `f8` / `f4` / `f64`、SIMD のベクトル、`Math.prefetch` は kernel では使えません（64 ビットの整数は使えます。上の「kernel の中の 64 ビットの整数」）。
+- 64 ビットのアトミック演算は kernel の中では使えません（kernel の外だけ）。
 - GPU の仕事がシェーダのコンパイルや実行に失敗すると、プログラムは停止します（`panic: the GPU could not run a kernel (...)`）。
 
 ## ブラウザでの GPU 実行（WebGPU、実験的）
@@ -359,7 +549,8 @@ await exports.main();   // GPU が使える環境では Promise が返るので�
 
 - **自動判断は単純です。** GPU が使えて、要素数がしきい値（既定 4096、`gpuThreshold` で変更可）以上なら GPU で実行します。実測による判断はありません。
 - **dispatch のたびに Buffer を送り、書き込み先を読み戻します。** WebGPU では CPU と GPU のメモリが別だからです。小さい仕事や、CPU と頻繁に行き来する処理では、CPU の方が速くなります。
-- **`gpu.submit` は、その場で最後まで実行して券 0 を返します。**
+- **`gpu.submit` は、その場で最後まで実行して券 0 を返します。** `gpu.flags` / `gpu.commit` / `gpu.untracked` は何もしません。
+- **WGSL にできない kernel があります。** 64 ビットの整数や定数の配列を使う kernel は、`dispatch` / `gpu.submit` では CPU で実行し、`gpu.dispatch` ではコンパイルエラーになります。simdgroup の集計（`group.simdSum` など）を使う kernel はコンパイルエラーです。
 - **JSPI（WebAssembly の実行を一時停止して Promise を待つ機能）が必要です。** WebGPU の読み戻しは非同期でしか行えないためです。JSPI か WebGPU がない環境では GPU なしとして動き、`dispatch` は CPU で実行されます。デスクトップ版の Chrome / Edge 137 以降で使えます。
 - **確かめた範囲**: Android の Chrome 系ブラウザ（Adreno GPU）で一度実行し、3本のテストのうち2本が一致しました。残り1本は範囲外の小数→整数変換だけの不一致で、その修正は実機で再確認していません。8 / 16 ビットの整数の kernel は、Deno の WebGPU で CPU と一致することを確かめました。
 - **生成される WGSL を見るには** `node src/cli.ts build x.um --emit-wgsl` とします。
@@ -389,9 +580,9 @@ const sh: Shared = { tt: new RacyBuffer<u64>(n), stop: new RacyBuffer<u32>(1) };
 
 - **持ち手（`thread.spawn` の結果）は、`const` の宣言の初期化式としてだけ書けます。** 移動・代入・`return`・引数・フィールド・配列の要素にはできません（型 `Thread<R>` / `Threads<R>` を書けるのは、その `const` の注釈だけ）。`thread.join` は持ち手を消費し、合流しなかった持ち手は、宣言を含むブロックの終わり（`return` / `break` / `continue` で抜けるときも）で自動で合流します（戻り値は捨てる）。
 - **スレッドへの渡し方**: コピーされる型は写し、`own` は移動（スレッドが所有して返すか解放する）、修飾なしのヒープを持つ値は読み取り借用で共有します。`mut` の引数を持つ関数は起動できません。読み取り借用で貸した変数は、`const` の宣言からブロックの終わりまで（`join` のあとも）書き換え・移動・`mut` 渡しができません。合流後に書き換えるなら、起動を内側のブロック `{ ... }` に入れます。一時値は貸せません（`const` に入れてから）。
-- **複数のスレッドが書き換えられるのは `RacyBuffer` の要素だけです。** kernel の外では、`RacyBuffer` の要素は読み取り借用からでも書けます（長さと領域は変わらない）。要素の読み書き `b[i]` は順序の保証がないアトミック命令（kernel の外は relaxed）で、値は実行ごとに変わりえますが、メモリは壊れません。`for...of` と `clone()` も要素を1つずつアトミックに読みます。要素の型は `i8` / `u8` / `i16` / `u16` / `i32` / `u32` / `f32` と、kernel の外でだけ `i64` / `u64`（置換表など）。8 / 16 ビットの要素も、隣の要素を別のスレッドが同時に書いて混ざることはありません。kernel は `mut RacyBuffer` のどの要素にも読み書きできます。
-- **アトミック演算**: `b.load(i)`、`b.store(i, v)`、`b.fetchAdd(i, v)`（前の値を返す）、`b.compareExchange(i, expected, desired)`（前の値を返す）。順序は seq_cst で、`store` より前の書き込み（`b[i]` を含む）は、その値を `load` で見たスレッドから見えます。「データを書いてから印を立てる」受け渡しにはこれを使います（`b[i]` どうしには順序がない）。`fetchAdd` / `compareExchange` は整数だけで、kernel の中では使えません。
-- **kernel の `mut RacyBuffer` には、読み取り借用の `RacyBuffer` もそのまま渡せます**（`gpu.submit(k, n, mut sh.out, sh.inp)`。kernel は領域を差し替えられないため）。`dispatch` / `gpu.submit` / `gpu.ready` / `gpu.wait` はどのスレッドからでも呼べ、券はどのスレッドで待ってもかまいません。
+- **複数のスレッドが書き換えられるのは `RacyBuffer` の要素だけです。** kernel の外では、`RacyBuffer` の要素は読み取り借用からでも書けます（長さと領域は変わらない）。要素の読み書き `b[i]` は順序の保証がないアトミック命令（kernel の外は relaxed）で、値は実行ごとに変わりえますが、メモリは壊れません。`for...of` と `clone()` も要素を1つずつアトミックに読みます。要素の型は `i8` / `u8` / `i16` / `u16` / `i32` / `u32` / `f32` / `i64` / `u64` です（kernel の中の `i64` / `u64` は CPU と Metal だけ。上の「kernel の中の 64 ビットの整数」）。8 / 16 ビットの要素も、隣の要素を別のスレッドが同時に書いて混ざることはありません。kernel は `mut RacyBuffer` のどの要素にも読み書きできます。
+- **アトミック演算**: `b.load(i)`、`b.store(i, v)`、`b.fetchAdd(i, v)`（前の値を返す）、`b.compareExchange(i, expected, desired)`（前の値を返す）。順序は seq_cst で、`store` より前の書き込み（`b[i]` を含む）は、その値を `load` で見たスレッドから見えます。「データを書いてから印を立てる」受け渡しにはこれを使います（`b[i]` どうしには順序がない）。`fetchAdd` / `compareExchange` は整数だけです。kernel の中でも使えます（32 ビットの要素だけ。GPU では順序は relaxed。上の「グループ（共有配列・barrier）と kernel の中のアトミック演算」）。
+- **kernel の `mut RacyBuffer` には、読み取り借用の `RacyBuffer` もそのまま渡せます**（`gpu.submit(k, n, mut sh.out, sh.inp)`。kernel は領域を差し替えられないため）。`dispatch` / `gpu.submit` / `gpu.ready` / `gpu.wait` / `gpu.flags` / `gpu.commit` はどのスレッドからでも呼べ（`gpu.flags` の印はスレッドごと）、券はどのスレッドで待ってもかまいません。
 - **`print` 1回の出力（1行）はほかのスレッドと混ざりません。** `readLine()` / `inputReady()` はメインスレッドだけで使えます（ほかで呼ぶと停止）。どのスレッドで停止しても、プログラム全体が止まります（メッセージは1回）。
 - 同時に存在できるスレッドは 256 本まで（超えると停止）。スタックは 64 MiB（`UM_THREAD_STACK_MB` で変更）。起動と合流の手間は1本 10〜15 マイクロ秒（Apple M4）。
 - **kernel を CPU で並列に実行するスレッドプール**は、既定で論理 CPU 数のスレッド（呼んだスレッドを含む。最大 64）を使います。`UM_THREADS` で数を変えられます。プールのスレッドは仕事のあと 100 マイクロ秒は寝ずに次を待ちます（`UM_POOL_SPIN_US` で変更。0 ならすぐ寝る）。プールは同時に1つの仕事だけなので、ほかのスレッドが使っている最中の `cpu.dispatch` は、呼んだスレッドだけで実行します。
@@ -441,10 +632,10 @@ bad.um:1:15: error[ts-feature]: type 'number' is not available
 
 ## まだないもの
 
-- **言語**: 関数値（アロー関数、`map` / `filter` などのコールバック）、グローバル変数（最上位の `let`。値の変わらない最上位の `const` は使えます）、配列や `struct` の定数、型の別名（`type`）、`static`、`readonly`、getter / setter、`async` / `await`、`unsafe`、interface を値の型として使うこと、ジェネリックなメソッド、ジェネリック関数の export、`switch` の case の途中の `break`、行列の演算子。
+- **言語**: 関数値（アロー関数、`map` / `filter` などのコールバック）、グローバル変数（最上位の `let`。値の変わらない最上位の `const` と固定長配列の定数は使えます）、`struct` の定数と可変長配列の定数、定数を関数の呼び出しで作ること（コンパイル時の関数の実行）、型の別名（`type`）、`static`、`readonly`、getter / setter、`async` / `await`、`unsafe`、interface を値の型として使うこと、ジェネリックなメソッド、ジェネリック関数の export、`switch` の case の途中の `break`、行列の演算子。
 - **配列**: ヒープを持つ要素の配列の `.clone()`、固定長配列にヒープを持つ要素を入れること、配列の一部を指すビュー、`f4` を1バイトに2個詰めること、2^32 要素以上の Buffer。
 - **kernel と GPU**: `f16` / `f8` / `f4` の Buffer と kernel、Metal 以外のネイティブの GPU、ループをまたいで dispatch をまとめること（いまは隣り合った dispatch 文だけ）。
-- **入出力**: 上の「入出力」にある関数だけです。標準エラー出力、ファイルの追記や一部だけの読み書き、フォルダの操作、コマンドライン引数、ネットワークはありません。
+- **入出力**: 上の「入出力」にある関数だけです。ファイルの一部だけの書き換え、フォルダの操作、環境変数の読み取り、ネットワークはありません。
 - **wasm32**: スレッド（合流の時点でその場で実行します）、simd128。
 
 次のものは、TypeScript にはありますが、この言語では持たない方針です（書くとエラーで置き換え先を示します）: 継承（`extends`、`protected`、`abstract`）、例外（`try` / `throw`。失敗は `Result<T, E>` で返します）、`var`、`for...in`、`T | null` 以外の union 型、省略できるフィールドや引数、引数の既定値、`number` / `any`。
@@ -464,6 +655,7 @@ const hi  = Math.shr(x, 48);
 
 - **固定長配列 `T[N]`** への添字で、値が `[0, N)` に必ず収まるとき。たとえば `a[x & 15]`（`T[16]` 以上）、`a[Math.ctz(w)]`（`T[65]` 以上。`ctz` / `clz` は 0〜ビット幅）、`a[x % N]`。
 - **前の比較で分かるとき。** `if (i < N) { a[i] }` や `while (i < n) { ... }`、早い `return` / `break` のあと（`if (i >= N) return;` の後は `i < N`）。符号つきの変数は、下限も分かるときだけ（符号なしは常に 0 以上）。
+- 表を添字の検査なしで読みたいときは、最上位の定数の配列（上の「定数の配列」）にします。長さがコンパイル時に分かるので、固定長配列と同じく検査を省けます。
 - ヒープ配列（`T[]` / `Buffer`）は長さが実行時に決まるので、この自動除去の対象にしません（`for (let i = 0; i < a.length; i++)` のループは別の仕組みで検査を外へ出します。下の「速度」）。
 
 危険な「全部の検査を外す」一括の設定は入れていません。

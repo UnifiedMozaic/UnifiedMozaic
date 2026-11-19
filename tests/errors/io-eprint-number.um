@@ -1,0 +1,6 @@
+// error: type-mismatch
+// eprint は文字列だけ。数は String(x) にしてから渡す。
+export function main(): i32 {
+  eprint(3);
+  return 0;
+}

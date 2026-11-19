@@ -1,0 +1,90 @@
+// ファイルの大きさ fileSize、一部だけ読む readFileRange、書き足す appendFile、
+// コマンドライン引数 args、標準エラー出力 eprint。
+// expect: true
+// expect: 1000
+// expect: 4
+// expect: 100 101 102 103
+// expect: 3
+// expect: 997 998 999
+// expect: 0
+// expect: true
+// expect: true
+// expect: true
+// expect: true
+// expect: true
+// expect: 6
+// expect: abcdef
+// expect: true
+// expect: 0
+// expect: 1000
+
+// 大きなファイルの中を二分探索するときのように、決まった位置の数バイトだけ読む。
+function byteAt(path: string, pos: i64): i32 {
+  const one = readFileRange(path, pos, 1);
+  if (one == null) {
+    return -1;
+  }
+  if (one.length != 1) {
+    return -1;
+  }
+  return one[0] as i32;
+}
+
+export function main(): i32 {
+  let data: u8[] = [];
+  for (let i = 0; i < 1000; i++) {
+    data.push((i % 256) as u8);
+  }
+  print(writeFile("um_example_range.bin", data));
+  const size = fileSize("um_example_range.bin");
+  if (size != null) {
+    print(size);
+  }
+
+  // 途中の 4 バイト。
+  const mid = readFileRange("um_example_range.bin", 100, 4);
+  if (mid != null) {
+    print(mid.length);
+    print(String(mid[0]) + " " + String(mid[1]) + " " + String(mid[2]) + " " + String(mid[3]));
+  }
+  // 終わりを越えて頼むと、あるだけ（短く）なる。
+  const tail = readFileRange("um_example_range.bin", 997, 100);
+  if (tail != null) {
+    print(tail.length);
+    print(String(997 + (tail[0] as i32) - 229) + " " + String(998 + (tail[1] as i32) - 230) + " " + String(999 + (tail[2] as i32) - 231));
+  }
+  // 終わりより後ろは長さ 0（null ではない）。
+  const past = readFileRange("um_example_range.bin", 5000, 10);
+  if (past != null) {
+    print(past.length);
+  }
+  // 負の位置や長さ、ないファイル、名前に 0 のバイトは null。
+  print(readFileRange("um_example_range.bin", -1, 10) == null);
+  print(readFileRange("um_example_range.bin", 0, -1) == null);
+  print(readFileRange("um_example_no_such_file.bin", 0, 10) == null);
+  print(fileSize("um_example_no_such_file.bin") == null);
+
+  // 書き足す。なければ作る。
+  const abc: u8[] = [97, 98, 99];
+  const def: u8[] = [100, 101, 102];
+  print(writeFile("um_example_log.txt", abc) && appendFile("um_example_log.txt", def));
+  const log = readFile("um_example_log.txt");
+  if (log != null) {
+    print(log.length);
+    print(stringFromBytes(log));
+  }
+  print(appendFile("um_example\0hidden.txt", abc) == false);
+
+  // テストでは引数を渡さないので空。標準エラー出力は照合しない。
+  const a = args();
+  print(a.length);
+  eprint("stderr: " + String(byteAt("um_example_range.bin", 999)));
+  let sum: i64 = 0;
+  for (let p: i64 = 0; p < 1000; p += 1) {
+    if (byteAt("um_example_range.bin", p) == ((p % 256) as i32)) {
+      sum += 1;
+    }
+  }
+  print(sum);
+  return 0;
+}
