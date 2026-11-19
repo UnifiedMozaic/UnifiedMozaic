@@ -32,7 +32,7 @@ export function main(): i32 {
 
 ## 必要なもの・使い方
 
-入れ方と最初の一歩は [README.ja.md](../README.ja.md) にあります。要点だけ書きます。
+入れ方は [環境構築](setup.ja.md)、最初の一歩は [README.ja.md](../README.ja.md) にあります。要点だけ書きます。
 
 - Node.js 22.18 以上（TypeScript をそのまま実行します。npm パッケージへの依存はありません）
 - LLVM 18 以上の `clang`。wasm32 を出すには `wasm-ld` も必要です

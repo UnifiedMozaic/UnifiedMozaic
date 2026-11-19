@@ -51,7 +51,9 @@ export function main(): i32 {
 - Node.js 22.18 or later (runs the TypeScript sources directly)
 - `clang` from LLVM 18 or later; `wasm-ld` for wasm32 output
   - On macOS, Xcode's clang cannot target wasm32. Use `brew install llvm lld` for wasm32 builds.
-- For GPU execution on a Mac: Apple Silicon with Xcode (Metal)
+- For GPU execution on a Mac: Apple Silicon with Xcode or the Command Line Tools (Metal)
+
+Step-by-step instructions, including the `um` command (`npm link`) and troubleshooting, are in [docs/setup.md](docs/setup.md).
 
 ## Quick start
 
@@ -81,6 +83,7 @@ node src/cli.ts build examples/kernels.um --target host --emit-msl -o kernels   
 
 ## Documentation
 
+- [Setup](docs/setup.md) — installing Node.js and clang, the `um` command, running the tests
 - [Language guide (Japanese)](docs/guide.ja.md) — syntax, ownership, kernels and buffers, GPU execution, threads, safety guarantees
 - [examples/](examples) — runnable programs; each one doubles as a test (`// expect:` lines)
 - [vscode-extension](https://github.com/UnifiedMozaic/vscode-extension) — VS Code extension (syntax highlighting, type checking on save, build and run)

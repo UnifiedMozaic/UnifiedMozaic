@@ -51,7 +51,9 @@ export function main(): i32 {
 - Node.js 22.18 以上（TypeScript のソースをそのまま実行します）
 - LLVM 18 以上の `clang`。wasm32 を出すには `wasm-ld` も必要です
   - macOS の Xcode の clang は wasm32 を出せません。wasm32 には `brew install llvm lld` で入れたものを使ってください
-- Mac の GPU で実行するには: Apple Silicon と Xcode（Metal）
+- Mac の GPU で実行するには: Apple Silicon と、Xcode か Command Line Tools（Metal）
+
+入れ方の手順（`um` コマンドを使えるようにする `npm link` や、うまくいかないときの対処を含む）は [docs/setup.ja.md](docs/setup.ja.md) にあります。
 
 ## 使い方
 
@@ -81,6 +83,7 @@ node src/cli.ts build examples/kernels.um --target host --emit-msl -o kernels   
 
 ## 説明書
 
+- [環境構築](docs/setup.ja.md) — Node.js と clang の入れ方、`um` コマンド、テストの実行
 - [言語ガイド](docs/guide.ja.md) — 文法、所有権、kernel と Buffer、GPU での実行、スレッド、安全性の保証
 - [examples/](examples) — 動くサンプル。どれもテストを兼ねます（`// expect:` の行）
 - [vscode-extension](https://github.com/UnifiedMozaic/vscode-extension) — VSCode 拡張（色分け、保存時の型検査、ビルドと実行）
