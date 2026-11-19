@@ -36,7 +36,7 @@ export function main(): i32 {
 
 - Node.js 22.18 以上（TypeScript をそのまま実行します。npm パッケージへの依存はありません）
 - LLVM 18 以上の `clang`。wasm32 を出すには `wasm-ld` も必要です
-  - macOS: Xcode の clang は wasm に対応していないため、wasm32 を使う場合は `brew install llvm lld` で入れたものを使ってください（`UM_CLANG` で clang の場所を指定できます）
+  - macOS: Xcode の clang は wasm に対応していないため、wasm32 を使う場合は `brew install llvm lld` で入れてください。入っていれば、wasm32 のビルドには自動でそちらを使います（`UM_CLANG` で clang の場所を指定することもできます）
 
 ```sh
 # wasm32（既定）
@@ -160,7 +160,7 @@ while (true) {
 - **名前に 0 のバイトを含むファイルは読めず、書けません**（`null` / `false`）。
 - **標準入力が「待たない」設定（O_NONBLOCK）でも、`readLine()` は行が届くまで待ちます**（まだ届いていないことを、入力の終わりとは扱いません）。
 - **2 GiB 以上のファイルや行も読み書きできます**（OS への依頼を 1 GiB ずつに分けます）。
-- **wasm32 では、入出力は読み込む側が渡した口だけを通ります。** `instantiate(bytes, { readLine, inputReady, readFile, writeFile })` で渡します。渡さなければ `readLine()` は `null`、`inputReady()` は `true`（入力は終わっている）、`readFile()` は `null`、`writeFile()` は `false` です。ファイルの名前は UTF-8 の文字列として口に渡すので、UTF-8 として読めない名前は wasm32 では失敗（`null` / `false`）になります。`runtime/run-node.mjs` は標準入力とファイルをそのままつなぎます（Node には待たずに読めるかを確かめる方法がないので、`inputReady()` は読み込み済みの分だけで答えます）。**wasm32 の入出力は、オブジェクトファイルが作れることまでしか確かめていません（実行は未確認）。**
+- **wasm32 では、入出力は読み込む側が渡した口だけを通ります。** `instantiate(bytes, { readLine, inputReady, readFile, writeFile })` で渡します。渡さなければ `readLine()` は `null`、`inputReady()` は `true`（入力は終わっている）、`readFile()` は `null`、`writeFile()` は `false` です。ファイルの名前は UTF-8 の文字列として口に渡すので、UTF-8 として読めない名前は wasm32 では失敗（`null` / `false`）になります。`runtime/run-node.mjs` は標準入力とファイルをそのままつなぎます（Node には待たずに読めるかを確かめる方法がないので、`inputReady()` は読み込み済みの分だけで答えます）。wasm32 の入出力は、`node tests/run.ts` が `runtime/run-node.mjs` で実行して、ネイティブと同じ結果になることを確かめています。
 
 例: [examples/input_lines.um](../examples/input_lines.um)、[examples/bytes_and_files.um](../examples/bytes_and_files.um)。
 

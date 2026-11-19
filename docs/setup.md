@@ -8,7 +8,7 @@ How to get the UnifiedMozaic compiler running on your machine. You need only **N
 
 | Platform | Native | GPU (Metal) | wasm32 |
 | --- | --- | --- | --- |
-| macOS (Apple Silicon) | yes | yes | yes, with Homebrew's LLVM |
+| macOS (Apple Silicon) | yes | yes | yes (needs Homebrew's LLVM and lld) |
 | Linux (x86_64 / arm64) | yes | — | yes (needs `lld`) |
 | Windows | not tested; use Linux under WSL2 | — | — |
 
@@ -43,12 +43,13 @@ sudo apt install clang lld
 clang --version  # 18 or later
 ```
 
-**wasm32 on macOS:** Xcode's clang cannot target wasm32. Install Homebrew's LLVM and point `UM_CLANG` at it; native and Metal builds work with it as well.
+**wasm32 on macOS:** Xcode's clang cannot target wasm32. Install Homebrew's LLVM and lld; when they are present, wasm32 builds use them automatically (native and Metal builds keep using Xcode's clang).
 
 ```sh
 brew install llvm lld
-export UM_CLANG="$(brew --prefix llvm)/bin/clang"   # add this to ~/.zshrc or similar
 ```
+
+To use a different clang, set `UM_CLANG` to its path (it is then used for every target).
 
 ## 3. Get the compiler
 
@@ -95,7 +96,7 @@ node tests/run.ts           # same as npm test
 
 This takes a few minutes. Anything your machine lacks is skipped with a note:
 
-- no wasm32-capable clang (for example Xcode's clang on a Mac) → wasm32 tests are skipped
+- no wasm32-capable clang (for example a Mac without Homebrew's LLVM) → wasm32 tests are skipped
 - none of AddressSanitizer, valgrind or `leaks` (Mac) → memory-checked runs are skipped; on Linux, `sudo apt install valgrind` adds them
 - no Metal → `tests/metal/` is only compiled for arm64
 
@@ -113,6 +114,6 @@ code --install-extension unifiedmozaic-0.1.0.vsix
 | --- | --- |
 | `ERR_UNKNOWN_FILE_EXTENSION ".ts"`, or a `SyntaxError` at a type annotation | Node.js is too old; use 22.18 or later |
 | `clang が見つかりません` / `the LLVM toolchain (clang) failed` | Install clang, or set `UM_CLANG` to its path |
-| `この clang は wasm32 を出力できない` (this clang cannot target wasm32) | macOS: set `UM_CLANG` to Homebrew's LLVM as above. Linux: install `lld` |
+| `この clang は wasm32 を出力できない` (this clang cannot target wasm32) | macOS: `brew install llvm lld`. Linux: install `lld` |
 | `gpu.dispatch` is a compile error | The GPU path exists only for native Mac builds with `UM_METAL=1`; otherwise use `dispatch` or `cpu.dispatch` |
 | `panic: the GPU is not available` at run time | `gpu.dispatch` stops when there is no GPU; `dispatch` (automatic) falls back to the CPU |

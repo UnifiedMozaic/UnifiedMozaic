@@ -187,7 +187,7 @@ try {
 } catch {
   hasWasm = false;
   console.log('note: この clang は wasm32 を出力できないため、wasm32 のテストは飛ばします。');
-  console.log('      macOS では `brew install llvm lld` のあと UM_CLANG="$(brew --prefix llvm)/bin/clang" を付けて実行してください。');
+  console.log('      macOS では `brew install llvm lld` で入れてください（入っていれば wasm32 には自動でそれを使います）。');
 }
 
 const memCheck = detectMemCheck();

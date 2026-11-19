@@ -50,7 +50,7 @@ export function main(): i32 {
 
 - Node.js 22.18 or later (runs the TypeScript sources directly)
 - `clang` from LLVM 18 or later; `wasm-ld` for wasm32 output
-  - On macOS, Xcode's clang cannot target wasm32. Use `brew install llvm lld` for wasm32 builds.
+  - On macOS, Xcode's clang cannot target wasm32. Run `brew install llvm lld`; wasm32 builds then use it automatically.
 - For GPU execution on a Mac: Apple Silicon with Xcode or the Command Line Tools (Metal)
 
 Step-by-step instructions, including the `um` command (`npm link`) and troubleshooting, are in [docs/setup.md](docs/setup.md).

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { check } from './checker.ts';
@@ -25,6 +25,21 @@ const RUNTIME_C = join(import.meta.dirname, '..', 'runtime', 'native.c');
  * Homebrew の LLVM を指定するときなどに使う）。
  */
 export const CLANG = process.env.UM_CLANG || 'clang';
+
+/** macOS で Homebrew の LLVM が入っている場所（Apple Silicon と Intel）。 */
+const BREW_CLANGS = ['/opt/homebrew/opt/llvm/bin/clang', '/usr/local/opt/llvm/bin/clang'];
+
+/**
+ * そのターゲットに使う clang。UM_CLANG があればそれ。macOS の wasm32 は、標準の clang が出力できないので、
+ * Homebrew の LLVM があれば自動でそちらを使う（`brew install llvm lld`）。ほかは PATH の clang。
+ */
+export function clangFor(target: TargetName): string {
+  if (process.env.UM_CLANG) return process.env.UM_CLANG;
+  if (target === 'wasm32' && process.platform === 'darwin') {
+    for (const c of BREW_CLANGS) if (existsSync(c)) return c;
+  }
+  return 'clang';
+}
 const RUNTIME_METAL = join(import.meta.dirname, '..', 'runtime', 'metal.m');
 
 /**
@@ -183,8 +198,8 @@ export interface BuildResult {
 
 // 外部コマンドは必ず execFile（シェルを通さない）で、引数を配列で渡す。
 // ファイル名は絶対パスに直してから渡すので、'-' で始まる名前がオプションとして解釈されることはない。
-function clang(args: string[], quiet = false): void {
-  execFileSync(CLANG, ['-Wno-override-module', ...args], { stdio: ['ignore', 'inherit', quiet ? 'ignore' : 'inherit'] });
+function clang(args: string[], quiet = false, exe = CLANG): void {
+  execFileSync(exe, ['-Wno-override-module', ...args], { stdio: ['ignore', 'inherit', quiet ? 'ignore' : 'inherit'] });
 }
 
 /**
@@ -211,7 +226,7 @@ export function build(ll: string, target: TargetName, outPath: string, optLevel 
         '-Wl,--stack-first',
         '-Wl,-z,stack-size=1048576',
         '-o', out, llPath, RUNTIME_WASM_C,
-      ]);
+      ], quiet, clangFor('wasm32'));
       return { output: out, objectOnly: false };
     }
 
