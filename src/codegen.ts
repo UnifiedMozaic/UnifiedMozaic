@@ -2,7 +2,7 @@ import { isCollectiveLet, tyStr } from './ast.ts';
 import type { Arg, Expr, FnDecl, Stmt, Sym, Ty } from './ast.ts';
 import { isCopyTy, isPlace, passByPtr, simdInfo } from './checker.ts';
 import type { FnSig, Program } from './checker.ts';
-import { emitWgsl, gpuLayout, has64, WEBGPU_CONST_ARRAY } from './wgsl.ts';
+import { emitWgsl, gpuLayout, has64, WGSL_SIMDGROUP } from './wgsl.ts';
 import { CompileError } from './diag.ts';
 import type { Pos } from './diag.ts';
 import { emitMsl } from './msl.ts';
@@ -1112,8 +1112,19 @@ class ModuleGen {
   /** テスト用: AddressSanitizer（true）か ThreadSanitizer（'thread'）の計装を入れる。 */
   sanitize: boolean | 'thread';
 
-  /** kernel を GPU で実行する経路。wasm32 は WebGPU、macOS のネイティブは Metal（有効にしたとき）。なければ null。 */
-  gpu: 'webgpu' | 'metal' | null;
+  /**
+   * kernel を GPU で実行する経路。wasm32 は WebGPU、macOS のネイティブは Metal（UM_METAL=1）、
+   * ネイティブで UM_WGPU=1 なら wgpu-native（WGSL。runtime/wgpu.c）。なければ null。
+   */
+  gpu: 'webgpu' | 'metal' | 'wgpu' | null;
+
+  /** wgpu のランタイムを直接呼ぶ組み込み（gpu.loadKernel / gpu.runKernel / gpu.ready / gpu.wait）を使ったか。 */
+  usesGpuRuntime = false;
+
+  /** wgpu の経路で、GPU を使う呼び出し（GPU で実行しうる dispatch、gpu.loadKernel）があるか。なければ wgpu をリンクしない。 */
+  wgpuUsed(): boolean {
+    return this.gpu === 'wgpu' && (this.gpuKernels.size > 0 || this.usesGpuRuntime);
+  }
 
   /** macOS の arm64 向けか（SIMD の dot に NEON の sdot を直接使う。Apple の arm64 はどれも dotprod を持つ）。 */
   appleArm: boolean;
@@ -1127,14 +1138,15 @@ class ModuleGen {
   /** wasm32-plugin（import なし。export の Buffer 引数を (位置, 長さ) で受ける。src/driver.ts の TargetName を参照）。 */
   plugin: boolean;
 
-  constructor(prog: Program, target: TargetKind, sanitize: boolean | 'thread' = false, metal = false, appleArm = false, windows = false, plugin = false) {
+  constructor(prog: Program, target: TargetKind, sanitize: boolean | 'thread' = false, metal = false, appleArm = false, windows = false, plugin = false,
+    wgpu = false) {
     this.prog = prog;
     this.target = target;
     this.appleArm = appleArm;
     this.windows = windows;
     this.plugin = plugin;
     // プラグインは GPU を使わない（dispatch は CPU の1スレッド）。
-    this.gpu = target === 'wasm32' && !plugin ? 'webgpu' : metal ? 'metal' : null;
+    this.gpu = target === 'wasm32' && !plugin ? 'webgpu' : metal ? 'metal' : wgpu ? 'wgpu' : null;
     this.sanitize = sanitize;
     this.usz = `i${prog.ptrBits}`;
   }
@@ -1357,7 +1369,7 @@ class ModuleGen {
     return g;
   }
 
-  /** WGSL にできない kernel（定数の配列を使う）。wasm32 では GPU の経路を作らない。 */
+  /** WGSL にできない kernel（simdgroup の集計を使う）。wgpu の経路では GPU の経路を作らず、CPU で実行する。 */
   noWgsl = new Set<string>();
 
   /** 出力した定数の配列（定数の名前 → グローバルの名前）。 */
@@ -1394,13 +1406,18 @@ class ModuleGen {
     if (!k) {
       if (this.noWgsl.has(name)) return null;
       const decl = this.prog.fns.get(name)!.decl;
-      // wasm32 には WGSL、Metal には MSL のソースを埋め込む。実行時にランタイムがコンパイルする。
+      // wasm32 と wgpu には WGSL、Metal には MSL のソースを埋め込む。実行時にランタイムがコンパイルする。
       let source: string;
       try {
         source = this.gpu === 'metal' ? emitMsl(this.prog, decl, groups) : emitWgsl(this.prog, decl, groups).source;
       } catch (err) {
-        // WGSL にできない kernel（定数の配列を使う）は、wasm32 では CPU でだけ実行する。
-        if (err instanceof CompileError && err.code === WEBGPU_CONST_ARRAY) {
+        if (err instanceof CompileError && err.code === WGSL_SIMDGROUP) {
+          // wasm32（WebGPU）では、simdgroup の集計はコンパイルエラーのまま。
+          if (this.gpu === 'webgpu') {
+            throw new CompileError('kernel-restriction', err.message.replace('by WebGPU (WGSL)', 'on WebGPU (wasm32)'), err.pos,
+              'simdgroup functions run on Metal and on the CPU; build with `--target host`');
+          }
+          // wgpu では、simdgroup の集計を使う kernel は CPU でだけ実行する。
           this.noWgsl.add(name);
           return null;
         }
@@ -1651,6 +1668,20 @@ class ModuleGen {
       // GPU（WebGPU）での実行。実装は runtime/host.mjs。
       imports.push('i32 um_gpu_available()', 'i32 um_gpu_pick(i32, i32)', 'void um_gpu_dispatch(i32, ptr, i32, i32, ptr, i32, ptr, i32)');
       imports.push('void um_gpu_group(i32)');
+    }
+    if (this.gpu === 'wgpu') {
+      // wgpu-native での実行。実装は runtime/wgpu.c。GPU を使う呼び出しがなければ宣言せず（ドライバは wgpu をリンクしない）、
+      // Buffer の確保は普通のゼロ埋めの確保にする。
+      if (this.wgpuUsed()) {
+        out.push(`declare ptr @um_wgpu_alloc(${this.usz}, ${this.usz}) #0`);
+        out.push('declare i32 @um_gpu_available() #0', 'declare i32 @um_gpu_pick(i32, i32) #0', 'declare void @um_gpu_dispatch(i32, ptr, i32, i32, ptr, i32, ptr, i32) #0');
+        out.push('declare void @um_gpu_cpu_done(i32, i32) #0', 'declare void @um_gpu_flush() #0', 'declare void @um_gpu_group(i32) #0');
+        out.push('declare i64 @um_gpu_submit(i32, ptr, i32, i32, ptr, i32, ptr, i32) #0', 'declare i32 @um_gpu_ready(i64) #0', 'declare void @um_gpu_wait(i64) #0');
+        out.push(`declare i32 @um_gpu_load(ptr, ${this.usz}) #0`, 'declare i32 @um_gpu_run(i32, i32, ptr, i32, ptr, i32) #0');
+        out.push('declare i32 @um_gpu_set_flags(i32) #0');
+      } else {
+        out.push(`define internal ptr @um_wgpu_alloc(${this.usz} %n, ${this.usz} %s) #0 {`, `  %p = call ptr @um_alloc_zeroed(${this.usz} %n, ${this.usz} %s)`, '  ret ptr %p', '}');
+      }
     }
     if (this.gpu === 'metal') {
       // Metal での実行。実装は runtime/metal.m（一緒にリンクする）。
@@ -2522,7 +2553,7 @@ class FnGen {
    * 次の dispatch が CPU で実行されることになった場合は、ランタイムが先に完了を待つ（um_gpu_pick）。
    */
   gpuCanDefer(s: Expr, next: Stmt | undefined): boolean {
-    if (this.m.gpu !== 'metal' || !next || next.kind !== 'expr') return false;
+    if ((this.m.gpu !== 'metal' && this.m.gpu !== 'wgpu') || !next || next.kind !== 'expr') return false;
     const simple = (e: Expr): boolean =>
       e.kind === 'int' || e.kind === 'float' || e.kind === 'bool' || (e.kind === 'ident' && !e.sym?.alias);
     const plain = (e: Expr): boolean =>
@@ -3871,7 +3902,8 @@ class FnGen {
     if (e.callee === '__gpu_ready' || e.callee === '__gpu_wait') {
       // `gpu.ready(t)` / `gpu.wait(t)`。Metal 以外では、submit がその場で実行し終えているので、いつでも「終わっている」。
       const t = this.expr(e.args[0].expr);
-      if (this.m.gpu !== 'metal') return e.callee === '__gpu_ready' ? 'true' : '';
+      if (this.m.gpu !== 'metal' && this.m.gpu !== 'wgpu') return e.callee === '__gpu_ready' ? 'true' : '';
+      if (this.m.gpu === 'wgpu') this.m.usesGpuRuntime = true;
       if (e.callee === '__gpu_wait') {
         this.emit(`call void @um_gpu_wait(i64 ${t})`);
         return '';
@@ -3885,7 +3917,9 @@ class FnGen {
     if (e.callee === '__gpu_flags') {
       // `gpu.flags(f)`。Metal 以外では印に意味がないので、引数の式だけ評価して 0 を返す。
       const f = this.expr(e.args[0].expr);
-      if (this.m.gpu !== 'metal') return '0';
+      // wgpu では印を覚えて前の値を返すだけ（効果はない）。
+      if (this.m.gpu === 'wgpu') this.m.usesGpuRuntime = true;
+      else if (this.m.gpu !== 'metal') return '0';
       const r = this.tmp();
       this.emit(`${r} = call i32 @um_gpu_set_flags(i32 ${f})`);
       return r;
@@ -3897,6 +3931,7 @@ class FnGen {
       if (this.m.gpu === 'metal') this.emit(`call void @um_gpu_untracked(ptr ${data})`);
       return '';
     }
+    if (e.callee === '__gpu_load' || e.callee === '__gpu_run') return this.gpuLoadCall(e);
     if (e.callee === '__gpu_commit') {
       if (this.m.gpu === 'metal') this.emit('call void @um_gpu_commit()');
       return '';
@@ -4006,9 +4041,9 @@ class FnGen {
       this.check(short, PANIC_DISPATCH, e.pos.line);
     });
 
-    // `gpu.submit`: Metal では終わるのを待たずに戻り、券を返す。それ以外（GPU がない、WebGPU）では、
+    // `gpu.submit`: Metal と wgpu では終わるのを待たずに戻り、券を返す。それ以外（GPU がない、WebGPU）では、
     // その場で最後まで実行して券 0 を返す（券 0 は「もう終わっている」）。
-    const submit = e.async === true && this.m.gpu === 'metal';
+    const submit = e.async === true && (this.m.gpu === 'metal' || this.m.gpu === 'wgpu');
     const device = e.async && !submit ? 'auto' : e.device;
     let ticket = '';
     if (e.async) {
@@ -4018,16 +4053,17 @@ class FnGen {
     const endL = this.newLabel('dispatch.end');
     // WebGPU（WGSL）には 64 ビットの整数がない。それを使う kernel は、自動の dispatch と gpu.submit では CPU で実行し、
     // GPU に固定した gpu.dispatch はエラーにする。
-    const no64 = this.m.gpu === 'webgpu' && device !== 'cpu' && kernelUses64(this.m.prog, sig.decl);
-    if (no64 && device === 'gpu') {
-      throw new CompileError('kernel-type', `kernel '${e.kernel}' uses 64-bit integers, which WebGPU does not support`, e.pos,
-        'WGSL has no 64-bit integers: 64-bit kernels run on the GPU only with Metal (native macOS); use `dispatch` (runs on the CPU here) or `cpu.dispatch`');
+    const wgsl = this.m.gpu === 'webgpu' || this.m.gpu === 'wgpu';
+    const no64 = wgsl && device !== 'cpu' && kernelUses64(this.m.prog, sig.decl);
+    if (no64 && device === 'gpu' && !e.async) {
+      throw new CompileError('kernel-type', `kernel '${e.kernel}' uses 64-bit integers, which WebGPU (WGSL) does not support`, e.pos,
+        'WGSL has no 64-bit integers: 64-bit kernels run on the GPU only with Metal (UM_METAL=1 on macOS); use `dispatch` (runs on the CPU here) or `cpu.dispatch`');
     }
-    // WGSL にできない kernel（定数の配列を使う）は、wasm32 では CPU の経路だけを作る。GPU を指定していればエラー。
+    // WGSL にできない kernel（simdgroup の集計を使う）は、wgpu では CPU の経路だけを作る。GPU を指定していればエラー。
     const k = this.m.gpu && device !== 'cpu' && !no64 ? this.m.gpuKernel(e.kernel, !!e.group) : null;
-    if (this.m.gpu && device === 'gpu' && !k && !no64) {
-      throw new CompileError(WEBGPU_CONST_ARRAY, `kernel '${e.kernel}' uses a constant array, which WebGPU (WGSL) does not support`, e.pos,
-        'constant arrays in kernels run on the CPU and on Metal only; on wasm32 use `dispatch` (it runs such a kernel on the CPU) or pass the table in a `Buffer<T>`');
+    if (this.m.gpu && device === 'gpu' && !e.async && !k && !no64) {
+      throw new CompileError(WGSL_SIMDGROUP, `kernel '${e.kernel}' uses simdgroup functions, which WebGPU (WGSL) does not support`, e.pos,
+        'simdgroup functions run on Metal and on the CPU; use `dispatch` / `dispatchGroups` (they run such a kernel on the CPU here) or `cpu.dispatchGroups`');
     }
     if (k) {
       // wasm32 では GPU（WebGPU）でも実行できる。auto は実行時にランタイムが選び、gpu は GPU がなければ停止する。
@@ -4057,7 +4093,8 @@ class FnGen {
       const got = this.gpuDispatch(k, n, params, args, submit, size);
       if (submit) this.emit(`store i64 ${got}, ptr ${ticket}`);
       // Metal は dispatch を積むだけなので、ここで提出して完了を待つ。次の文も dispatch なら待ちをそちらに任せる。
-      else if (this.m.gpu === 'metal' && !this.gpuDefer) this.emit('call void @um_gpu_flush()');
+      // wgpu も同じ形で、um_gpu_flush は提出するだけで待たない（結果は CPU が読むときに読み戻す。runtime/wgpu.c）。
+      else if ((this.m.gpu === 'metal' || this.m.gpu === 'wgpu') && !this.gpuDefer) this.emit('call void @um_gpu_flush()');
       this.br(endL);
       this.label(cpuL);
     }
@@ -4082,7 +4119,7 @@ class FnGen {
     } else {
       this.emit(`call void ${range.fn}(i32 0, i32 ${items}, ptr ${ctx})`);
     }
-    if (this.m.gpu === 'metal' && e.device === 'auto') {
+    if ((this.m.gpu === 'metal' || (this.m.gpu === 'wgpu' && k)) && e.device === 'auto') {
       // 自動判断のために、CPU で実行し終えたことをランタイムに知らせる（かかった時間を測って次の判断に使う）。
       this.emit(`call void @um_gpu_cpu_done(i32 ${this.m.gpuKernel(e.kernel, !!e.group)!.id}, i32 ${n})`);
     }
@@ -4313,10 +4350,61 @@ class FnGen {
   }
 
   /**
+   * `gpu.loadKernel(wgsl)` / `gpu.runKernel(k, count, ...)`（src/gpuload.ts）。wgpu の経路だけがランタイムを呼ぶ。
+   * ほかのビルドでも引数は評価し、loadKernel は null、runKernel は false を返す。
+   */
+  gpuLoadCall(e: Expr & { kind: 'call' }): string {
+    const wgpu = this.m.gpu === 'wgpu';
+    if (wgpu) this.m.usesGpuRuntime = true;
+    if (e.callee === '__gpu_load') {
+      const [data, len] = this.heapParts(e.args[0].expr)();
+      const id = this.tmp();
+      if (wgpu) this.emit(`${id} = call i32 @um_gpu_load(ptr ${data}, ${this.m.usz} ${len})`);
+      const v = wgpu ? id : '0';
+      const t = llTy(e.ty!);
+      const some = this.tmp();
+      const a = this.tmp();
+      const b = this.tmp();
+      this.emit(`${some} = icmp ne i32 ${v}, 0`);
+      this.emit(`${a} = insertvalue ${t} undef, i1 ${some}, 0`);
+      this.emit(`${b} = insertvalue ${t} ${a}, i32 ${v}, 1`);
+      return b;
+    }
+    const rest = e.args.slice(2);
+    const params: FnSig['params'] = rest.map((a, i) => ({ name: `a${i}`, mode: a.mode, ty: a.expr.ty! }));
+    const kernel = this.expr(e.args[0].expr);
+    const count = this.expr(e.args[1].expr);
+    const args = this.prepArgs({ key: '', name: '', params, ret: { k: 'void' }, exported: false, decl: this.d }, rest).map((a) => a());
+    if (!wgpu) return 'false';
+    // 値の塊と Buffer の表は dispatch と同じ形（gpuDispatch）。番号の代わりに読み込んだ kernel の番号を渡す。
+    const [block, bytes, table, nbufs] = this.gpuArgs(params, args);
+    const ok = this.tmp();
+    const r = this.tmp();
+    this.emit(`${ok} = call i32 @um_gpu_run(i32 ${kernel}, i32 ${count}, ptr ${block}, i32 ${bytes}, ptr ${table}, i32 ${nbufs})`);
+    this.emit(`${r} = icmp ne i32 ${ok}, 0`);
+    return r;
+  }
+
+  /**
    * GPU での実行をランタイムに頼む。値の引数は GPU 側の struct と同じ並び（gpuLayout）の塊にし、
    * Buffer は（データの場所、要素数、要素の大きさ、書き込みの有無）の表にして渡す。
    */
   gpuDispatch(k: { id: number; global: string; bytes: number }, n: string, params: FnSig['params'], args: string[], submit = false, group = ''): string {
+    const [block, bytes, table, nbufs] = this.gpuArgs(params, args);
+    const call = `(i32 ${k.id}, ptr ${k.global}, i32 ${k.bytes}, i32 ${n}, ptr ${block}, i32 ${bytes}, ptr ${table}, i32 ${nbufs})`;
+    // dispatchGroups: グループの大きさを、すぐ次の dispatch / submit に渡す（ランタイムがスレッドごとに覚えて、使ったら消す）。
+    if (group) this.emit(`call void @um_gpu_group(i32 ${group})`);
+    if (submit) {
+      const t = this.tmp();
+      this.emit(`${t} = call i64 @um_gpu_submit${call}`);
+      return t;
+    }
+    this.emit(`call void @um_gpu_dispatch${call}`);
+    return '';
+  }
+
+  /** GPU に渡す引数の塊（値の引数）と Buffer の表を作り、[塊, 塊のバイト数, 表, Buffer の数] を返す。 */
+  gpuArgs(params: FnSig['params'], args: string[]): [string, number, string, number] {
     const prog = this.m.prog;
     const values = params.map((p, i) => ({ p, arg: args[i] })).filter((x) => x.p.ty.k !== 'heap');
     const buffers = params.map((p, i) => ({ p, arg: args[i] })).filter((x) => x.p.ty.k === 'heap');
@@ -4387,16 +4475,7 @@ class FnGen {
       });
     });
 
-    const call = `(i32 ${k.id}, ptr ${k.global}, i32 ${k.bytes}, i32 ${n}, ptr ${block}, i32 ${bytes}, ptr ${table}, i32 ${buffers.length})`;
-    // dispatchGroups: グループの大きさを、すぐ次の dispatch / submit に渡す（ランタイムがスレッドごとに覚えて、使ったら消す）。
-    if (group) this.emit(`call void @um_gpu_group(i32 ${group})`);
-    if (submit) {
-      const t = this.tmp();
-      this.emit(`${t} = call i64 @um_gpu_submit${call}`);
-      return t;
-    }
-    this.emit(`call void @um_gpu_dispatch${call}`);
-    return '';
+    return [block, bytes, table, buffers.length];
   }
 
   math(e: Expr & { kind: 'math' }): string {
@@ -4511,13 +4590,20 @@ class FnGen {
       const total = this.tmp();
       this.emit(`${wrap} = icmp ult ${usz} ${rounded}, ${count}`);
       this.emit(`${total} = select i1 ${wrap}, ${usz} ${count}, ${usz} ${rounded}`);
-      this.emit(`${data} = call ptr @${this.m.gpu === 'metal' ? 'um_alloc_shared' : 'um_alloc_zeroed'}(${usz} ${total}, ${usz} ${this.m.sizeOf(elem)})`);
+      this.emit(`${data} = call ptr @${this.bufferAlloc()}(${usz} ${total}, ${usz} ${this.m.sizeOf(elem)})`);
       return data;
     }
-    // Metal では、GPU とコピーなしで共有できるよう、ページ境界に揃えた領域を使う。
-    const fn = this.m.gpu === 'metal' ? 'um_alloc_shared' : 'um_alloc_zeroed';
+    const fn = this.bufferAlloc();
     this.emit(`${data} = call ptr @${fn}(${usz} ${count}, ${usz} ${this.m.sizeOf(elem)})`);
     return data;
+  }
+
+  /**
+   * Buffer の領域を確保するランタイムの関数。Metal では、GPU とコピーなしで共有できるよう、ページ境界に揃えた領域を使う。
+   * wgpu では、GPU 側の写しとの同期をページの保護で追うための領域（runtime/wgpu.c の um_wgpu_alloc）。
+   */
+  bufferAlloc(): string {
+    return this.m.gpu === 'metal' ? 'um_alloc_shared' : this.m.gpu === 'wgpu' ? 'um_wgpu_alloc' : 'um_alloc_zeroed';
   }
 
   arrayValue(data: string, len: string, cap: string): string {
@@ -4977,6 +5063,7 @@ class FnGen {
   }
 }
 
-export function generate(prog: Program, target: TargetKind, sanitize: boolean | 'thread' = false, metal = false, appleArm = false, windows = false, plugin = false): string {
-  return new ModuleGen(prog, target, sanitize, metal, appleArm, windows, plugin).generate();
+export function generate(prog: Program, target: TargetKind, sanitize: boolean | 'thread' = false, metal = false, appleArm = false, windows = false, plugin = false,
+  wgpu = false): string {
+  return new ModuleGen(prog, target, sanitize, metal, appleArm, windows, plugin, wgpu).generate();
 }

@@ -12,6 +12,13 @@
 //   tests/msl/         MSL の出力を、Metal なしで確かめる。clang++ があれば: tests/gpu と examples の kernel の MSL を
 //                      スタブヘッダ（metal_stub.h）つきで C++14 として構文検査し、tests/msl/kernels.um の kernel の MSL を
 //                      C++ として実行して、CPU 実行（ネイティブ）とチェックサムを比べる。Metal コンパイラでの確認ではない。
+//   tests/metal/*.um と tests/wgpu/*.um
+//                      UM_WGPU=1（wgpu-native）でネイティブに作り、GPU で実行して `// expect:` と照合する
+//                      （どれも GPU の結果を CPU の結果と比べるプログラム）。wgpu-native が見つかり（UM_WGPU_HOME など。
+//                      docs/wgpu.ja.md）、GPU が使えるときだけ。`// wgpu-error: コード` があれば、その診断でコンパイルが止まることを
+//                      確かめる（64 ビットの整数や simdgroup の集計を gpu.dispatch で使う、Metal だけの機能）。
+//                      `// wgsl: 名前` があれば、その kernel の WGSL を実行するフォルダに <名前>.wgsl として書く（gpu.loadKernel 用）。
+//                      UM_TEST_WGPU_BACKENDS=vulkan,dx12 のように書くと、wgpu のバックエンドごとに実行する。
 //   tests/io/*.um      標準入力の届き方に左右される動作。pipe_driver.c がパイプに書く（「待たない」設定のパイプ、
 //                      1行を2回に分けて書く）。ネイティブだけ。
 //   tests/threads/*.um スレッド（ネイティブだけ）。`// expect:` か `// panic:` と照合する。`// sorted` があれば出力を
@@ -758,6 +765,68 @@ for (const f of files('tests/metal')) {
   } finally {
     delete process.env.UM_METAL;
   }
+}
+
+// wgpu-native（UM_WGPU=1）。GPU で実行して CPU の結果と比べる（tests/metal と tests/wgpu）。
+{
+  process.env.UM_WGPU = '1';
+  let gpuOk = false;
+  try {
+    const probe = 'export function main(): i32 { print(gpu.loadKernel("@compute @workgroup_size(1) fn um_main() {}") !== null); return 0; }';
+    gpuOk = runNative(probe, 'wgpu_probe').out[0] === 'true';
+    if (!gpuOk) console.log('note: wgpu-native は見つかったが GPU が使えないため、wgpu のテストは飛ばします');
+  } catch (e) {
+    console.log(`note: wgpu-native が見つからないため、wgpu のテストは飛ばします（docs/wgpu.ja.md。${String(e).split('\n')[0].slice(0, 120)}）`);
+  }
+  const backends = (process.env.UM_TEST_WGPU_BACKENDS ?? '').split(',').filter((b) => b !== '');
+  if (gpuOk) {
+    for (const f of [...files('tests/metal'), ...files('tests/wgpu')]) {
+      const src = readFileSync(join(root, f), 'utf8');
+      const want = directives(src, 'expect');
+      const wantErr = directives(src, 'wgpu-error')[0];
+      const tag = f.replace(/[^a-z0-9]/gi, '_');
+      try {
+        if (wantErr) {
+          try {
+            compileToLL(src, 'host');
+            fail(`${f} [wgpu]`, `expected error ${wantErr}, but it compiled`);
+          } catch (e) {
+            const codes = e instanceof CompileErrors ? e.errors.map((x) => x.code) : e instanceof CompileError ? [e.code] : [];
+            if (codes.includes(wantErr)) ok(`${f} [wgpu, error ${wantErr}]`);
+            else fail(`${f} [wgpu]`, `expected error ${wantErr}, got: ${String(e)}`);
+          }
+          continue;
+        }
+        // `// plugin: 相対パス.um` は wasm の組み込みと一緒に使うテスト。wasmtime がなければ飛ばす。
+        const plugins = directives(src, 'plugin');
+        if (plugins.length > 0 && !wasmtimeAvailable()) continue;
+        for (const rel of plugins) {
+          const path = join(root, dirname(f), rel);
+          const name = rel.replace(/^.*[\\/]/, '').replace(/\.um$/, '.wasm');
+          build(compileToLL(readFileSync(path, 'utf8'), 'wasm32-plugin', false, path), 'wasm32-plugin', join(tmp, name));
+        }
+        for (const name of directives(src, 'wgsl')) {
+          const text = compileWgsl(src, join(root, f), 64).get(name);
+          if (!text) throw new Error(`no WGSL for kernel '${name}'`);
+          writeFileSync(join(tmp, `${name}.wgsl`), text);
+        }
+        const exe = join(tmp, `${tag}_wgpu.bin`);
+        build(compileToLL(src, 'host', false, join(root, f)), 'host', exe);
+        for (const be of backends.length > 0 ? backends : ['']) {
+          const label = be ? `${f} [wgpu ${be}]` : `${f} [wgpu]`;
+          const env = { ...process.env, ...(be ? { UM_WGPU_BACKEND: be } : {}) };
+          const r = spawnSync(exe, [], { encoding: 'utf8', input: stdinText(src), cwd: tmp, env, timeout: 300000 });
+          const out = r.stdout.split('\n').filter((l) => l !== '');
+          if (r.status !== 0) fail(label, `exit ${r.status}: ${r.stderr.trim().slice(0, 1500)}`);
+          else if (same(out, want)) ok(label);
+          else fail(label, `expected: ${want.join(' ')}\nactual:   ${out.join(' ')}`);
+        }
+      } catch (e) {
+        fail(`${f} [wgpu]`, String(e));
+      }
+    }
+  }
+  delete process.env.UM_WGPU;
 }
 
 for (const f of files('tests/panics')) {

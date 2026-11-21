@@ -1,0 +1,120 @@
+// UM_WGPU=1 と WebAssembly の組み込み（wasmtime）を同じプログラムで使う。MozaicCut と同じ並び:
+// GPU で効果をかけた画素を wasm のプラグインに渡し（wasmWrite）、プラグインの結果を受け取って（wasmRead）、また GPU に渡す。
+// GPU が書いた Buffer を wasmWrite が読むと読み戻され、wasmRead が書いた Buffer は次に GPU に渡すとき送り直される
+// （docs/wgpu.ja.md「Buffer の写し」）。wasmtime も保護の例外を使うので、両方の例外の処理が並んで動くことも確かめる。
+// 結果は、同じ計算を CPU だけで行ったものと一致する。wasmtime が見つからなければ、このテストは飛ばす。
+// plugin: ../../examples/wasm/plugin/brighten.um
+// wgsl: glow
+// expect: true
+// expect: true
+// expect: true
+// expect: true
+
+kernel function glow(i: u32, dst: mut Buffer<u8>, src: Buffer<u8>, amount: i32): void {
+  if ((i & 3) == 3) {
+    dst[i] = src[i];
+  } else {
+    const v = (src[i] as i32) + amount;
+    dst[i] = (v > 255 ? 255 : (v < 0 ? 0 : v)) as u8;
+  }
+}
+
+function call(inst: i64, name: string, args: WasmValue[]): i32 {
+  match (wasmCall(inst, name, args)) {
+    Result.Err(why) => {
+      print(why);
+      return -1;
+    }
+    Result.Ok(values) => {
+      if (values.length == 0) {
+        return 0;
+      }
+      match (values[0]) {
+        WasmValue.I32(v) => return v,
+        _ => return -1,
+      }
+    }
+  }
+}
+
+function same(a: Buffer<u8>, b: Buffer<u8>): bool {
+  for (let i: u32 = 0; i < a.length; i++) {
+    if (a[i] != b[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function loadGlow(): u32 | null {
+  const bytes = readFile("glow.wgsl");
+  if (bytes === null) {
+    return null;
+  }
+  return gpu.loadKernel(stringFromBytes(bytes));
+}
+
+export function main(): i32 {
+  const n: u32 = 320 * 180 * 4;
+  let src = new Buffer<u8>(n);
+  for (let i: u32 = 0; i < n; i++) {
+    src[i] = ((i * 7) & 255) as u8;
+  }
+
+  // CPU だけで: glow(+30) → brighten(+40) → glow(-50)
+  let c1 = new Buffer<u8>(n);
+  let c2 = new Buffer<u8>(n);
+  let c3 = new Buffer<u8>(n);
+  cpu.dispatch(glow, n, mut c1, src, 30);
+  cpu.dispatch(glow, n, mut c2, c1, 40);
+  cpu.dispatch(glow, n, mut c3, c2, -50);
+
+  match (wasmLoadFile("brighten.wasm")) {
+    Result.Err(why) => {
+      print(why);
+      return 1;
+    }
+    Result.Ok(m) => {
+      match (wasmNew(m, new WasmLimits())) {
+        Result.Err(why) => {
+          print(why);
+          return 1;
+        }
+        Result.Ok(inst) => {
+          const at = call(inst, "umAlloc", [WasmValue.I32(n as i32)]);
+          const out = call(inst, "umAlloc", [WasmValue.I32(n as i32)]);
+          let g1 = new Buffer<u8>(n);
+          let g2 = new Buffer<u8>(n);
+          let g3 = new Buffer<u8>(n);
+          for (let round = 0; round < 3; round++) {
+            gpu.dispatch(glow, n, mut g1, src, 30);
+            // GPU だけが新しい g1 を wasm のメモリに写す（ここで読み戻される）。
+            wasmWrite(inst, at as i64, g1);
+            call(inst, "brighten", [WasmValue.I32(out), WasmValue.I32(n as i32), WasmValue.I32(at), WasmValue.I32(n as i32), WasmValue.I32(40)]);
+            // GPU に置いてある g2 に、プラグインの結果を書く（GPU の写しは古くなり、次の dispatch で送り直す）。
+            wasmRead(inst, out as i64, mut g2);
+            gpu.dispatch(glow, n, mut g3, g2, -50);
+          }
+          print(same(g3, c3));
+
+          // 実行時に読み込んだ kernel（gpu.runKernel）でも同じ。
+          let ok = false;
+          let r1 = new Buffer<u8>(n);
+          let r3 = new Buffer<u8>(n);
+          const k = loadGlow();
+          if (k !== null) {
+            ok = gpu.runKernel(k, n, mut r1, src, 30);
+            wasmWrite(inst, at as i64, r1);
+            call(inst, "brighten", [WasmValue.I32(out), WasmValue.I32(n as i32), WasmValue.I32(at), WasmValue.I32(n as i32), WasmValue.I32(40)]);
+            wasmRead(inst, out as i64, mut r1);
+            ok = gpu.runKernel(k, n, mut r3, r1, -50) && ok;
+          }
+          print(ok);
+          print(same(r3, c3));
+          print(same(r1, c2));
+        }
+      }
+    }
+  }
+  return 0;
+}

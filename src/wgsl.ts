@@ -3,12 +3,24 @@
 // CPU 用のコード生成（codegen.ts）と同じ結果になるように、次を明示的に生成する:
 //   - 添字は最後の要素に切り詰める（um_clamp）。長さ 0 の Buffer は1要素ぶん確保されている
 //   - シフト量はビット幅で割った余り
-//   - 整数のゼロ除算・最小値 / -1 は WGSL の仕様で x / 0 = x、x % 0 = 0、最小値 / -1 = 最小値 と決まっており、
-//     kernel の CPU 版と同じ
+//   - 整数のゼロ除算・最小値 / -1 は WGSL の仕様で x / 0 = x、最小値 / -1 = 最小値 と決まっており、kernel の CPU 版と同じ。
+//     余り（%）は x - (x / y) * y で求め、y = 0 なら 0（um_rem_i / um_rem_u）。NVIDIA の Vulkan のドライバで、
+//     WGSL の % が負の数で誤った値を返すことがあるため
+//   - 浮動小数点の割り算と平方根は、整数の演算で正しく丸める（um_fdiv / um_fsqrt）。WebGPU（Vulkan・Direct3D 12・Metal）は
+//     割り算と平方根に数 ULP の誤差を許すので、GPU の命令のままでは CPU と結果が変わる
+//   - 浮動小数点の掛け算の結果は、足し算と1つの命令（FMA）にまとめられないよう、実行時にしか分からない 0 と OR する
+//     （um_fmul）。まとめられると丸めが1回減り、CPU と結果が変わる
 //
 // レイアウト: WGSL にする kernel で使える型はすべて 4 バイト単位（i32 / u32 / f32 とその struct・固定長配列）なので、
 // LLVM 側の構造体と WGSL の構造体は、同じ並びで隙間なく一致する。
 // 64 ビットの整数（i64 / u64）を使う kernel は WGSL にしない（WebGPU では CPU で実行する。codegen.ts の kernelUses64）。
+// simdgroup の集計（group.simdSum など）も WGSL にしない（WGSL_SIMDGROUP）。
+// 最上位の定数の配列は、モジュールの範囲の `const` にする。
+//
+// 束縛の並び（docs/wgpu.ja.md の「束縛の並び」。runtime/wgpu.c と runtime/host.mjs が同じ並びで束縛する）:
+//   @group(0) @binding(0)  var<storage, read> um_params: UmParams
+//                          UmParams = { count, row, Buffer ごとの長さ（len_名前）, 値の引数（p_名前）を引数の順に }
+//   @group(0) @binding(1〜) Buffer の引数を、kernel の引数の順に（mut なら read_write、そうでなければ read）
 
 import { tyStr } from './ast.ts';
 import { CompileError } from './diag.ts';
@@ -16,8 +28,11 @@ import type { Expr, FnDecl, Stmt, Sym, Ty } from './ast.ts';
 import type { FnSig, Program } from './checker.ts';
 import { atomicParams } from './msl.ts';
 
-/** kernel が定数の配列を使っていて WGSL にできないときのエラーの原因コード。 */
-export const WEBGPU_CONST_ARRAY = 'webgpu-const-array';
+/**
+ * kernel が simdgroup の集計（group.simdSum など）を使っていて WGSL にできないときのエラーの原因コード。
+ * WebGPU の subgroup は拡張機能で幅も決まっていないので、simdgroup の集計は CPU と Metal だけで実行する。
+ */
+export const WGSL_SIMDGROUP = 'webgpu-simdgroup';
 
 /** 1回の dispatch で1つのワークグループが担当する要素数。runtime/host.mjs の定数と揃えること。 */
 export const WORKGROUP_SIZE = 64;
@@ -95,6 +110,15 @@ class Emitter {
   groups = false;
   /** 共有配列（var<workgroup>）の宣言。 */
   workgroupVars: string[] = [];
+  /** 共有配列をグループの始めに 0 で埋める文（um_main の先頭に置く）。 */
+  workgroupInit: string[] = [];
+  /** 使った補助関数（um_fdiv など）。使ったものだけを出す。 */
+  uses = new Set<string>();
+  /** RacyBuffer の比較交換の関数（Buffer のグローバル変数の名前 → WGSL）。使ったものだけを出す。 */
+  casText = new Map<string, string[]>();
+  /** 最上位の定数の配列（モジュールの範囲の const）の宣言。名前 → 済み。 */
+  consts = new Set<string>();
+  constDecls: string[] = [];
 
   constructor(prog: Program) {
     this.prog = prog;
@@ -137,18 +161,35 @@ class Emitter {
   }
 
   name(sym: Sym): string {
-    if (sym.global) {
-      // 最上位の定数の配列は WebGPU では扱わない（WebGPU / WGSL の対応はやめる方針。CPU と Metal だけ）。
-      // dispatch の自動判断では、コード生成がこのエラーを受けて CPU で実行する（codegen.ts の gpuKernel）。
-      throw new CompileError(WEBGPU_CONST_ARRAY, `kernel uses the constant array '${sym.name}', which WebGPU (WGSL) does not support`, { line: 1, col: 1 },
-        'constant arrays in kernels run on the CPU and on Metal only; on wasm32 use `dispatch.cpu` (or let `dispatch` choose), or pass the table in a `Buffer<T>`');
-    }
+    if (sym.global) return this.constArray(sym);
     let n = this.names.get(sym.id);
     if (!n) {
       n = `u_${sym.name}_${sym.id}`;
       this.names.set(sym.id, n);
     }
     return n;
+  }
+
+  /**
+   * 最上位の定数の配列を、モジュールの範囲の `const` として出し、その名前を返す（kernel の引数は増えない）。
+   * 添字は固定長配列と同じく min で最後の要素に切り詰める（index の式を参照）。
+   */
+  constArray(sym: Sym): string {
+    const g = sym.global!;
+    const name = `k_${g.name}`;
+    if (!this.consts.has(name)) {
+      this.consts.add(name);
+      const lit = (v: unknown, t: Ty): string => {
+        if (t.k === 'array') return `${this.ty(t)}(${(v as unknown[]).map((x) => lit(x, t.elem)).join(', ')})`;
+        if (t.k === 'bool') return v ? 'true' : 'false';
+        if (t.k === 'float') return this.float(Number(v));
+        const n = BigInt(v as bigint);
+        if (t.k === 'int' && t.signed) return n === -2147483648n ? '(-2147483647i - 1i)' : n < 0n ? `(${n}i)` : `${n}i`;
+        return `${n}u`;
+      };
+      this.constDecls.push(`const ${name}: ${this.ty(sym.ty)} = ${lit(g.value, sym.ty)};`);
+    }
+    return name;
   }
 
   block(body: Stmt[]): void {
@@ -173,7 +214,20 @@ class Emitter {
       case 'let':
         if (s.sym!.shared) {
           // 共有配列はモジュールの var<workgroup>。WebGPU がグループの始めに 0 で埋める。
-          this.workgroupVars.push(`var<workgroup> ${this.name(s.sym!)}: ${this.ty(s.sym!.ty)};`);
+          const name = this.name(s.sym!);
+          const t = s.sym!.ty;
+          this.workgroupVars.push(`var<workgroup> ${name}: ${this.ty(t)};`);
+          // WebGPU の仕様でも 0 で始まるが、それに頼らず自分で埋める（NVIDIA の Vulkan で 0 にならないことがあった）。
+          // グループのスレッドで手分けして埋め、barrier で揃えてから本体に入る。
+          if (t.k === 'array') {
+            this.workgroupInit.push(
+              `  for (var um_z${this.workgroupInit.length}: u32 = um_l; um_z${this.workgroupInit.length} < ${t.len}u; um_z${this.workgroupInit.length} += um_wg) {`,
+              `    ${name}[um_z${this.workgroupInit.length}] = ${this.ty(t.elem)}();`,
+              '  }',
+            );
+          } else {
+            this.workgroupInit.push('  if (um_l == 0u) {', `    ${name} = ${this.ty(t)}();`, '  }');
+          }
           return;
         }
         // 初期値のない宣言は、WGSL でもゼロで初期化される。
@@ -320,6 +374,7 @@ class Emitter {
       case 'fetchAdd':
         return `atomicAdd(&${ref.global}[um_clamp(${i}, ${ref.len})], ${a[0]})`;
       case 'compareExchange':
+        this.uses.add(`um_cas_${ref.global}`);
         return `um_cas_${ref.global}(${i}, ${a[0]}, ${a[1]})`;
     }
     throw new Error(`internal: wgsl RacyBuffer.${e.name}`);
@@ -378,6 +433,17 @@ class Emitter {
           const rt = e.right.ty as Ty & { k: 'int' };
           return `(${l} ${e.op} (${rt.signed ? `u32(${r})` : r} & 31u))`;
         }
+        // 正しく丸める割り算、FMA にまとめない掛け算、ドライバの誤りを避ける余り（ファイルの先頭の説明）。
+        if (ty.k === 'float' && (e.op === '/' || e.op === '*')) {
+          const fn = e.op === '/' ? 'um_fdiv' : 'um_fmul';
+          this.uses.add(fn);
+          return `${fn}(${l}, ${r})`;
+        }
+        if (ty.k === 'int' && e.op === '%') {
+          const fn = ty.signed ? 'um_rem_i' : 'um_rem_u';
+          this.uses.add(fn);
+          return `${fn}(${l}, ${r})`;
+        }
         return `(${l} ${e.op} ${r})`;
       }
 
@@ -435,8 +501,8 @@ class Emitter {
       case 'math': {
         if (e.fn.startsWith('group.simd')) {
           // WebGPU の subgroup は拡張機能で幅も決まっていないので、simdgroup の集計は Metal と CPU だけ。
-          throw new CompileError('kernel-restriction', `\`${e.fn}\` is not supported on WebGPU (wasm32)`, e.pos,
-            'simdgroup functions run on Metal and on the CPU; build with `--target host`');
+          throw new CompileError(WGSL_SIMDGROUP, `\`${e.fn}\` is not supported by WebGPU (WGSL)`, e.pos,
+            'simdgroup functions run on Metal and on the CPU; `dispatch` / `dispatchGroups` run such a kernel on the CPU in UM_WGPU=1 builds');
         }
         const a = e.args.map((x) => this.expr(x));
         switch (e.fn) {
@@ -449,6 +515,8 @@ class Emitter {
           case 'group.count':
             return 'um_params.count';
           case 'sqrt':
+            this.uses.add('um_fsqrt');
+            return `um_fsqrt(${a[0]})`;
           case 'floor':
           case 'ceil':
           case 'abs':
@@ -601,18 +669,23 @@ class Emitter {
           if (el.k === 'int') {
             // 比較交換。前の値を返す（等しければ desired に入れ替わっている）。弱い版の空振りはやり直す。
             const t = this.ty(el);
-            this.fnText.push(
+            // compareExchange を使ったときだけ出す（racyCall が uses に入れる）。
+            this.casText.set(global, [
               `fn um_cas_${global}(i: u32, expected: ${t}, desired: ${t}) -> ${t} {`,
               `  let j: u32 = um_clamp(i, ${len});`,
+              `  var old: ${t} = expected;`,
+              // 関数の終わりに return を置く（naga は、抜け出さない loop のあとも return を求める）。
               '  loop {',
               `    let r = atomicCompareExchangeWeak(&${global}[j], expected, desired);`,
+              '    old = r.old_value;',
               '    if (r.exchanged || r.old_value != expected) {',
-              '      return r.old_value;',
+              '      break;',
               '    }',
               '  }',
+              '  return old;',
               '}',
               '',
-            );
+            ]);
           }
           return;
         }
@@ -664,6 +737,10 @@ class Emitter {
       '  return select(lo, 0u, v != v);',
       '}',
       '',
+      ...[...this.uses].filter((u) => HELPERS[u]).flatMap((u) => [...HELPERS[u], '']),
+      ...[...this.casText].filter(([g]) => this.uses.has(`um_cas_${g}`)).flatMap(([, text]) => text),
+      ...this.constDecls,
+      ...(this.constDecls.length > 0 ? [''] : []),
       ...this.workgroupVars,
       ...(this.workgroupVars.length > 0 ? [''] : []),
       ...this.fnText,
@@ -679,6 +756,8 @@ class Emitter {
           '    return;',
           '  }',
           '  let um_i: u32 = um_g * um_wg + um_l;',
+          ...(this.uses.has('um_fmul') ? ['  um_z = um_params.row >> 30u;'] : []),
+          ...(this.workgroupInit.length > 0 ? [...this.workgroupInit, '  workgroupBarrier();'] : []),
         ]
         : [
           `@compute @workgroup_size(${WORKGROUP_SIZE})`,
@@ -687,6 +766,7 @@ class Emitter {
           '  if (um_i >= um_params.count) {',
           '    return;',
           '  }',
+          ...(this.uses.has('um_fmul') ? ['  um_z = um_params.row >> 30u;'] : []),
         ]),
       ...prelude,
       ...this.lines,
@@ -696,6 +776,161 @@ class Emitter {
     return { source, buffers };
   }
 }
+
+/** 補助関数の WGSL（Emitter.uses に入れた名前ごと）。 */
+const HELPERS: Record<string, string[]> = {
+  um_rem_i: [
+    '// 余り。y = 0 なら 0、最小値 % -1 は 0（CPU 版と同じ）。WGSL の / は y = 0 で x、最小値 / -1 で最小値を返す。',
+    'fn um_rem_i(x: i32, y: i32) -> i32 {',
+    '  return select(x - (x / y) * y, 0i, y == 0i);',
+    '}',
+  ],
+  um_rem_u: [
+    'fn um_rem_u(x: u32, y: u32) -> u32 {',
+    '  return select(x - (x / y) * y, 0u, y == 0u);',
+    '}',
+  ],
+  um_fmul: [
+    '// 掛け算の結果を、実行時にしか分からない 0（um_main が um_params.row >> 30 を入れる。row は 2^30 未満）と OR する。',
+    '// ドライバは結果を足し算と1つの命令（FMA）にまとめられなくなり、CPU と同じく掛け算のあとで1回丸める。',
+    'var<private> um_z: u32;',
+    'fn um_fmul(a: f32, b: f32) -> f32 {',
+    '  return bitcast<f32>(bitcast<u32>(a * b) | um_z);',
+    '}',
+  ],
+  um_fdiv: [
+    '// IEEE 754 の f32 の割り算（最近接偶数への丸め）。GPU の割り算の命令は数 ULP の誤差を許すので、整数の演算で求める。',
+    '// 仮数を1ビットずつ割り（24 ビットと丸めのビット）、余りが残れば sticky。非正規化数・無限大・NaN も CPU と同じに扱う。',
+    'fn um_fdiv(a: f32, b: f32) -> f32 {',
+    '  let ua = bitcast<u32>(a);',
+    '  let ub = bitcast<u32>(b);',
+    '  let sign = (ua ^ ub) & 0x80000000u;',
+    '  var ea = i32((ua >> 23u) & 0xffu);',
+    '  var eb = i32((ub >> 23u) & 0xffu);',
+    '  var ma = ua & 0x7fffffu;',
+    '  var mb = ub & 0x7fffffu;',
+    '  let nan = bitcast<f32>(0x7fc00000u);',
+    '  if ((ea == 255 && ma != 0u) || (eb == 255 && mb != 0u)) {',
+    '    return nan;',
+    '  }',
+    '  if (ea == 255) {',
+    '    return select(bitcast<f32>(sign | 0x7f800000u), nan, eb == 255);',
+    '  }',
+    '  if (eb == 255) {',
+    '    return bitcast<f32>(sign);',
+    '  }',
+    '  if (eb == 0 && mb == 0u) {',
+    '    return select(bitcast<f32>(sign | 0x7f800000u), nan, ea == 0 && ma == 0u);',
+    '  }',
+    '  if (ea == 0 && ma == 0u) {',
+    '    return bitcast<f32>(sign);',
+    '  }',
+    '  if (ea == 0) {',
+    '    let sh = countLeadingZeros(ma) - 8u;',
+    '    ma = ma << sh;',
+    '    ea = 1 - i32(sh);',
+    '  } else {',
+    '    ma = ma | 0x800000u;',
+    '  }',
+    '  if (eb == 0) {',
+    '    let sh = countLeadingZeros(mb) - 8u;',
+    '    mb = mb << sh;',
+    '    eb = 1 - i32(sh);',
+    '  } else {',
+    '    mb = mb | 0x800000u;',
+    '  }',
+    '  if (ma < mb) {',
+    '    ma = ma << 1u;',
+    '    ea = ea - 1;',
+    '  }',
+    '  var e = ea - eb + 127;',
+    '  var rem = ma;',
+    '  var q = 0u;',
+    '  for (var k = 0u; k < 25u; k++) {',
+    '    q = q << 1u;',
+    '    if (rem >= mb) {',
+    '      rem = rem - mb;',
+    '      q = q | 1u;',
+    '    }',
+    '    rem = rem << 1u;',
+    '  }',
+    '  return um_fround(sign, e, q, rem != 0u);',
+    '}',
+    '',
+    '// 25 ビットの仮数 q（最下位は丸めのビット）と sticky を、指数 e（バイアスつき）の f32 に丸める。',
+    'fn um_fround(sign: u32, e0: i32, q0: u32, sticky0: bool) -> f32 {',
+    '  var e = e0;',
+    '  var q = q0;',
+    '  var sticky = sticky0;',
+    '  if (e >= 255) {',
+    '    return bitcast<f32>(sign | 0x7f800000u);',
+    '  }',
+    '  if (e <= 0) {',
+    '    let sh = u32(1 - e);',
+    '    e = 1;',
+    '    if (sh >= 26u) {',
+    '      sticky = sticky || q != 0u;',
+    '      q = 0u;',
+    '    } else {',
+    '      sticky = sticky || (q & ((1u << sh) - 1u)) != 0u;',
+    '      q = q >> sh;',
+    '    }',
+    '  }',
+    '  var m = q >> 1u;',
+    '  if ((q & 1u) == 1u && (sticky || (m & 1u) == 1u)) {',
+    '    m = m + 1u;',
+    '  }',
+    '  return bitcast<f32>(sign | ((u32(e - 1) << 23u) + m));',
+    '}',
+  ],
+  um_fsqrt: [
+    '// IEEE 754 の f32 の平方根（最近接偶数への丸め）。整数の開平（2ビットずつ）で 25 ビットの根と sticky を求める。',
+    'fn um_fsqrt(a: f32) -> f32 {',
+    '  let ua = bitcast<u32>(a);',
+    '  var e = i32((ua >> 23u) & 0xffu);',
+    '  var m = ua & 0x7fffffu;',
+    '  if ((ua & 0x7fffffffu) == 0u || (e == 255 && m != 0u)) {',
+    '    return a;',
+    '  }',
+    '  if ((ua & 0x80000000u) != 0u) {',
+    '    return bitcast<f32>(0x7fc00000u);',
+    '  }',
+    '  if (e == 255) {',
+    '    return a;',
+    '  }',
+    '  var ex: i32;',
+    '  if (e == 0) {',
+    '    let sh = countLeadingZeros(m) - 8u;',
+    '    m = m << sh;',
+    '    ex = -126 - i32(sh);',
+    '  } else {',
+    '    m = m | 0x800000u;',
+    '    ex = e - 127;',
+    '  }',
+    '  // 被開平数 R = m << 25（指数が偶数）か m << 26（奇数）。上の 26 ビットが mx、下の 24 ビットは 0。',
+    '  let odd = (ex & 1) != 0;',
+    '  let mx = m << select(1u, 2u, odd);',
+    '  var rem = 0u;',
+    '  var root = 0u;',
+    '  for (var k = 0u; k < 25u; k++) {',
+    '    let bits = select(0u, (mx >> (24u - 2u * k)) & 3u, k < 13u);',
+    '    rem = (rem << 2u) | bits;',
+    '    let trial = (root << 2u) | 1u;',
+    '    root = root << 1u;',
+    '    if (rem >= trial) {',
+    '      rem = rem - trial;',
+    '      root = root | 1u;',
+    '    }',
+    '  }',
+    '  let er = select(ex / 2, (ex - 1) / 2, odd) + 127;',
+    '  var r = root >> 1u;',
+    '  if ((root & 1u) == 1u && (rem != 0u || (r & 1u) == 1u)) {',
+    '    r = r + 1u;',
+    '  }',
+    '  return bitcast<f32>((u32(er - 1) << 23u) + r);',
+    '}',
+  ],
+};
 
 export function emitWgsl(prog: Program, kernel: FnDecl, groups = false): WgslKernel {
   return new Emitter(prog).kernel(kernel, groups);
