@@ -1,5 +1,6 @@
 // 64 ビットの整数の定数の配列を kernel の中で読む（MSL では ulong / long の constant の変数）。
 // 32 ビットに収まらない値（2^40、u64 の最大値、負の大きな i64）が GPU でも切れずに読めることを確かめる。
+// wgpu-error: kernel-type
 // expect: 1099511627776
 // expect: 18446744073709551615
 // expect: 5

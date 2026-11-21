@@ -1,0 +1,78 @@
+// 速さの計測: 1280x720 の画素ごとの kernel（vec4<f32> の画素に、色の変換とトーンカーブ）。
+// CPU の全コア（cpu.dispatch）と GPU（gpu.dispatch）、自動判断（dispatch）で1フレームあたりの時間を測る。
+// GPU は2通り: 毎フレーム CPU が結果を読む場合（読み戻しを含む）と、GPU で続けて処理して最後にだけ読む場合。
+// 作り方と結果は docs/wgpu.ja.md の「速さ」。UM_WGPU=1（または Mac で UM_METAL=1）で作る:
+//   UM_WGPU=1 node src/cli.ts build bench/gpu/pixels.um --target host -o pixels
+
+kernel function grade(i: u32, dst: mut Buffer<vec4<f32>>, src: Buffer<vec4<f32>>, gain: f32, lift: f32): void {
+  const c = src[i];
+  // 色の行列とトーンカーブ（x / (x + k)）、ガンマに近い平方根。
+  let r = c.x * 0.8 + c.y * 0.15 + c.z * 0.05;
+  let g = c.x * 0.1 + c.y * 0.85 + c.z * 0.05;
+  let b = c.x * 0.05 + c.y * 0.1 + c.z * 0.85;
+  r = Math.sqrt(r * gain / (r * gain + 0.25)) + lift;
+  g = Math.sqrt(g * gain / (g * gain + 0.25)) + lift;
+  b = Math.sqrt(b * gain / (b * gain + 0.25)) + lift;
+  dst[i] = vec4(Math.min(r, 1), Math.min(g, 1), Math.min(b, 1), c.w);
+}
+
+function checksum(b: Buffer<vec4<f32>>): f64 {
+  let s: f64 = 0;
+  for (let i: u32 = 0; i < b.length; i += 97) {
+    s += (b[i].x + b[i].y * 2 + b[i].z * 3) as f64;
+  }
+  return s;
+}
+
+export function main(): i32 {
+  const w: u32 = 1280;
+  const h: u32 = 720;
+  const n = w * h;
+  const frames = 60;
+  const ff = frames as f64;
+  let src = new Buffer<vec4<f32>>(n);
+  for (let i: u32 = 0; i < n; i++) {
+    const x = (i % w) as f32;
+    const y = (i / w) as f32;
+    src[i] = vec4(x / 1280, y / 720, ((i * 2654435761) >> 24) as f32 / 255, 1);
+  }
+  let a = new Buffer<vec4<f32>>(n);
+  let sink: f32 = 0;
+  let b = new Buffer<vec4<f32>>(n);
+
+  // 準備（パイプラインの作成、スレッドの起動）の分を外す。
+  cpu.dispatch(grade, n, mut a, src, 1.1, 0.01);
+  gpu.dispatch(grade, n, mut b, src, 1.1, 0.01);
+  print(checksum(a) == checksum(b));
+
+  let t0 = clock();
+  for (let f = 0; f < frames; f++) {
+    cpu.dispatch(grade, n, mut a, src, 1.1, 0.01);
+    sink += a[(f as u32) * 1000].x;
+  }
+  print(`cpu (all cores):           ${(clock() - t0) * 1000 / ff} ms/frame`);
+
+  t0 = clock();
+  for (let f = 0; f < frames; f++) {
+    gpu.dispatch(grade, n, mut b, src, 1.1, 0.01);
+    sink += b[(f as u32) * 1000].x;
+  }
+  print(`gpu, CPU reads each frame: ${(clock() - t0) * 1000 / ff} ms/frame`);
+
+  t0 = clock();
+  for (let f = 0; f < frames; f++) {
+    gpu.dispatch(grade, n, mut b, src, 1.1, 0.01);
+    gpu.dispatch(grade, n, mut a, b, 1.0, 0.0);
+  }
+  const keep = checksum(a);
+  print(`gpu, chained (2 kernels):  ${(clock() - t0) * 1000 / ff} ms/frame (${keep > 0})`);
+
+  t0 = clock();
+  for (let f = 0; f < frames; f++) {
+    dispatch(grade, n, mut b, src, 1.1, 0.01);
+    sink += b[(f as u32) * 1000].x;
+  }
+  print(`auto, CPU reads each frame:${(clock() - t0) * 1000 / ff} ms/frame`);
+  print(sink > 0);
+  return 0;
+}

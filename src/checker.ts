@@ -1,3 +1,4 @@
+import { inferGpuLoad, isGpuLoadCall } from './gpuload.ts';
 import { CompileError, CompileErrors } from './diag.ts';
 import type { Pos } from './diag.ts';
 import { displayNames, GROUP_COLLECTIVE, isAgg, isCollectiveLet, isNumeric, tyEq, tyStr } from './ast.ts';
@@ -2675,6 +2676,8 @@ class Checker {
       return STR;
     }
 
+    // gpu.loadKernel / gpu.runKernel の検査済みの式（src/gpuload.ts）をもう一度検査するときは、前の結果の型。
+    if ((e.callee === '__gpu_load' || e.callee === '__gpu_run') && e.ty) return e.ty;
     // 入出力の組み込み。検査済みの式（名前が `__io_...` になっている）をもう一度検査することもある。
     const io = e.callee.startsWith('__io_') ? e.callee.slice(5) : e.callee;
     if (IO_BUILTINS.has(io) && (io !== e.callee || (!this.fns.has(io) && !this.generics.has(io)))) return this.inferIo(e, io);
@@ -3344,6 +3347,8 @@ class Checker {
       node.callee = '__gpu_untracked';
       return VOID;
     }
+    // `gpu.loadKernel(wgsl)` / `gpu.runKernel(k, count, ...)`: 実行時に読み込む kernel（src/gpuload.ts）。
+    if (isGpuLoadCall(e, (n) => this.lookup(n))) return inferGpuLoad(this, e);
     if (this.isThreadCall(e)) return this.inferThread(e);
     // `Shape.Circle(1.5)`: enum の値を作る。
     if (e.recv.kind === 'ident' && !this.lookup(e.recv.name) && this.isEnumName(e.recv.name)) {
