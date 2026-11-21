@@ -1,0 +1,18 @@
+// windowSetIcon: 窓のアイコンを付ける。offscreen のドライバは窓のアイコンを持たないので、結果（true / false）は見ずに、
+// 停止せずに呼べることだけを確かめる。
+// expect: icon called
+
+export function main(): i32 {
+  const opened = windowOpen("icon", 64, 64);
+  if (opened == null) {
+    print(`could not open: ${windowError()}`);
+    return 1;
+  }
+  const win = opened;
+  let px = new Buffer<u32>(32 * 32);
+  px.fill(0xFF3366CC);
+  windowSetIcon(win, px, 32, 32);
+  print("icon called");
+  windowClose(win);
+  return 0;
+}
