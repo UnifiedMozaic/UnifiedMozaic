@@ -678,6 +678,47 @@ if (windows) {
   }
 }
 
+// envVar（環境変数）。ネイティブは OS の環境（Windows は UTF-16 の環境ブロック）から、wasm32 は instantiate の env から読む。
+// 値に日本語・空白・= を入れて、名前と値の文字の変換を確かめる。ない変数と空の名前は空。
+{
+  const src = [
+    'export function main(): i32 {',
+    '  print(envVar("UM_TEST_ENV_VALUE"));',
+    '  print(envVar("UM_TEST_ENV_UNSET") == "");',
+    '  print(envVar("") == "");',
+    '  return 0;',
+    '}',
+  ].join('\n');
+  const value = 'あい = う;x';
+  const want = [value, 'true', 'true'];
+  const name = 'envVar reads the process environment [host]';
+  try {
+    const exe = build(compileToLL(src, 'host'), 'host', join(tmp, 'env_var.bin')).output;
+    const env: NodeJS.ProcessEnv = { ...process.env, UM_TEST_ENV_VALUE: value };
+    delete env.UM_TEST_ENV_UNSET;
+    const r = spawnSync(exe, [], { encoding: 'utf8', cwd: tmp, env });
+    const out = r.stdout.split('\n').map((l) => l.replace(/\r$/, '')).filter((l) => l !== '');
+    if (r.status === 0 && same(out, want)) ok(name);
+    else fail(name, `status ${r.status}\nexpected: ${want.join(' | ')}\nactual:   ${out.join(' | ')}\n${r.stderr}`);
+  } catch (e) {
+    fail(name, String(e));
+  }
+  if (hasWasm) {
+    const wname = 'envVar reads the env option of instantiate [wasm32]';
+    try {
+      const wasm = join(tmp, 'env_var.wasm');
+      build(compileToLL(src, 'wasm32'), 'wasm32', wasm);
+      const out: string[] = [];
+      const exports = await instantiate(readFileSync(wasm), { gpu: false, print: (s: string) => out.push(s), env: { UM_TEST_ENV_VALUE: value } });
+      await (exports.main as () => unknown)();
+      if (same(out, want)) ok(wname);
+      else fail(wname, `expected: ${want.join(' | ')}\nactual:   ${out.join(' | ')}`);
+    } catch (e) {
+      fail(wname, String(e));
+    }
+  }
+}
+
 // wasm のホスト（runtime/host.mjs）の入出力の口。コンパイラを通さず、口をそのまま export する小さな wasm で確かめる
 // （wasm32 を出力できない環境でも実行できる）。
 {
