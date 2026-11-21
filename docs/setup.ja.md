@@ -101,6 +101,8 @@ um build examples/structs.um -o structs.wasm
 node runtime/run-node.mjs structs.wasm
 ```
 
+ウィンドウを開くプログラム（[docs/window.ja.md](window.ja.md)）には、ほかに SDL3 が要ります。
+
 ## 6. テスト
 
 ```sh

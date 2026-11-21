@@ -182,7 +182,8 @@ export function simdInfo(t: Ty | undefined): { elem: Ty & { k: 'int' | 'float' }
  * 入出力の組み込み関数。同じ名前の関数をプログラムが定義していれば、そちらが優先される。
  * 型検査は呼び出しの名前を `__io_名前` に書き換え、コード生成がランタイムの呼び出しにする。kernel の中では使えない。
  */
-const IO_BUILTINS = new Set(['readLine', 'inputReady', 'clock', 'stringFromBytes', 'readFile', 'writeFile', 'fileSize', 'readFileRange', 'appendFile', 'args', 'eprint']);
+const IO_BUILTINS = new Set(['readLine', 'inputReady', 'clock', 'stringFromBytes', 'readFile', 'writeFile', 'fileSize', 'readFileRange', 'appendFile', 'args', 'eprint',
+  'windowOpen', 'windowClose', 'windowPoll', 'windowPresent']);
 
 /** 最上位の定数。値は最初に使われたとき（遅くとも宣言の収集の終わり）に求める。 */
 interface ConstInfo {
@@ -2712,12 +2713,20 @@ class Checker {
    *   appendFile(path: string, bytes: u8[]): bool  終わりに書き足す（なければ作る）。
    *   args(): string[]                     コマンドライン引数（プログラム名を除く）。
    *   eprint(text: string): void           標準エラー出力に1行。
+   * ウィンドウ（ネイティブだけ。メインスレッドから呼ぶ。runtime/window.c が SDL3 で実装する）:
+   *   windowOpen(title: string, width: i32, height: i32): i32 | null  ウィンドウを開き、その番号を返す。
+   *   windowClose(window: i32): void       ウィンドウを閉じる。
+   *   windowPoll(event: mut Buffer<i32>, timeoutMs: i32): bool  イベントを1つ取り出して event に書く。
+   *       なければ timeoutMs ミリ秒まで待ち（0 は待たない、負は来るまで待つ）、来なければ false。
+   *       ふつうは prelude.um の pollWindowEvent（WindowEvent の enum を返す）を使う。
+   *   windowPresent(window: i32, pixels: Buffer<u32>, width: i32, height: i32): void
+   *       0xAARRGGBB の画素を width × height 並べたものをウィンドウ全体に表示する。
    * 引数は借りるだけ。結果は呼び出した側が所有する新しい値。
    */
   inferIo(e: Expr & { kind: 'call' }, name: string): Ty {
     this.noKernel(`\`${name}\``, e.pos, 'kernel functions run on the GPU too, so they cannot do input or output; call it from a normal function and pass the result in');
     const bytes: Ty = { k: 'heap', elem: PRIMS.u8 };
-    const shapes: Record<string, { params: [string, Ty][]; ret: Ty }> = {
+    const shapes: Record<string, { params: [string, Ty][]; ret: Ty; mut?: number[] }> = {
       readLine: { params: [], ret: this.optionalOf(STR, e.pos) },
       inputReady: { params: [], ret: BOOL },
       clock: { params: [], ret: F64 },
@@ -2729,10 +2738,18 @@ class Checker {
       appendFile: { params: [['path', STR], ['bytes', bytes]], ret: BOOL },
       args: { params: [], ret: { k: 'heap', elem: STR } },
       eprint: { params: [['text', STR]], ret: VOID },
+      windowOpen: { params: [['title', STR], ['width', I32], ['height', I32]], ret: this.optionalOf(I32, e.pos) },
+      windowClose: { params: [['window', I32]], ret: VOID },
+      windowPoll: { params: [['event', { k: 'heap', elem: I32, buffer: true }], ['timeoutMs', I32]], ret: BOOL, mut: [0] },
+      windowPresent: { params: [['window', I32], ['pixels', { k: 'heap', elem: PRIMS.u32, buffer: true }], ['width', I32], ['height', I32]], ret: VOID },
     };
+    if (name.startsWith('window') && this.ptrBits === 32) {
+      this.err('not-implemented', `\`${name}\` is only available in native programs`, e.pos,
+        'windows need a desktop OS; build with `--target host` (the wasm32 target has no window)');
+    }
     const shape = shapes[name];
     const decl: FnDecl = { kind: 'fn', name, exported: false, params: [], body: [], pos: e.pos };
-    const sig: FnSig = { key: name, name, params: shape.params.map(([n, ty]) => ({ name: n, mode: 'none' as Mode, ty })), ret: shape.ret, exported: false, decl };
+    const sig: FnSig = { key: name, name, params: shape.params.map(([n, ty], i) => ({ name: n, mode: (shape.mut?.includes(i) ? 'mut' : 'none') as Mode, ty })), ret: shape.ret, exported: false, decl };
     this.checkArgs(sig, e.args, e.pos);
     e.callee = `__io_${name}`;
     return shape.ret;

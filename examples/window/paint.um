@@ -1,0 +1,102 @@
+// ウィンドウを開き、kernel で描いた画素を表示する。マウスでドラッグすると四角が動き、矢印キーでも動く。
+// Esc か閉じるボタンで終わる。ネイティブだけ（SDL3 が必要。docs/window.ja.md）。
+//   node src/cli.ts build examples/window/paint.um --target host -o paint && ./paint
+// 引数に数を渡すと、そのフレーム数だけ描いて終わる（テスト用。SDL_VIDEO_DRIVER=offscreen と一緒に使う）。
+
+const WIDTH: i32 = 640;
+const HEIGHT: i32 = 400;
+const BOX: i32 = 80;
+
+// 1画素ごとに色を決める。背景のグラデーションと、(bx, by) の四角。
+kernel function draw(i: u32, px: mut Buffer<u32>, width: u32, bx: i32, by: i32, frame: u32): void {
+  const x = (i % width) as i32;
+  const y = (i / width) as i32;
+  let r = ((x * 255) / 640) as u32;
+  let g = ((y * 255) / 400) as u32;
+  let b = (frame * 2) % 256;
+  if (x >= bx && x < bx + 80 && y >= by && y < by + 80) {
+    r = 255;
+    g = 255;
+    b = 255;
+  }
+  px[i] = 0xFF000000 | (r << 16) | (g << 8) | b;
+}
+
+export function main(): i32 {
+  const opened = windowOpen("UnifiedMozaic", WIDTH, HEIGHT);
+  if (opened == null) {
+    eprint("could not open a window");
+    return 1;
+  }
+  const win = opened;
+  let limit: i32 = -1;
+  const a = args();
+  if (a.length > 0) {
+    limit = 0;
+    for (const c of a[0]) {
+      limit = limit * 10 + ((c as i32) - 48);
+    }
+  }
+
+  let px = new Buffer<u32>((WIDTH * HEIGHT) as usize);
+  let bx: i32 = 100;
+  let by: i32 = 100;
+  let dragging = false;
+  let grabX: i32 = 0;
+  let grabY: i32 = 0;
+  let frame: u32 = 0;
+  let running = true;
+  while (running) {
+    while (true) {
+      const e = pollWindowEvent(0);
+      if (e == null) {
+        break;
+      }
+      match (e) {
+        WindowEvent.Close(w) => {
+          running = false;
+        }
+        WindowEvent.Quit => {
+          running = false;
+        }
+        WindowEvent.MouseDown(w, x, y, button) => {
+          if (button == 1 && x >= bx && x < bx + BOX && y >= by && y < by + BOX) {
+            dragging = true;
+            grabX = x - bx;
+            grabY = y - by;
+          }
+        }
+        WindowEvent.MouseUp(w, x, y, button) => {
+          dragging = false;
+        }
+        WindowEvent.MouseMove(w, x, y) => {
+          if (dragging) {
+            bx = x - grabX;
+            by = y - grabY;
+          }
+        }
+        WindowEvent.KeyDown(w, key, mods, repeat) => {
+          const step: i32 = mods.shift ? 40 : 10;
+          match (key) {
+            Key.Escape => { running = false; }
+            Key.Left => { bx -= step; }
+            Key.Right => { bx += step; }
+            Key.Up => { by -= step; }
+            Key.Down => { by += step; }
+            _ => {}
+          }
+        }
+        _ => {}
+      }
+    }
+    dispatch(draw, px.length as u32, mut px, WIDTH as u32, bx, by, frame);
+    windowPresent(win, px, WIDTH, HEIGHT);
+    frame++;
+    if (limit >= 0 && frame as i32 >= limit) {
+      running = false;
+    }
+  }
+  windowClose(win);
+  print(frame);
+  return 0;
+}
