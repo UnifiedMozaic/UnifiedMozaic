@@ -71,6 +71,8 @@ export function exePath(path: string): string {
 }
 const RUNTIME_METAL = join(import.meta.dirname, '..', 'runtime', 'metal.m');
 const RUNTIME_WINDOW = join(import.meta.dirname, '..', 'runtime', 'window.c');
+/** 音の出力（audioOpen など）。ウィンドウと同じく SDL3 を使い、window.c と一緒にリンクする。 */
+const RUNTIME_AUDIO = join(import.meta.dirname, '..', 'runtime', 'audio.c');
 
 /** SDL3 をリンクするための clang の引数と、実行ファイルの隣に置く DLL（Windows だけ）。 */
 interface Sdl3 { args: string[]; dll?: string }
@@ -245,9 +247,19 @@ function describeImport(imp: string): string {
   return imp;
 }
 
-/** 生成した LLVM IR がウィンドウの組み込みを使っているか（codegen は使ったときだけ宣言を出す）。 */
+/** 生成した LLVM IR がウィンドウか音の組み込みを使っているか（codegen は使ったときだけ宣言を出す）。 */
 function usesWindow(ll: string): boolean {
   return ll.includes('declare i32 @um_window_open(');
+}
+
+/** SDL3 が見つかるか（テストで、ウィンドウと音の試験を飛ばすかを決めるため）。 */
+export function sdl3Available(): boolean {
+  try {
+    findSdl3();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -499,7 +511,7 @@ export function build(ll: string, target: TargetName, outPath: string, optLevel 
       if (sanitize === 'thread') args.unshift('-fsanitize=thread', '-g');
       else if (sanitize) args.unshift('-fsanitize=address', '-g');
       const sdl = usesWindow(ll) ? findSdl3() : null;
-      if (sdl) args.push(RUNTIME_WINDOW, ...sdl.args);
+      if (sdl) args.push(RUNTIME_WINDOW, RUNTIME_AUDIO, ...sdl.args);
       const wt = usesWasm(ll) ? findWasmtime() : null;
       if (wt) args.push(RUNTIME_WASMTIME, ...wt.args);
       clang(args, quiet);
@@ -517,7 +529,7 @@ export function build(ll: string, target: TargetName, outPath: string, optLevel 
     if (metalEnabled(target) && process.platform === 'darwin') {
       args.push('-fobjc-arc', RUNTIME_METAL, '-framework', 'Metal', '-framework', 'Foundation');
     }
-    if (usesWindow(ll)) args.push(RUNTIME_WINDOW, ...findSdl3().args);
+    if (usesWindow(ll)) args.push(RUNTIME_WINDOW, RUNTIME_AUDIO, ...findSdl3().args);
     if (usesWasm(ll)) args.push(RUNTIME_WASMTIME, ...findWasmtime().args);
     clang(args, quiet);
     return { output: out, objectOnly: false };

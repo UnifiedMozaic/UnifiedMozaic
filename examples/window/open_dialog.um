@@ -1,0 +1,177 @@
+// ファイルのダイアログ。3つのボタン（開く・保存・フォルダ）を押すとダイアログが出て、選んだパスが表示される。
+// ボタンの上ではカーソルが手の形になる。Ctrl+C で最後に選んだパスをクリップボードに写し、Ctrl+V でクリップボードの文字を表示する。
+// O / S / F のキーでも開ける。Esc で終わる。ネイティブだけ（SDL3 が必要。docs/window.ja.md）。
+//   node src/cli.ts build examples/window/open_dialog.um --target host -o open_dialog && ./open_dialog
+// 引数に数を渡すと、そのフレーム数だけ描いて終わる（テスト用。ダイアログは開かない）。
+// args: 3
+// expect: frames 3
+
+const WIDTH: i32 = 480;
+const HEIGHT: i32 = 160;
+
+// ボタン i（0 開く、1 保存、2 フォルダ）の左端。幅 120、高さ 60、上端 50。
+function buttonX(i: i32): i32 {
+  return 30 + i * 150;
+}
+
+function buttonAt(x: i32, y: i32): i32 {
+  for (let i = 0; i < 3; i++) {
+    if (x >= buttonX(i) && x < buttonX(i) + 120 && y >= 50 && y < 110) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+kernel function draw(i: u32, px: mut Buffer<u32>, hover: i32, pressed: i32): void {
+  const x = (i % 480) as i32;
+  const y = (i / 480) as i32;
+  let c: u32 = 0xFF202428;
+  for (let b = 0; b < 3; b++) {
+    const bx = 30 + b * 150;
+    if (x >= bx && x < bx + 120 && y >= 50 && y < 110) {
+      c = 0xFF3A4048;
+      if (b == hover) {
+        c = 0xFF4A6FA5;
+      }
+      if (b == pressed) {
+        c = 0xFF2E4F80;
+      }
+      // ボタンの印（開く: 上向きの三角、保存: 下の線、フォルダ: 四角）
+      const lx = x - bx - 60;
+      const ly = y - 80;
+      if (b == 0 && ly > -12 && ly < 12 && lx > -ly - 12 && lx < ly + 12 && ly > -12) {
+        c = 0xFFFFFFFF;
+      }
+      if (b == 1 && ly > 6 && ly < 12 && lx > -16 && lx < 16) {
+        c = 0xFFFFFFFF;
+      }
+      if (b == 2 && ly > -10 && ly < 10 && lx > -16 && lx < 16 && (ly < -6 || ly > 6 || lx < -12 || lx > 12)) {
+        c = 0xFFFFFFFF;
+      }
+    }
+  }
+  px[i] = c;
+}
+
+// ダイアログを開いて、要求の番号を返す（出せなければ -1）。
+function openDialog(win: i32, kind: i32): i32 {
+  let r: i32 | null = null;
+  if (kind == 0) {
+    const filters: DialogFilter[] = [
+      { name: "動画", pattern: "mp4;mov;mkv;webm;avi" },
+      { name: "音声", pattern: "wav;mp3;aac;flac" },
+      { name: "すべてのファイル", pattern: "*" },
+    ];
+    r = windowOpenFileDialog(win, "素材を読み込む", "", filters, true);
+  } else if (kind == 1) {
+    const filters: DialogFilter[] = [{ name: "MozaicCut のプロジェクト", pattern: "mzc" }];
+    r = windowSaveFileDialog(win, "プロジェクトを保存", "untitled.mzc", filters);
+  } else {
+    r = windowOpenFolderDialog(win, "書き出し先のフォルダ", "", false);
+  }
+  const request = r;
+  if (request == null) {
+    eprint(`could not show a dialog: ${windowError()}`);
+    return -1;
+  }
+  return request;
+}
+
+export function main(): i32 {
+  const opened = windowOpen("ダイアログ", WIDTH, HEIGHT);
+  if (opened == null) {
+    eprint(`could not open a window: ${windowError()}`);
+    return 1;
+  }
+  const win = opened;
+  let limit: i32 = -1;
+  const a = args();
+  if (a.length > 0) {
+    limit = 0;
+    for (const c of a[0]) {
+      limit = limit * 10 + ((c as i32) - 48);
+    }
+  }
+  let px = new Buffer<u32>((WIDTH * HEIGHT) as usize);
+  let hover: i32 = -1;
+  let pressed: i32 = -1;
+  let last = "";
+  let frame: i32 = 0;
+  let running = true;
+  while (running) {
+    // 入力があるまで眠る（テストのときは待たない）。
+    const e = pollWindowEvent(limit >= 0 ? 0 : 100);
+    if (e != null) {
+      match (e) {
+        WindowEvent.Close(w) => { running = false; }
+        WindowEvent.Quit => { running = false; }
+        WindowEvent.MouseMove(w, x, y) => {
+          const h = buttonAt(x, y);
+          if (h != hover) {
+            hover = h;
+            windowSetCursor(h >= 0 ? CursorShape.Pointer : CursorShape.Default);
+          }
+        }
+        WindowEvent.MouseDown(w, x, y, button) => {
+          if (button == 1) {
+            pressed = buttonAt(x, y);
+          }
+        }
+        WindowEvent.MouseUp(w, x, y, button) => {
+          if (button == 1 && pressed >= 0 && pressed == buttonAt(x, y)) {
+            openDialog(win, pressed);
+          }
+          pressed = -1;
+        }
+        WindowEvent.KeyDown(w, key, mods, repeat) => {
+          match (key) {
+            Key.Escape => { running = false; }
+            Key.Char(c) => {
+              if (mods.ctrl && c == 99) {          // Ctrl+C
+                clipboardSetText(last);
+                print(`copied: ${last}`);
+              } else if (mods.ctrl && c == 118) {  // Ctrl+V
+                print(`clipboard: ${clipboardText()}`);
+              } else if (c == 111) {
+                openDialog(win, 0);
+              } else if (c == 115) {
+                openDialog(win, 1);
+              } else if (c == 102) {
+                openDialog(win, 2);
+              }
+            }
+            _ => {}
+          }
+        }
+        WindowEvent.Dialog(request, paths, filter) => {
+          if (paths.length == 0) {
+            print(`dialog ${request}: cancelled`);
+          } else {
+            print(`dialog ${request}: ${paths.length} item(s), filter ${filter}`);
+            for (const p of paths) {
+              print(`  ${p}`);
+            }
+            last = paths[paths.length - 1].clone();
+            windowSetTitle(win, `ダイアログ — ${last}`);
+          }
+        }
+        WindowEvent.DialogFailed(request) => {
+          print(`dialog ${request}: failed (${windowError()})`);
+        }
+        _ => {}
+      }
+    }
+    dispatch(draw, px.length as u32, mut px, hover, pressed);
+    windowPresent(win, px, WIDTH, HEIGHT);
+    frame++;
+    if (limit >= 0 && frame >= limit) {
+      running = false;
+    }
+  }
+  windowClose(win);
+  if (limit >= 0) {
+    print(`frames ${frame}`);
+  }
+  return 0;
+}

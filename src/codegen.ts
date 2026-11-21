@@ -1689,6 +1689,10 @@ class ModuleGen {
     if (this.usesWindow) {
       out.push(`declare i32 @um_window_open(ptr, ${this.usz}, i32, i32, i32) #0`, 'declare void @um_window_close(i32, i32) #0');
       out.push(`declare i32 @um_window_poll(ptr, ${this.usz}, i32, i32) #0`, `declare void @um_window_present(i32, ptr, ${this.usz}, i32, i32, i32) #0`);
+      out.push(`declare void @um_window_present_rect(i32, ptr, ${this.usz}, i32, i32, i32, i32, i32, i32, i32, i32) #0`);
+      out.push(`declare i64 @um_window_ctl(i32, i32, ptr, ${this.usz}, i32) #0`, 'declare double @um_window_ctl_f(i32, i32, i64, i32) #0');
+      out.push(`declare i64 @um_window_set_text(i32, i32, i64, ptr, ${this.usz}, i32) #0`, 'declare void @um_window_get_text(i32, i32, i64, ptr, ptr, i32) #0');
+      out.push(`declare i32 @um_audio_write(i32, ptr, ${this.usz}, i64, i64, i32) #0`);
     }
     // WebAssembly（runtime/wasm.c）。使ったときだけ宣言する。ドライバはこの宣言を見て wasm.c と wasmtime をリンクする。
     if (this.usesWasm) {
@@ -3515,6 +3519,66 @@ class FnGen {
         const [data, len] = pxParts();
         this.emit(`call void @um_window_present(i32 ${id}, ptr ${data}, ${usz} ${len}, i32 ${w}, i32 ${h}, i32 ${e.pos.line})`);
         return '';
+      }
+      case 'windowPresentRect':
+      case 'windowUpdateRect': {
+        this.m.usesWindow = true;
+        const show = name === 'windowPresentRect' ? 1 : 0;
+        const id = this.expr(e.args[0].expr);
+        const pxParts = this.heapParts(e.args[1].expr);
+        const [w, h, x, y, rw, rh] = e.args.slice(2).map((a) => this.expr(a.expr));
+        const [data, len] = pxParts();
+        this.emit(`call void @um_window_present_rect(i32 ${id}, ptr ${data}, ${usz} ${len}, i32 ${w}, i32 ${h}, i32 ${x}, i32 ${y}, i32 ${rw}, i32 ${rh}, i32 ${show}, i32 ${e.pos.line})`);
+        return '';
+      }
+      // 操作番号で呼び分ける組み込み（番号の意味は runtime/window.c と runtime/audio.c）。
+      case 'windowCtl': {
+        this.m.usesWindow = true;
+        const op = this.expr(e.args[0].expr);
+        const id = this.expr(e.args[1].expr);
+        const ioParts = this.heapParts(e.args[2].expr);
+        const [data, len] = ioParts();
+        const r = this.tmp();
+        this.emit(`${r} = call i64 @um_window_ctl(i32 ${op}, i32 ${id}, ptr ${data}, ${usz} ${len}, i32 ${e.pos.line})`);
+        return r;
+      }
+      case 'windowCtlF': {
+        this.m.usesWindow = true;
+        const [op, id, a] = e.args.map((x) => this.expr(x.expr));
+        const r = this.tmp();
+        this.emit(`${r} = call double @um_window_ctl_f(i32 ${op}, i32 ${id}, i64 ${a}, i32 ${e.pos.line})`);
+        return r;
+      }
+      case 'windowSetText': {
+        this.m.usesWindow = true;
+        const op = this.expr(e.args[0].expr);
+        const id = this.expr(e.args[1].expr);
+        const a = this.expr(e.args[2].expr);
+        const textParts = this.heapParts(e.args[3].expr);
+        const [text, tlen] = textParts();
+        const r = this.tmp();
+        this.emit(`${r} = call i64 @um_window_set_text(i32 ${op}, i32 ${id}, i64 ${a}, ptr ${text}, ${usz} ${tlen}, i32 ${e.pos.line})`);
+        return r;
+      }
+      case 'windowGetText': {
+        this.m.usesWindow = true;
+        const [op, id, a] = e.args.map((x) => this.expr(x.expr));
+        const [d, l] = outSlots();
+        this.emit(`call void @um_window_get_text(i32 ${op}, i32 ${id}, i64 ${a}, ptr ${d}, ptr ${l}, i32 ${e.pos.line})`);
+        const data = this.tmp();
+        const len = this.tmp();
+        this.emit(`${data} = load ptr, ptr ${d}`);
+        this.emit(`${len} = load ${usz}, ptr ${l}`);
+        return this.arrayValue(data, len, len);
+      }
+      case 'audioWrite': {
+        this.m.usesWindow = true;
+        const id = this.expr(e.args[0].expr);
+        const sParts = this.heapParts(e.args[1].expr);
+        const start = this.expr(e.args[2].expr);
+        const count = this.expr(e.args[3].expr);
+        const [data, len] = sParts();
+        return flag(`@um_audio_write(i32 ${id}, ptr ${data}, ${usz} ${len}, i64 ${start}, i64 ${count}, i32 ${e.pos.line})`);
       }
     }
     if (name.startsWith('wasm')) {

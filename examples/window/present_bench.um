@@ -1,0 +1,68 @@
+// windowPresent（全体を写す）と windowPresentRect（変わった矩形だけを写す）の速さを比べる。
+// 1920×1080 の画面で、再生ヘッドのような細い矩形（4×1080）と、時刻の表示のような小さい矩形（200×40）だけが毎フレーム変わる場合。
+// 画面の更新（vsync）に合わせないで測る。
+//   node src/cli.ts build examples/window/present_bench.um --target host -o bench && ./bench
+// 引数に数を渡すと、そのフレーム数ずつ測る（既定は 300）。
+
+const W: i32 = 1920;
+const H: i32 = 1080;
+
+kernel function fill(i: u32, px: mut Buffer<u32>, frame: u32): void {
+  const x = i % 1920;
+  const y = i / 1920;
+  px[i] = 0xFF000000 | (((x + frame) & 255) << 16) | ((y & 255) << 8) | 0x40;
+}
+
+// 1 回の表示にかかった平均（マイクロ秒）を返す。rect が false なら全体、true なら変わった矩形だけ。
+function measure(win: i32, px: mut Buffer<u32>, frames: i32, rect: bool): i64 {
+  const start = ticksNs();
+  for (let f = 0; f < frames; f++) {
+    while (pollWindowEvent(0) != null) {}
+    // 再生ヘッド（4 画素の幅の縦線）を動かし、時刻の表示の箱を塗り替える。
+    const head = (f * 7) % (W - 4);
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < 4; x++) {
+        px[(y * W + head + x) as u32] = 0xFFFF3030;
+      }
+    }
+    for (let y = 20; y < 60; y++) {
+      for (let x = 40; x < 240; x++) {
+        px[(y * W + x) as u32] = 0xFF000000 | ((f as u32 * 3) & 255);
+      }
+    }
+    if (rect) {
+      windowUpdateRect(win, px, W, H, head, 0, 4, H);
+      windowPresentRect(win, px, W, H, 40, 20, 200, 40);
+    } else {
+      windowPresent(win, px, W, H);
+    }
+  }
+  return (ticksNs() - start) / (frames as i64) / 1000;
+}
+
+export function main(): i32 {
+  let frames: i32 = 300;
+  const a = args();
+  if (a.length > 0) {
+    frames = 0;
+    for (const c of a[0]) {
+      frames = frames * 10 + ((c as i32) - 48);
+    }
+  }
+  const opened = windowOpen("present bench", W, H);
+  if (opened == null) {
+    eprint(`could not open a window: ${windowError()}`);
+    return 1;
+  }
+  const win = opened;
+  windowSetVSync(win, false);
+  let px = new Buffer<u32>((W * H) as usize);
+  dispatch(fill, px.length as u32, mut px, 0);
+  windowPresent(win, px, W, H);
+  const full = measure(win, mut px, frames, false);
+  const part = measure(win, mut px, frames, true);
+  print(`windowPresent      ${full} us/frame`);
+  print(`windowPresentRect  ${part} us/frame (2 rects: 4x1080 + 200x40)`);
+  windowClose(win);
+  return 0;
+}

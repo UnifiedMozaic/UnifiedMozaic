@@ -183,7 +183,8 @@ export function simdInfo(t: Ty | undefined): { elem: Ty & { k: 'int' | 'float' }
  * 型検査は呼び出しの名前を `__io_名前` に書き換え、コード生成がランタイムの呼び出しにする。kernel の中では使えない。
  */
 const IO_BUILTINS = new Set(['readLine', 'inputReady', 'clock', 'stringFromBytes', 'readFile', 'writeFile', 'fileSize', 'readFileRange', 'appendFile', 'args', 'eprint',
-  'windowOpen', 'windowClose', 'windowPoll', 'windowPresent',
+  'windowOpen', 'windowClose', 'windowPoll', 'windowPresent', 'windowPresentRect', 'windowUpdateRect', 'windowCtl', 'windowCtlF', 'windowSetText', 'windowGetText',
+  'audioWrite',
   'wasmCompile', 'wasmFreeModule', 'wasmExportList', 'wasmInstantiate', 'wasmFreeInstance', 'wasmInvoke', 'wasmRead', 'wasmWrite',
   'wasmMemorySize', 'wasmWat', 'wasmError']);
 
@@ -2727,6 +2728,16 @@ class Checker {
    *       ふつうは prelude.um の pollWindowEvent（WindowEvent の enum を返す）を使う。
    *   windowPresent(window: i32, pixels: Buffer<u32>, width: i32, height: i32): void
    *       0xAARRGGBB の画素を width × height 並べたものをウィンドウ全体に表示する。
+   *   windowPresentRect(window, pixels, width, height, x: i32, y: i32, w: i32, h: i32): void
+   *       windowPresent と同じだが、変わった矩形 (x, y, w, h) だけを写す（残りは前回の表示のまま）。
+   *   windowUpdateRect(window, pixels, width, height, x: i32, y: i32, w: i32, h: i32): void
+   *       矩形を写すだけで表示しない（矩形が複数あるとき。最後に windowPresentRect で表示する）。
+   *   windowCtl(op: i32, window: i32, io: mut Buffer<i64>): i64        操作番号で呼び分ける（引数と結果は io）。
+   *   windowCtlF(op: i32, window: i32, a: i64): f64                     小数を返す操作。
+   *   windowSetText(op: i32, window: i32, a: i64, text: string): i64   文字列を渡す操作。
+   *   windowGetText(op: i32, window: i32, a: i64): string               文字列を返す操作。
+   *       操作番号は runtime/window.c と runtime/audio.c。ふつうは runtime/window.um の名前のある関数を使う。
+   *   audioWrite(stream: i32, samples: Buffer<f32>, start: i64, count: i64): bool  音の標本を書き込む（runtime/audio.c）。
    * WebAssembly（ネイティブだけ。どのスレッドからも呼べる。runtime/wasm.c が wasmtime で実装する。
    * ふつうは runtime/wasm.um の wasmLoad / wasmNew / wasmCall を使う。モジュールとインスタンスは i64 の番号）:
    *   wasmCompile(bytes: u8[]): i64 | null           wasm のバイナリをコンパイルする。失敗なら null（理由は wasmError）。
@@ -2763,6 +2774,19 @@ class Checker {
       windowClose: { params: [['window', I32]], ret: VOID },
       windowPoll: { params: [['event', { k: 'heap', elem: I32, buffer: true }], ['timeoutMs', I32]], ret: BOOL, mut: [0] },
       windowPresent: { params: [['window', I32], ['pixels', { k: 'heap', elem: PRIMS.u32, buffer: true }], ['width', I32], ['height', I32]], ret: VOID },
+      windowPresentRect: {
+        params: [['window', I32], ['pixels', { k: 'heap', elem: PRIMS.u32, buffer: true }], ['width', I32], ['height', I32], ['x', I32], ['y', I32], ['w', I32], ['h', I32]],
+        ret: VOID,
+      },
+      windowUpdateRect: {
+        params: [['window', I32], ['pixels', { k: 'heap', elem: PRIMS.u32, buffer: true }], ['width', I32], ['height', I32], ['x', I32], ['y', I32], ['w', I32], ['h', I32]],
+        ret: VOID,
+      },
+      windowCtl: { params: [['op', I32], ['window', I32], ['io', { k: 'heap', elem: I64, buffer: true }]], ret: I64, mut: [2] },
+      windowCtlF: { params: [['op', I32], ['window', I32], ['a', I64]], ret: F64 },
+      windowSetText: { params: [['op', I32], ['window', I32], ['a', I64], ['text', STR]], ret: I64 },
+      windowGetText: { params: [['op', I32], ['window', I32], ['a', I64]], ret: STR },
+      audioWrite: { params: [['stream', I32], ['samples', { k: 'heap', elem: PRIMS.f32, buffer: true }], ['start', I64], ['count', I64]], ret: BOOL },
       wasmCompile: { params: [['bytes', bytes]], ret: this.optionalOf(I64, e.pos) },
       wasmFreeModule: { params: [['module', I64]], ret: VOID },
       wasmExportList: { params: [['module', I64]], ret: { k: 'heap', elem: STR } },
@@ -2782,9 +2806,9 @@ class Checker {
     };
     // wasm.um の中の呼び出しは報告しない（wasm.um の関数を呼んだ所で報告する。下の wasmOnly）。
     if (name.startsWith('wasm') && this.ptrBits === 32 && e.pos.file !== 'wasm.um') this.wasmOnly(name, e.pos);
-    if (name.startsWith('window') && this.ptrBits === 32) {
+    if ((name.startsWith('window') || name.startsWith('audio')) && this.ptrBits === 32) {
       this.err('not-implemented', `\`${name}\` is only available in native programs`, e.pos,
-        'windows need a desktop OS; build with `--target host` (the wasm32 target has no window)');
+        'windows and audio need a desktop OS; build with `--target host` (the wasm32 target has no window)');
     }
     const shape = shapes[name];
     const decl: FnDecl = { kind: 'fn', name, exported: false, params: [], body: [], pos: e.pos };

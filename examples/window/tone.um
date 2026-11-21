@@ -1,0 +1,92 @@
+// 音を鳴らす。440 Hz（ラ）の正弦波を、待ち行列が 0.1 秒を切らないように書き足しながら鳴らす。
+// 再生した標本の数を時計にして、経過した時間を表示する（映像と音を合わせるときの時計の使い方）。
+// ウィンドウは要らない。ネイティブだけ（SDL3 が必要。docs/window.ja.md）。
+//   node src/cli.ts build examples/window/tone.um --target host -o tone && ./tone
+// 引数に数を渡すと、その秒数だけ鳴らす（既定は 2 秒）。
+// args: 1
+// expect: 48000 Hz 2 ch
+// expect: 0.5 s
+// expect: 1 s
+// expect: done
+
+const RATE: i32 = 48000;
+const CHANNELS: i32 = 2;
+const CHUNK: i32 = 1024;  // 1 回に書くフレームの数
+
+// cos(x)（x が小さいとき。テイラー展開）。
+function cosSmall(x: f64): f64 {
+  const x2 = x * x;
+  return 1.0 - x2 / 2.0 + x2 * x2 / 24.0 - x2 * x2 * x2 / 720.0 + x2 * x2 * x2 * x2 / 40320.0;
+}
+
+export function main(): i32 {
+  let seconds: i32 = 2;
+  const a = args();
+  if (a.length > 0) {
+    seconds = 0;
+    for (const c of a[0]) {
+      seconds = seconds * 10 + ((c as i32) - 48);
+    }
+  }
+  const opened = audioOpen(RATE, CHANNELS);
+  if (opened == null) {
+    eprint(`no audio device: ${windowError()}`);
+    return 1;
+  }
+  const s = opened;
+  print(`${RATE} Hz ${CHANNELS} ch`);
+
+  // 正弦波を漸化式 y[n+1] = 2cos(w) y[n] - y[n-1] で作る。
+  const w = 2.0 * 3.141592653589793 * 440.0 / (RATE as f64);
+  const k = 2.0 * cosSmall(w);
+  let y1: f64 = 0.0;
+  let y2: f64 = -0.2 * (w - w * w * w / 6.0);  // -0.2 sin(w)
+  let buf = new Buffer<f32>((CHUNK * CHANNELS) as usize);
+  const total = (seconds as i64) * (RATE as i64);
+  let written: i64 = 0;
+  let nextReport: i64 = (RATE / 2) as i64;
+  let started = false;
+
+  while (audioPlayed(s) < total) {
+    // 0.1 秒分たまるまで書き足す。
+    while (written < total && audioQueued(s) < (RATE / 10) as i64) {
+      for (let i: u32 = 0; i < CHUNK as u32; i++) {
+        const y = k * y1 - y2;
+        y2 = y1;
+        y1 = y;
+        // 最初と最後の 10 ミリ秒は音量を絞る（ぷつっという音を防ぐ）。
+        const n = written + (i as i64);
+        let fade: f64 = 1.0;
+        if (n < 480) {
+          fade = (n as f64) / 480.0;
+        } else if (total - n < 480) {
+          fade = ((total - n) as f64) / 480.0;
+        }
+        const v = (y * fade) as f32;
+        buf[i * 2] = v;
+        buf[i * 2 + 1] = v;
+      }
+      audioWrite(s, buf, 0, -1);
+      written += CHUNK as i64;
+    }
+    if (!started) {
+      audioResume(s);
+      started = true;
+    }
+    // 再生した標本の数が時計。
+    while (nextReport <= audioPlayed(s) && nextReport <= total) {
+      print(`${(nextReport as f64) / (RATE as f64)} s`);
+      nextReport += (RATE / 2) as i64;
+    }
+    sleepMs(5);
+  }
+  while (nextReport <= total) {
+    print(`${(nextReport as f64) / (RATE as f64)} s`);
+    nextReport += (RATE / 2) as i64;
+  }
+  // デバイスの中に残っている分が鳴り終わるのを待ってから閉じる。
+  sleepMs(audioLatency(s) * 1000 / (RATE as i64) + 20);
+  audioClose(s);
+  print("done");
+  return 0;
+}
