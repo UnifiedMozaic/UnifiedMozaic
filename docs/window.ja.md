@@ -286,7 +286,7 @@ const t = ((audioPlayed(s) - audioLatency(s)) as f64) / (rate as f64) + startOff
 
 | 関数 | 説明 |
 | --- | --- |
-| `ticksNs(): i64` | 逆戻りしない時計（ナノ秒）。どのスレッドからも呼べる |
+| `ticksNs(): i64` | 逆戻りしない時計（ナノ秒）。どのスレッドからも呼べる。起点は決まっていない（SDL を初期化する前の最初の呼び出しでは 0 になる）ので、差だけを使う |
 | `sleepNs(ns: i64)` / `sleepMs(ms: i64)` | 指定の時間だけ眠る。1 ミリ秒より短くても正確（最後は待ち続けて合わせる） |
 
 `clock()`（秒の `f64`）は SDL3 なしで使えます。`ticksNs` と `sleep*` は SDL3 をリンクします。

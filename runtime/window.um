@@ -520,7 +520,7 @@ function windowOpenFolderDialog(window: i32, title: string, location: string, ma
 // ---- 時刻 ----
 // どのスレッドからも呼べる。SDL3 をリンクする（clock() は SDL3 なしで使える秒の時計）。
 
-// 逆戻りしない時計（ナノ秒）。
+// 逆戻りしない時計（ナノ秒）。起点は決まっていない（SDL を初期化する前の最初の呼び出しでは 0）ので、差だけを使う。
 function ticksNs(): i64 {
   return windowCtl0(30, 0);
 }
