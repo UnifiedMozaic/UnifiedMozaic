@@ -1,0 +1,151 @@
+// トラップ（wasm の中の異常）と上限（燃料・時間・メモリ）。どれもプログラムを止めず、Result.Err で理由を返す。
+// トラップのあとも、同じインスタンスで次の呼び出しができる。
+// expect: trap in 'div': integer divide by zero
+// expect: trap in 'boom': unreachable executed
+// expect: trap in 'peek': out of bounds memory access
+// expect: 7
+// expect: trap in 'spin': out of fuel (the call ran longer than the fuel limit)
+// expect: 3
+// expect: trap in 'spin': timeout (the call ran longer than timeoutMs)
+// expect: grow: -1
+// expect: could not instantiate the module: memory minimum size of 2 pages exceeds memory limits
+// expect: could not instantiate the module: unknown import: `env::log` has not been defined
+// expect: trap in 'callLog': unknown import: `env::log` has not been defined
+// expect: limits must not be negative (0 means no limit)
+
+const WAT: string =
+  "(module (memory (export \"memory\") 1)" +
+  "  (func (export \"div\") (param i32 i32) (result i32) local.get 0 local.get 1 i32.div_s)" +
+  "  (func (export \"boom\") unreachable)" +
+  "  (func (export \"peek\") (param i32) (result i32) local.get 0 i32.load)" +
+  "  (func (export \"spin\") (loop $l (br $l)))" +
+  "  (func (export \"count\") (param $n i32) (result i32) (local $i i32)" +
+  "    (block $done (loop $next" +
+  "      (br_if $done (i32.ge_u (local.get $i) (local.get $n)))" +
+  "      (local.set $i (i32.add (local.get $i) (i32.const 1)))" +
+  "      (br $next)))" +
+  "    local.get $i)" +
+  "  (func (export \"grow\") (param i32) (result i32) local.get 0 memory.grow))";
+
+// 初期のメモリが 2 ページ（128 KiB）のモジュール。
+const BIG: string = "(module (memory (export \"memory\") 2))";
+
+// import を持つモジュール。
+const IMPORTS: string =
+  "(module (import \"env\" \"log\" (func $log (param i32)))" +
+  "  (func (export \"callLog\") i32.const 1 call $log))";
+
+function show(r: Result<WasmValue[], string>): void {
+  match (r) {
+    Result.Err(why) => print(why),
+    Result.Ok(values) => {
+      for (const v of values) {
+        match (v) {
+          WasmValue.I32(x) => print(x),
+          _ => print("?"),
+        }
+      }
+    }
+  }
+}
+
+function load(text: string): i64 {
+  match (wasmFromWat(text)) {
+    Result.Err(why) => print(why),
+    Result.Ok(bytes) => {
+      match (wasmLoad(bytes)) {
+        Result.Err(why) => print(why),
+        Result.Ok(m) => return m,
+      }
+    }
+  }
+  return 0;
+}
+
+export function main(): i32 {
+  const m = load(WAT);
+  // トラップ
+  match (wasmNew(m, new WasmLimits())) {
+    Result.Err(why) => print(why),
+    Result.Ok(inst) => {
+      show(wasmCall(inst, "div", [WasmValue.I32(1), WasmValue.I32(0)]));
+      show(wasmCall(inst, "boom", []));
+      show(wasmCall(inst, "peek", [WasmValue.I32(70000)]));
+      show(wasmCall(inst, "div", [WasmValue.I32(21), WasmValue.I32(3)]));  // トラップのあとも使える
+      wasmFreeInstance(inst);
+    }
+  }
+  // 燃料: 無限ループは燃料が尽きて止まる。燃料は呼び出しごとに満たし直すので、次の呼び出しは動く。
+  let fuel = new WasmLimits();
+  fuel.fuel = 1000000;
+  match (wasmNew(m, fuel)) {
+    Result.Err(why) => print(why),
+    Result.Ok(inst) => {
+      show(wasmCall(inst, "spin", []));
+      show(wasmCall(inst, "count", [WasmValue.I32(3)]));
+      wasmFreeInstance(inst);
+    }
+  }
+  // 時間: 50 ミリ秒で止まる。
+  let time = new WasmLimits();
+  time.timeoutMs = 50;
+  match (wasmNew(m, time)) {
+    Result.Err(why) => print(why),
+    Result.Ok(inst) => {
+      show(wasmCall(inst, "spin", []));
+      wasmFreeInstance(inst);
+    }
+  }
+  // メモリ: 上限が 64 KiB なら、memory.grow は失敗して -1 を返す。初期の大きさが上限を超えるモジュールは作れない。
+  let mem = new WasmLimits();
+  mem.memoryBytes = 65536;
+  match (wasmNew(m, mem)) {
+    Result.Err(why) => print(why),
+    Result.Ok(inst) => {
+      match (wasmCall(inst, "grow", [WasmValue.I32(1)])) {
+        Result.Ok(values) => {
+          match (values[0]) {
+            WasmValue.I32(x) => print(`grow: ${x}`),
+            _ => {}
+          }
+        }
+        Result.Err(why) => print(why),
+      }
+      wasmFreeInstance(inst);
+    }
+  }
+  const big = load(BIG);
+  match (wasmNew(big, mem)) {
+    Result.Err(why) => print(why),
+    Result.Ok(inst) => wasmFreeInstance(inst),
+  }
+  wasmFreeModule(big);
+  // import: 既定では何も渡さないので作れない。stubImports なら作れるが、import を呼ぶとトラップする。
+  const imp = load(IMPORTS);
+  match (wasmNew(imp, new WasmLimits())) {
+    Result.Err(why) => print(why),
+    Result.Ok(inst) => wasmFreeInstance(inst),
+  }
+  let stub = new WasmLimits();
+  stub.stubImports = true;
+  match (wasmNew(imp, stub)) {
+    Result.Err(why) => print(why),
+    Result.Ok(inst) => {
+      match (wasmCall(inst, "callLog", [])) {
+        Result.Err(why) => print(why),
+        Result.Ok(_) => print("no trap?"),
+      }
+      wasmFreeInstance(inst);
+    }
+  }
+  wasmFreeModule(imp);
+  // 負の上限は失敗。
+  let bad = new WasmLimits();
+  bad.fuel = -1;
+  match (wasmNew(m, bad)) {
+    Result.Err(why) => print(why),
+    Result.Ok(inst) => wasmFreeInstance(inst),
+  }
+  wasmFreeModule(m);
+  return 0;
+}

@@ -1,0 +1,6 @@
+// error: plugin-export
+// target: wasm32-plugin
+// wasm32-plugin の export は、数・bool・Buffer しか受け取れない（ホストは文字列を渡せない）。
+export function greet(name: string): i32 {
+  return name.length as i32;
+}

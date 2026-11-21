@@ -53,7 +53,13 @@ void *memmove(void *dst, const void *src, size_t n) {
 // 各ブロックは 16 バイトのヘッダ（サイズクラス）+ 本体。本体は 16 バイト境界に揃う。
 // 隣り合う空きの結合はしない（単純さを優先。断片化は後の段階で改善する）。
 
+// 停止。ふつうの wasm32 ではホスト（runtime/host.mjs）の関数を import する。プラグイン（UM_PLUGIN。--target wasm32-plugin）では
+// import を持たないので、このファイルの終わりで定義する（原因を覚えてからトラップする）。
+#ifdef UM_PLUGIN
+_Noreturn void um_panic(int code, int line);
+#else
 __attribute__((import_module("env"), import_name("um_panic"))) _Noreturn void um_panic(int code, int line);
+#endif
 
 extern unsigned char __heap_base;
 
@@ -140,7 +146,6 @@ void *um_grow_data(void *data, size_t len, size_t new_cap, size_t elem_size) {
 // ---- 文字列 ----
 // 文字列は UTF-8 のバイト列。長さ 0 のときデータの場所は 0 でよい。
 
-_Noreturn void um_panic(int code, int line) __attribute__((import_module("env"), import_name("um_panic")));
 // f64 を JavaScript と同じ表記で buf（80 バイト以上）に書き、文字数を返す。ホスト側が持つ。
 int um_fmt_f64(double v, char *buf) __attribute__((import_module("env"), import_name("um_fmt_f64")));
 
@@ -367,3 +372,29 @@ void um_fill(void *data, size_t a, size_t b, int32_t size, uint64_t bits, int32_
     }
   }
 }
+
+#ifdef UM_PLUGIN
+// ---- プラグイン（--target wasm32-plugin）----
+// ホストのプログラムに組み込んで使う wasm。import を持たない。ホストは次の export を使う:
+//   umAlloc(bytes) -> 位置   メモリを確保する（16 バイト境界。0 バイトでも 0 でない位置を返す）。足りなければトラップ。
+//   umFree(位置)             umAlloc で確保したメモリを返す。
+//   umPanicCode() / umPanicLine()  最後の停止の原因コードと行番号（停止していなければ 0）。停止は unreachable のトラップになるので、
+//                            ホストはトラップのあとにこれを呼んで理由を知る（原因コードは src/codegen.ts の PANIC_* と同じ）。
+// export した UM の関数は、Buffer の引数を (要素の位置, 要素の数) の2つの i32 で受け取る（src/codegen.ts の pluginExport）。
+
+static int panic_code, panic_line;
+
+_Noreturn void um_panic(int code, int line) {
+  panic_code = code;
+  panic_line = line;
+  __builtin_trap();
+}
+
+__attribute__((export_name("umAlloc"))) void *um_plugin_alloc(size_t bytes) { return alloc_bytes(bytes ? bytes : 1); }
+
+__attribute__((export_name("umFree"))) void um_plugin_free(void *p) { um_free(p); }
+
+__attribute__((export_name("umPanicCode"))) int um_plugin_panic_code(void) { return panic_code; }
+
+__attribute__((export_name("umPanicLine"))) int um_plugin_panic_line(void) { return panic_line; }
+#endif

@@ -1,0 +1,127 @@
+// UM で書いた画像の効果（examples/wasm/plugin/brighten.um）を `--target wasm32-plugin` で wasm にしたものを、
+// wasmtime で読み込んで 1280x720 の画素に掛け、同じソースをネイティブで直接実行した結果と比べる。
+//
+//   node src/cli.ts build examples/wasm/plugin/brighten.um --target wasm32-plugin -o brighten.wasm
+//   node src/cli.ts build examples/wasm/um_plugin.um --target host -o um_plugin
+//   ./um_plugin            結果の一致を確かめる
+//   ./um_plugin bench      速さも測る
+//
+// plugin: plugin/brighten.um
+// expect: wasm and native agree: true
+// expect: checksum agrees: true
+// expect: trap in 'pixelAt': unreachable executed
+// expect: panic code 1 at line 34
+
+import { brighten, checksum } from "./plugin/brighten.um";
+
+const W: i32 = 1280;
+const H: i32 = 720;
+
+function call(inst: i64, name: string, args: WasmValue[]): i32 {
+  match (wasmCall(inst, name, args)) {
+    Result.Err(why) => {
+      print(why);
+      return -1;
+    }
+    Result.Ok(values) => {
+      if (values.length == 0) {
+        return 0;
+      }
+      match (values[0]) {
+        WasmValue.I32(v) => return v,
+        _ => return -1,
+      }
+    }
+  }
+}
+
+// プラグインに、src を明るくした結果を dst に書かせる（写す時間を含む）。
+function viaWasm(inst: i64, srcAt: i32, dstAt: i32, src: Buffer<u8>, dst: mut Buffer<u8>): void {
+  const n = src.length as i32;
+  wasmWrite(inst, srcAt as i64, src);
+  call(inst, "brighten", [WasmValue.I32(dstAt), WasmValue.I32(n), WasmValue.I32(srcAt), WasmValue.I32(n), WasmValue.I32(40)]);
+  wasmRead(inst, dstAt as i64, mut dst);
+}
+
+export function main(): i32 {
+  const a = args();
+  const bench = a.length > 0;
+  match (wasmLoadFile("brighten.wasm")) {
+    Result.Err(why) => {
+      print(why);
+      return 1;
+    }
+    Result.Ok(m) => {
+      match (wasmNew(m, new WasmLimits())) {
+        Result.Err(why) => print(why),
+        Result.Ok(inst) => {
+          const n = (W * H * 4) as u32;
+          let src = new Buffer<u8>(n);
+          for (let i: u32 = 0; i < n; i++) {
+            src[i] = ((i * 7) & 255) as u8;
+          }
+          // 画素の置き場所をプラグインの中に確保する（umAlloc はランタイムが export する）。
+          const srcAt = call(inst, "umAlloc", [WasmValue.I32(n as i32)]);
+          const dstAt = call(inst, "umAlloc", [WasmValue.I32(n as i32)]);
+
+          let viaPlugin = new Buffer<u8>(n);
+          viaWasm(inst, srcAt, dstAt, src, mut viaPlugin);
+          let direct = new Buffer<u8>(n);
+          brighten(mut direct, src, 40);
+          let same = true;
+          for (let i: u32 = 0; i < n; i++) {
+            if (viaPlugin[i] != direct[i]) {
+              same = false;
+            }
+          }
+          print(`wasm and native agree: ${same}`);
+          print(`checksum agrees: ${call(inst, "checksum", [WasmValue.I32(dstAt), WasmValue.I32(n as i32)]) == (checksum(direct) as i32)}`);
+
+          // プラグインの中の停止（範囲外の添字）はトラップになる。原因は umPanicCode / umPanicLine で読める。
+          match (wasmCall(inst, "pixelAt", [WasmValue.I32(srcAt), WasmValue.I32(4), WasmValue.I32(4)])) {
+            Result.Err(why) => print(why),
+            Result.Ok(_) => print("no trap?"),
+          }
+          print(`panic code ${call(inst, "umPanicCode", [])} at line ${call(inst, "umPanicLine", [])}`);
+
+          if (bench) {
+            const frames = 200;
+            const t0 = clock();
+            for (let f = 0; f < frames; f++) {
+              viaWasm(inst, srcAt, dstAt, src, mut viaPlugin);
+            }
+            const t1 = clock();
+            for (let f = 0; f < frames; f++) {
+              brighten(mut direct, src, 40);
+            }
+            const t2 = clock();
+            for (let f = 0; f < frames; f++) {
+              brightenLoop(mut direct, src, 40);
+            }
+            const t3 = clock();
+            print(`wasm (1 instance, with copies): ${(t1 - t0) * 1000 / (frames as f64)} ms/frame`);
+            print(`native UM (dispatch on all CPUs): ${(t2 - t1) * 1000 / (frames as f64)} ms/frame`);
+            print(`native UM (1 thread): ${(t3 - t2) * 1000 / (frames as f64)} ms/frame`);
+          }
+          call(inst, "umFree", [WasmValue.I32(srcAt)]);
+          call(inst, "umFree", [WasmValue.I32(dstAt)]);
+          wasmFreeInstance(inst);
+        }
+      }
+      wasmFreeModule(m);
+    }
+  }
+  return 0;
+}
+
+// 1 スレッドで全体を処理する（比べるため。kernel と同じ計算を、ふつうのループで）。
+function brightenLoop(dst: mut Buffer<u8>, src: Buffer<u8>, amount: i32): void {
+  for (let k: u32 = 0; k < dst.length; k++) {
+    if ((k & 3) == 3) {
+      dst[k] = src[k];
+    } else {
+      const v = (src[k] as i32) + amount;
+      dst[k] = (v > 255 ? 255 : (v < 0 ? 0 : v)) as u8;
+    }
+  }
+}

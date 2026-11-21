@@ -1,0 +1,85 @@
+// カスタムセクション（wasm のバイナリに入れる、名前つきの任意のバイト列）を名前で読む。
+// プラグインの宣言（名前・引数など）を入れておき、コンパイルせずに読むのに使う。
+// ファイルから読み込む wasmLoadFile と、読めないとき・壊れたバイナリのときの失敗も確かめる。
+// expect: @effect invert
+// expect: @param amount f32 0 1
+// expect: true
+// expect: true
+// expect: 1
+// expect: cannot read no_such_plugin.wasm
+// expect: could not compile the module
+
+const WAT: string =
+  "(module" +
+  "  (@custom \"example.manifest\" \"@effect invert\\n@param amount f32 0 1\")" +
+  "  (@custom \"other\" \"x\")" +
+  "  (func (export \"answer\") (result i32) i32.const 1))";
+
+export function main(): i32 {
+  match (wasmFromWat(WAT)) {
+    Result.Err(why) => print(why),
+    Result.Ok(bytes) => {
+      const manifest = wasmCustomSection(bytes, "example.manifest");
+      if (manifest != null) {
+        // 1 行ずつ表示する。
+        let line = new Array<u8>(0);
+        for (const b of manifest) {
+          if (b == 10) {
+            print(stringFromBytes(line));
+            line.clear();
+          } else {
+            line.push(b);
+          }
+        }
+        print(stringFromBytes(line));
+      }
+      print(wasmCustomSection(bytes, "missing") == null);
+      let broken: u8[] = [0, 97, 115, 109, 1, 0, 0, 0, 0, 200];  // 長さが途中で切れている
+      print(wasmCustomSection(broken, "x") == null);
+
+      // ファイルに書いて、wasmLoadFile で読み込む。
+      writeFile("um_example_plugin.wasm", bytes);
+      match (wasmLoadFile("um_example_plugin.wasm")) {
+        Result.Err(why) => print(why),
+        Result.Ok(m) => {
+          match (wasmNew(m, new WasmLimits())) {
+            Result.Err(why) => print(why),
+            Result.Ok(inst) => {
+              match (wasmCall(inst, "answer", [])) {
+                Result.Ok(values) => {
+                  match (values[0]) {
+                    WasmValue.I32(x) => print(x),
+                    _ => {}
+                  }
+                }
+                Result.Err(why) => print(why),
+              }
+              wasmFreeInstance(inst);
+            }
+          }
+          wasmFreeModule(m);
+        }
+      }
+    }
+  }
+  match (wasmLoadFile("no_such_plugin.wasm")) {
+    Result.Err(why) => print(why),
+    Result.Ok(m) => wasmFreeModule(m),
+  }
+  let junk: u8[] = [1, 2, 3, 4];
+  match (wasmLoad(junk)) {
+    Result.Err(why) => {
+      // wasmtime の詳しい説明は版で変わるので、先頭だけ表示する。
+      let head = new Array<u8>(0);
+      for (const b of why) {
+        if (b == 58) {  // ':'
+          break;
+        }
+        head.push(b);
+      }
+      print(stringFromBytes(head));
+    }
+    Result.Ok(m) => wasmFreeModule(m),
+  }
+  return 0;
+}

@@ -1,0 +1,132 @@
+// 複数のスレッドで、それぞれ別のインスタンスを同時に使う（画面を帯に分けて、帯ごとのインスタンスで処理する形）。
+// モジュールは1つをすべてのスレッドで共有し、インスタンス（とそのメモリ）はスレッドごとに作る。
+// expect: bands agree: true
+// expect: instances are separate: true
+
+// invert(p, n): p から n バイトの RGBA の、RGB を反転する。
+// mark(v): メモリの 0 バイト目に v を書く。peek(): 0 バイト目を読む。
+const WAT: string =
+  "(module (memory (export \"memory\") 16)" +
+  "  (func (export \"invert\") (param $p i32) (param $n i32) (local $i i32)" +
+  "    (block $done (loop $next" +
+  "      (br_if $done (i32.ge_u (local.get $i) (local.get $n)))" +
+  "      (i32.store (i32.add (local.get $p) (local.get $i))" +
+  "        (i32.xor (i32.load (i32.add (local.get $p) (local.get $i))) (i32.const 0x00ffffff)))" +
+  "      (local.set $i (i32.add (local.get $i) (i32.const 4)))" +
+  "      (br $next))))" +
+  "  (func (export \"mark\") (param i32) i32.const 0 local.get 0 i32.store)" +
+  "  (func (export \"peek\") (result i32) i32.const 0 i32.load))";
+
+const WIDTH: i32 = 320;
+const HEIGHT: i32 = 240;
+const BANDS: i32 = 4;
+const ROUNDS: i32 = 21;  // 奇数回反転するので、結果は1回反転したものと同じ
+
+function pixel(x: i32, y: i32, c: i32): u8 {
+  return ((x * 7 + y * 13 + c * 29) & 255) as u8;
+}
+
+// 帯 [y0, y1) を作り、wasm で ROUNDS 回反転して、画素の和を返す。番号の違うインスタンスを毎回作る。
+function band(module: i64, y0: i32, y1: i32): u64 {
+  match (wasmNew(module, new WasmLimits())) {
+    Result.Err(why) => {
+      eprint(why);
+      return 0;
+    }
+    Result.Ok(inst) => {
+      const n = ((y1 - y0) * WIDTH * 4) as usize;
+      let px = new Buffer<u8>(n);
+      for (let y = y0; y < y1; y++) {
+        for (let x = 0; x < WIDTH; x++) {
+          for (let c = 0; c < 4; c++) {
+            px[(((y - y0) * WIDTH + x) * 4 + c) as usize] = pixel(x, y, c);
+          }
+        }
+      }
+      for (let r = 0; r < ROUNDS; r++) {
+        wasmWrite(inst, 16, px);
+        match (wasmCall(inst, "invert", [WasmValue.I32(16), WasmValue.I32(n as i32)])) {
+          Result.Err(why) => eprint(why),
+          Result.Ok(_) => {}
+        }
+        wasmRead(inst, 16, mut px);
+      }
+      wasmFreeInstance(inst);
+      let sum: u64 = 0;
+      for (const v of px) {
+        sum += v as u64;
+      }
+      return sum;
+    }
+  }
+}
+
+// 同じ画像を UM だけで処理した和（答え合わせ）。
+function expected(): u64 {
+  let sum: u64 = 0;
+  for (let y = 0; y < HEIGHT; y++) {
+    for (let x = 0; x < WIDTH; x++) {
+      for (let c = 0; c < 4; c++) {
+        const v = pixel(x, y, c);
+        sum += (c == 3 ? v : 255 - v) as u64;
+      }
+    }
+  }
+  return sum;
+}
+
+// インスタンスごとにメモリが別であることを確かめる: 自分の印を書き、ほかのスレッドが書いたあとで読み直す。
+function separate(module: i64, v: i32): bool {
+  match (wasmNew(module, new WasmLimits())) {
+    Result.Err(_) => return false,
+    Result.Ok(inst) => {
+      let ok = true;
+      for (let r = 0; r < 2000; r++) {
+        wasmCall(inst, "mark", [WasmValue.I32(v + r)]);
+        thread.yield();
+        match (wasmCall(inst, "peek", [])) {
+          Result.Ok(values) => {
+            match (values[0]) {
+              WasmValue.I32(x) => {
+                if (x != v + r) {
+                  ok = false;
+                }
+              }
+              _ => ok = false,
+            }
+          }
+          Result.Err(_) => ok = false,
+        }
+      }
+      wasmFreeInstance(inst);
+      return ok;
+    }
+  }
+}
+
+export function main(): i32 {
+  match (wasmFromWat(WAT)) {
+    Result.Err(why) => print(why),
+    Result.Ok(bytes) => {
+      match (wasmLoad(bytes)) {
+        Result.Err(why) => print(why),
+        Result.Ok(m) => {
+          const rows = HEIGHT / BANDS;
+          const t0 = thread.spawn(band, m, 0, rows);
+          const t1 = thread.spawn(band, m, rows, rows * 2);
+          const t2 = thread.spawn(band, m, rows * 2, rows * 3);
+          const t3 = thread.spawn(band, m, rows * 3, HEIGHT);
+          const total = thread.join(t0) + thread.join(t1) + thread.join(t2) + thread.join(t3);
+          print(`bands agree: ${total == expected()}`);
+          const s0 = thread.spawn(separate, m, 0);
+          const s1 = thread.spawn(separate, m, 100000);
+          const s2 = thread.spawn(separate, m, 200000);
+          const ok = separate(m, 300000);
+          print(`instances are separate: ${thread.join(s0) && thread.join(s1) && thread.join(s2) && ok}`);
+          wasmFreeModule(m);
+        }
+      }
+    }
+  }
+  return 0;
+}
