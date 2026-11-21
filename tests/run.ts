@@ -675,6 +675,22 @@ if (windows) {
         fail(label, String(e));
       }
     }
+    // コンソールの窓を出さない exe（Windows のサブシステム）。リンカへの指示（.drectve）だけを持つオブジェクトを clang で作って
+    // linkInputs で渡すと、PE のサブシステムが WINDOWS（2）になり、パイプにつないだ標準出力と終了コードはそのまま使える。
+    const glabel = 'build linkInputs can set the Windows GUI subsystem with a directive object [host, Windows]';
+    try {
+      writeFileSync(join(tmp, 'gui_subsystem.c'), '#pragma comment(linker, "/SUBSYSTEM:WINDOWS")\n#pragma comment(linker, "/ENTRY:mainCRTStartup")\n');
+      execFileSync(CLANG, ['-c', '-o', join(tmp, 'gui_subsystem.obj'), join(tmp, 'gui_subsystem.c')], { stdio: ['ignore', 'ignore', 'pipe'] });
+      const gsrc = 'export function main(): i32 { print(`gui ${args().length}`); return 7; }';
+      const exe = build(compileToLL(gsrc, 'host'), 'host', join(tmp, 'gui_subsystem.exe'), '2', false, false, [join(tmp, 'gui_subsystem.obj')]).output;
+      const pe = readFileSync(exe);
+      const subsystem = pe.readUInt16LE(pe.readUInt32LE(0x3c) + 24 + 68);
+      const run = spawnSync(exe, ['a', 'b'], { encoding: 'utf8', cwd: tmp });
+      if (subsystem === 2 && run.status === 7 && run.stdout.trim() === 'gui 2') ok(glabel);
+      else fail(glabel, `subsystem ${subsystem}, status ${run.status}, output: ${run.stdout.trim()}`);
+    } catch (e) {
+      fail(glabel, String(e));
+    }
   }
 }
 
