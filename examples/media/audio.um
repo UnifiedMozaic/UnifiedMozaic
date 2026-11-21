@@ -1,0 +1,90 @@
+// 音を 48 kHz のステレオの f32 で読み出す。全体を順に読んで長さと大きさを測り、途中にシークして読む。
+// 使い方: audio [ファイル]（省略すると clip.mp4。テストの素材の音は 440 Hz の正弦波、44.1 kHz）
+//
+// expect: 4.0 s of audio at 48000 Hz
+// expect: peak 0.09, about 440 Hz
+// expect: seek to 1.5 s: got 4800 samples from 1.5 s
+
+// 小数第 1 位まで（四捨五入）の文字列。
+function fixed1(x: f64): string {
+  const n = (x * 10.0 + 0.5) as i64;
+  return `${n / 10}.${n % 10}`;
+}
+
+// 小数第 2 位まで（四捨五入）の文字列。
+function fixed2(x: f64): string {
+  const n = (x * 100.0 + 0.5) as i64;
+  const frac = n % 100;
+  if (frac < 10) {
+    return `${n / 100}.0${frac}`;
+  }
+  return `${n / 100}.${frac}`;
+}
+
+export function main(): i32 {
+  let path = "clip.mp4";
+  const a = args();
+  if (a.length > 0) {
+    path = a[0].clone();
+  }
+  const rate = 48000;
+  match (mediaOpenAudio(path)) {
+    Result.Err(why) => {
+      eprint("cannot open: " + why);
+      return 1;
+    }
+    Result.Ok(r) => {
+      // 0.1 秒ずつ受け取る（L, R, L, R, ...）。
+      let buf = new Buffer<f32>(4800 * 2);
+      let total: i64 = 0;
+      let peak = 0.0;
+      let crossings = 0;
+      let prev = 0.0;
+      while (true) {
+        match (mediaNextSamples(r, mut buf, rate)) {
+          MediaAudioRead.Samples(t, n) => {
+            for (let k = 0; k < n; k++) {
+              const left = buf[k * 2] as f64;
+              const v = Math.abs(left);
+              if (v > peak) {
+                peak = v;
+              }
+              if (prev < 0.0 && left >= 0.0) {
+                crossings += 1;
+              }
+              prev = left;
+            }
+            total += n as i64;
+          }
+          MediaAudioRead.End => {
+            break;
+          }
+          MediaAudioRead.Failed(why) => {
+            eprint("cannot read: " + why);
+            mediaClose(r);
+            return 1;
+          }
+        }
+      }
+      const secs = (total as f64) / (rate as f64);
+      print(`${fixed1(secs)} s of audio at ${rate} Hz`);
+      // 上向きに 0 を横切る回数 ÷ 秒 = 周波数。10 Hz 単位に丸める。
+      const hz = ((crossings as f64) / secs / 10.0 + 0.5) as i64 * 10;
+      print(`peak ${fixed2(peak)}, about ${hz} Hz`);
+      // 途中から読む（シーク）。
+      match (mediaSamples(r, 1.5, mut buf, rate)) {
+        MediaAudioRead.Samples(t, n) => {
+          print(`seek to 1.5 s: got ${n} samples from ${t} s`);
+        }
+        MediaAudioRead.End => {
+          print("seek to 1.5 s: end");
+        }
+        MediaAudioRead.Failed(why) => {
+          print("seek to 1.5 s: " + why);
+        }
+      }
+      mediaClose(r);
+    }
+  }
+  return 0;
+}

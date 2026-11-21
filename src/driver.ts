@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, extname, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path';
 import { check } from './checker.ts';
 import { generate, kernelUses64 } from './codegen.ts';
 import { emitMsl } from './msl.ts';
@@ -305,6 +305,86 @@ function describeImport(imp: string): string {
   return imp;
 }
 
+const RUNTIME_MEDIA = join(import.meta.dirname, '..', 'runtime', 'media.c');
+
+/** FFmpeg のライブラリの名前（リンクする順）。 */
+const FFMPEG_LIBS = ['avformat', 'avcodec', 'swscale', 'swresample', 'avutil'];
+
+/** FFmpeg をリンクするための clang の引数と、実行ファイルの隣に置く DLL（Windows だけ）。 */
+interface Ffmpeg { args: string[]; dlls: string[] }
+
+/**
+ * 動画・音声の組み込み（runtime/media.c）が使う FFmpeg のライブラリ（共有ライブラリ）を探す。
+ *   1. 環境変数 UM_FFMPEG_HOME = FFmpeg を置いた場所（include/libavformat/avformat.h があるところ）。
+ *      Windows では、共有ライブラリのビルド（BtbN/FFmpeg-Builds の ffmpeg-n*-win64-lgpl-shared-*.zip など）を展開した場所を指す。
+ *      lib/avformat.lib などでリンクし、bin/avformat-*.dll などを実行ファイルの隣に写す。
+ *      macOS・Linux では lib の共有ライブラリ（libavformat.dylib / .so）を rpath つきでリンクする。
+ *   2. pkg-config の libavformat / libavcodec / libswscale / libswresample / libavutil。
+ *   3. macOS の Homebrew の決まった場所。
+ * GPL のビルド（libx264 などを含む）でもリンクはできるが、配布するプログラムは LGPL のビルドを使うこと（docs/media.ja.md）。
+ */
+function findFfmpeg(): Ffmpeg {
+  const hint = 'download a shared LGPL build of FFmpeg 7.1 or later (Windows: ffmpeg-n*-win64-lgpl-shared-*.zip from ' +
+    'https://github.com/BtbN/FFmpeg-Builds/releases), unpack it and set UM_FFMPEG_HOME to that folder ' +
+    '(macOS: `brew install ffmpeg`; Linux: libavformat-dev libavcodec-dev libswscale-dev libswresample-dev)';
+  const fromPrefix = (prefix: string): Ffmpeg | null => {
+    if (!existsSync(join(prefix, 'include', 'libavformat', 'avformat.h'))) return null;
+    const lib = join(prefix, 'lib');
+    if (process.platform === 'win32') {
+      const libs = FFMPEG_LIBS.map((n) => join(lib, `${n}.lib`));
+      if (!libs.every((l) => existsSync(l))) return null;
+      const bin = join(prefix, 'bin');
+      const dlls = existsSync(bin)
+        ? readdirSync(bin).filter((f) => /^(avformat|avcodec|avutil|swscale|swresample)-\d+\.dll$/i.test(f)).map((f) => join(bin, f))
+        : [];
+      return { args: [`-I${join(prefix, 'include')}`, ...libs], dlls };
+    }
+    const ext = process.platform === 'darwin' ? 'dylib' : 'so';
+    if (!existsSync(join(lib, `libavformat.${ext}`))) return null;
+    return { args: [`-I${join(prefix, 'include')}`, `-L${lib}`, ...FFMPEG_LIBS.map((n) => `-l${n}`), `-Wl,-rpath,${lib}`], dlls: [] };
+  };
+  const env = process.env.UM_FFMPEG_HOME;
+  if (env) {
+    const found = fromPrefix(resolve(env));
+    if (!found) throw new Error(`FFmpeg was not found in UM_FFMPEG_HOME=${env}; ${hint}`);
+    return found;
+  }
+  if (process.platform !== 'win32') {
+    try {
+      const pkgs = FFMPEG_LIBS.map((n) => `lib${n}`);
+      const pc = (args: string[]) => execFileSync('pkg-config', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      const flags = pc(['--cflags', '--libs', ...pkgs]).split(/\s+/).filter((a) => a !== '');
+      const libdir = pc(['--variable=libdir', 'libavformat']);
+      if (libdir) flags.push(`-Wl,-rpath,${libdir}`);
+      return { args: flags, dlls: [] };
+    } catch {
+      // pkg-config がない、または FFmpeg が登録されていない。
+    }
+    if (process.platform === 'darwin') {
+      for (const p of ['/opt/homebrew/opt/ffmpeg', '/usr/local/opt/ffmpeg']) {
+        const found = fromPrefix(p);
+        if (found) return found;
+      }
+    }
+  }
+  throw new Error(`this program reads or writes video / audio, which needs the FFmpeg libraries, but they were not found; ${hint}`);
+}
+
+/** 生成した LLVM IR が動画・音声の組み込みを使っているか（codegen は使ったときだけ宣言を出す）。 */
+function usesMedia(ll: string): boolean {
+  return ll.includes('declare i64 @um_media_open(');
+}
+
+/** FFmpeg が見つかるか（テストで、見つからなければ動画・音声のテストを飛ばすのに使う）。 */
+export function ffmpegAvailable(): boolean {
+  try {
+    findFfmpeg();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** 生成した LLVM IR がウィンドウか音の組み込みを使っているか（codegen は使ったときだけ宣言を出す）。 */
 function usesWindow(ll: string): boolean {
   return ll.includes('declare i32 @um_window_open(');
@@ -353,6 +433,11 @@ export function wgpuEnabled(target: TargetName): boolean {
 }
 
 const RUNTIME_WASM_C = join(import.meta.dirname, '..', 'runtime', 'wasm_rt.c');
+/**
+ * 動画・音声の標準の型と関数（mediaOpenVideo、mediaFrame、MediaPixels など）。UM で書いてある。
+ * ウィンドウと同じく、プログラムがこのファイルの名前を使うときだけ加える（使わないプログラムは FFmpeg をリンクしない）。
+ */
+const MEDIA_PRELUDE = join(import.meta.dirname, '..', 'runtime', 'media.um');
 
 /** ファイル番号を、宣言とその中のメソッドに付ける。 */
 function tag(d: Decl, file: number): void {
@@ -437,7 +522,7 @@ export function parseProgram(src: string, file?: string): Module {
   const defined = new Set(merged.decls.filter((d) => d.kind !== 'const').map((d) => d.name));
   const prelude = parse(readFileSync(PRELUDE, 'utf8'), 'prelude.um');
   const standard = [...prelude.decls];
-  for (const [path, label] of [[WINDOW_PRELUDE, 'window.um'], [WASM_PRELUDE, 'wasm.um']]) {
+  for (const [path, label] of [[WINDOW_PRELUDE, 'window.um'], [WASM_PRELUDE, 'wasm.um'], [MEDIA_PRELUDE, 'media.um']]) {
     const extra = parse(readFileSync(path, 'utf8'), label);
     const names = extra.decls.map((d) => d.name).filter((n) => !defined.has(n));
     if (names.length === 0) continue;
@@ -588,9 +673,13 @@ export function build(ll: string, target: TargetName, outPath: string, optLevel 
       if (sdl) args.push(RUNTIME_WINDOW, RUNTIME_AUDIO, ...sdl.args);
       const wt = usesWasm(ll) ? findWasmtime() : null;
       if (wt) args.push(RUNTIME_WASMTIME, ...wt.args);
+      const ff = usesMedia(ll) ? findFfmpeg() : null;
+      if (ff) args.push(RUNTIME_MEDIA, ...ff.args);
       const wgpu = wgpuEnabled(target) && usesWgpu(ll) ? findWgpu() : null;
       if (wgpu) args.push(RUNTIME_WGPU, ...wgpu.args);
       clang(args, quiet);
+      // FFmpeg の DLL（avformat-*.dll など）も、実行ファイルの隣に写す。
+      for (const dll of ff?.dlls ?? []) copyFileSync(dll, join(dirname(exe), basename(dll)));
       // SDL3.dll・wasmtime.dll・wgpu_native.dll は実行ファイルと同じ場所にないと起動できないので、隣に写す。
       if (sdl?.dll && existsSync(sdl.dll)) copyFileSync(sdl.dll, join(dirname(exe), 'SDL3.dll'));
       if (wt?.dll && existsSync(wt.dll)) copyFileSync(wt.dll, join(dirname(exe), 'wasmtime.dll'));
@@ -608,6 +697,7 @@ export function build(ll: string, target: TargetName, outPath: string, optLevel 
     }
     if (usesWindow(ll)) args.push(RUNTIME_WINDOW, RUNTIME_AUDIO, ...findSdl3().args);
     if (usesWasm(ll)) args.push(RUNTIME_WASMTIME, ...findWasmtime().args);
+    if (usesMedia(ll)) args.push(RUNTIME_MEDIA, ...findFfmpeg().args);
     if (wgpuEnabled(target) && usesWgpu(ll)) args.push(RUNTIME_WGPU, ...findWgpu().args);
     clang(args, quiet);
     return { output: out, objectOnly: false };

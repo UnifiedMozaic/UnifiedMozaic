@@ -1,0 +1,115 @@
+// 指定の時刻のコマを1つ取り出して、BMP の画像に書く（コマ単位で正確なシーク）。
+// 使い方: frame_to_bmp [ファイル] [秒] [出力]（省略すると clip.mp4 の 2 秒目を frame.bmp に）
+//
+// テストの素材（tests/run.ts が作る）は、色にコマの番号を入れてある（R = (N mod 16) * 16 + 8、G = floor(N / 16) * 16 + 8）。
+// 25 コマ毎秒の 2 秒目は 50 番目のコマ。
+//
+// expect: frame at 2 s: 320x240
+// expect: frame number from the colour: 50
+// expect: wrote frame.bmp (307254 bytes)
+
+// 文字列の秒（"12.5" など）を f64 にする（ここでは簡単に、整数部と小数部だけ）。
+function parseSeconds(s: string): f64 {
+  let v = 0.0;
+  let scale = 0.0;
+  for (const c of s) {
+    if (c == 46) {  // '.'
+      scale = 0.1;
+    } else if (c >= 48 && c <= 57) {
+      const d = (c - 48) as f64;
+      if (scale == 0.0) {
+        v = v * 10.0 + d;
+      } else {
+        v = v + d * scale;
+        scale = scale * 0.1;
+      }
+    }
+  }
+  return v;
+}
+
+function pushU32(bytes: mut u8[], v: u32): void {
+  bytes.push((v & 255) as u8);
+  bytes.push(((v >> 8) & 255) as u8);
+  bytes.push(((v >> 16) & 255) as u8);
+  bytes.push(((v >> 24) & 255) as u8);
+}
+
+// 0xAARRGGBB の画素を、32 ビットの BMP（上から下への並び）にする。BMP の画素はメモリ上で B, G, R, A の順なので、
+// u32 の値をそのまま小さい桁から書けばよい。
+function bmpOf(px: Buffer<u32>, w: i32, h: i32): u8[] {
+  let b: u8[] = [];
+  const size = (54 + w * h * 4) as u32;
+  b.push(66);  // 'B'
+  b.push(77);  // 'M'
+  pushU32(mut b, size);
+  pushU32(mut b, 0);
+  pushU32(mut b, 54);                 // 画素の始まり
+  pushU32(mut b, 40);                 // BITMAPINFOHEADER の大きさ
+  pushU32(mut b, w as u32);
+  pushU32(mut b, (0 - h) as u32);     // 負の高さ = 上から下へ
+  pushU32(mut b, 1 | (32 << 16));     // 面の数 1、32 ビット
+  pushU32(mut b, 0);                  // 圧縮なし
+  pushU32(mut b, (w * h * 4) as u32);
+  pushU32(mut b, 2835);               // 72 dpi
+  pushU32(mut b, 2835);
+  pushU32(mut b, 0);
+  pushU32(mut b, 0);
+  for (const p of px) {
+    pushU32(mut b, p);
+  }
+  return b;
+}
+
+export function main(): i32 {
+  let path = "clip.mp4";
+  let time = 2.0;
+  let out = "frame.bmp";
+  const a = args();
+  if (a.length > 0) {
+    path = a[0].clone();
+  }
+  if (a.length > 1) {
+    time = parseSeconds(a[1]);
+  }
+  if (a.length > 2) {
+    out = a[2].clone();
+  }
+  match (mediaOpenVideo(path, "none")) {
+    Result.Err(why) => {
+      eprint("cannot open: " + why);
+      return 1;
+    }
+    Result.Ok(r) => {
+      const info = mediaInfoOf(r);
+      const w = info.width;
+      const h = info.height;
+      let px = new Buffer<u32>(w * h);
+      match (mediaFrame(r, time, mut px, MediaPixels.Argb32, 0, 0)) {
+        MediaRead.Frame(t) => {
+          print(`frame at ${t} s: ${w}x${h}`);
+          // 真ん中の画素の色から、コマの番号を読む。
+          const c = px[(h / 2) * w + w / 2];
+          const red = ((c >> 16) & 255) as i32;
+          const green = ((c >> 8) & 255) as i32;
+          print(`frame number from the colour: ${(red / 16) + (green / 16) * 16}`);
+          const bytes = bmpOf(px, w, h);
+          if (!writeFile(out, bytes)) {
+            eprint("cannot write " + out);
+            mediaClose(r);
+            return 1;
+          }
+          print(`wrote ${out} (${bytes.length} bytes)`);
+        }
+        MediaRead.End => {
+          print("the time is after the last frame");
+        }
+        MediaRead.Failed(why) => {
+          eprint("cannot read: " + why);
+        }
+      }
+      mediaClose(r);
+    }
+  }
+  return 0;
+}

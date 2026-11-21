@@ -1,0 +1,136 @@
+// 複数のスレッドが、それぞれ別の読み手で同時に読む（先読みのスレッドで展開する使い方）。
+// 4 本のスレッドが clip.mp4 の別々の区間を読み、どのコマも正しい番号だったかを返す。
+// 同じ読み手を2つのスレッドが同時に使うと、後から来たほうが失敗する（停止はしない）ことも確かめる。
+//
+// expect: thread 0: 25 frames from 0, all correct
+// expect: thread 1: 25 frames from 25, all correct
+// expect: thread 2: 25 frames from 50, all correct
+// expect: thread 3: 25 frames from 75, all correct
+// expect: audio thread: 4.0 s
+// expect: shared reader: some calls failed with "being used by another thread", or none overlapped
+
+function numberOf(px: Buffer<u8>, w: i32, h: i32): i32 {
+  const at = ((h / 2) * w + w / 2) * 4;
+  return (px[at] as i32) / 16 + (px[at + 1] as i32) / 16 * 16;
+}
+
+// first 番目のコマにシークしてから、25 コマを順に読む。正しかったコマの数を返す。
+function readPart(first: i32): i32 {
+  match (mediaOpenVideo("clip.mp4", "none")) {
+    Result.Err(why) => {
+      eprint(why);
+      return -1;
+    }
+    Result.Ok(r) => {
+      let px = new Buffer<u8>(320 * 240 * 4);
+      let good = 0;
+      for (let k = 0; k < 25; k++) {
+        const n = first + k;
+        let x = MediaRead.End;
+        if (k == 0) {
+          x = mediaFrame(r, (n as f64) / 25.0, mut px, MediaPixels.Rgba8, 0, 0);
+        } else {
+          x = mediaNextFrame(r, mut px, MediaPixels.Rgba8, 0, 0);
+        }
+        match (x) {
+          MediaRead.Frame(_) => {
+            if (numberOf(px, 320, 240) == n) {
+              good += 1;
+            }
+          }
+          MediaRead.End => {}
+          MediaRead.Failed(why) => { eprint(why); }
+        }
+      }
+      mediaClose(r);
+      return good;
+    }
+  }
+}
+
+// 音を全部読み、標本の組の数を返す。
+function readAudio(rate: i32): i64 {
+  match (mediaOpenAudio("clip.mp4")) {
+    Result.Err(why) => {
+      eprint(why);
+      return -1;
+    }
+    Result.Ok(r) => {
+      let buf = new Buffer<f32>(8192);
+      let total: i64 = 0;
+      while (true) {
+        match (mediaNextSamples(r, mut buf, rate)) {
+          MediaAudioRead.Samples(_, n) => { total += n as i64; }
+          MediaAudioRead.End => { break; }
+          MediaAudioRead.Failed(why) => {
+            eprint(why);
+            break;
+          }
+        }
+      }
+      mediaClose(r);
+      return total;
+    }
+  }
+}
+
+// 共有の読み手で 200 回シークする。「使用中」で失敗した回数を返す（ほかの失敗は -1000）。
+function hammer(r: i64, seed: i32): i32 {
+  let px = new Buffer<u8>(320 * 240 * 4);
+  let busy = 0;
+  for (let k = 0; k < 200; k++) {
+    const t = (((k * 7 + seed * 13) % 100) as f64) / 25.0;
+    match (mediaFrame(r, t, mut px, MediaPixels.Rgba8, 0, 0)) {
+      MediaRead.Frame(_) => {}
+      MediaRead.End => {}
+      MediaRead.Failed(why) => {
+        if (why == "the reader is being used by another thread (use one per thread)") {
+          busy += 1;
+        } else {
+          eprint(why);
+          busy -= 1000;
+        }
+      }
+    }
+  }
+  return busy;
+}
+
+export function main(): i32 {
+  {
+    const a = thread.spawn(readPart, 0);
+    const b = thread.spawn(readPart, 25);
+    const c = thread.spawn(readPart, 50);
+    const d = thread.spawn(readPart, 75);
+    const s = thread.spawn(readAudio, 48000);
+    const results = [thread.join(a), thread.join(b), thread.join(c), thread.join(d)];
+    for (let k = 0; k < 4; k++) {
+      let verdict = "all correct";
+      if (results[k] != 25) {
+        verdict = `${results[k]} correct`;
+      }
+      print(`thread ${k}: 25 frames from ${k * 25}, ${verdict}`);
+    }
+    const samples = thread.join(s);
+    const tenths = (samples * 10 + 24000) / 48000;
+    print(`audio thread: ${tenths / 10}.${tenths % 10} s`);
+  }
+  match (mediaOpenVideo("clip.mp4", "none")) {
+    Result.Err(why) => { print(why); }
+    Result.Ok(r) => {
+      {
+        const x = thread.spawn(hammer, r, 1);
+        const y = thread.spawn(hammer, r, 2);
+        const bx = thread.join(x);
+        const by = thread.join(y);
+        if (bx >= 0 && by >= 0) {
+          print("shared reader: some calls failed with \"being used by another thread\", or none overlapped");
+        } else {
+          print("shared reader: other failures");
+        }
+      }
+      mediaClose(r);
+    }
+  }
+  return 0;
+}
