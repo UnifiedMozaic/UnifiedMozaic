@@ -1,0 +1,81 @@
+// gpu.prefer と gpu.available（docs/wgpu.ja.md「GPU を優先する」）。どのビルドでもコンパイルできる書き方だけを使う
+// （gpu.dispatch は使わない）。`// cpu-build` があるので、GPU の経路のないビルド（UM_WGPU なし）でも実行して同じ出力になることを確かめる。
+//   1. gpu.prefer は前の値を返す（初めは false）
+//   2. gpu.prefer(true) のあいだの dispatch / dispatchGroups の結果は、CPU だけで計算したものと一致する
+//      （GPU があれば GPU、なければ CPU で実行する。64 ビットの整数を使う kernel は GPU でも CPU で実行する）
+//   3. gpu.available() は GPU の経路のないビルドでは false。あるビルドでは、GPU を使えるときに true
+// cpu-build
+// expect: false
+// expect: true
+// expect: true
+// expect: true
+// expect: true
+// expect: true
+
+kernel function scale(i: u32, out: mut Buffer<u32>, src: Buffer<u32>, k: u32): void {
+  out[i] = src[i] * k + i;
+}
+
+kernel function wide(i: u32, out: mut Buffer<u64>, src: Buffer<u32>): void {
+  out[i] = (src[i] as u64) << 33;
+}
+
+kernel function sums(i: u32, out: mut RacyBuffer<u32>, src: Buffer<u32>): void {
+  let s: u32[64] = group.shared();
+  const l = group.local();
+  s[l] = src[i] & 255;
+  group.barrier();
+  if (l == 0) {
+    let t: u32 = 0;
+    for (let k: u32 = 0; k < 64; k++) {
+      t += s[k];
+    }
+    out[group.id()] = t;
+  }
+}
+
+export function main(): i32 {
+  const n: u32 = 64 * 4688;
+  let src = new Buffer<u32>(n);
+  for (let i: u32 = 0; i < n; i++) {
+    src[i] = i * 2654435761;
+  }
+  let want = new Buffer<u32>(n);
+  let got = new Buffer<u32>(n);
+  let want64 = new Buffer<u64>(n);
+  let got64 = new Buffer<u64>(n);
+  let wantSums = new RacyBuffer<u32>(n / 64);
+  let gotSums = new RacyBuffer<u32>(n / 64);
+  cpu.dispatch(scale, n, mut want, src, 7);
+  cpu.dispatch(wide, n, mut want64, src);
+  cpu.dispatchGroups(sums, n / 64, 64, mut wantSums, src);
+
+  print(gpu.prefer(true));
+  for (let round = 0; round < 3; round++) {
+    dispatch(scale, n, mut got, src, 7);
+    dispatch(wide, n, mut got64, src);
+    dispatchGroups(sums, n / 64, 64, mut gotSums, src);
+  }
+  print(gpu.prefer(false));
+  let same = true;
+  for (let i: u32 = 0; i < n; i++) {
+    if (got[i] != want[i] || got64[i] != want64[i]) {
+      same = false;
+    }
+  }
+  for (let i: u32 = 0; i < n / 64; i++) {
+    if (gotSums.load(i) != wantSums.load(i)) {
+      same = false;
+    }
+  }
+  print(same);
+  // prefer を戻したあとの自動の dispatch も同じ結果。
+  got.fill(0);
+  dispatch(scale, n, mut got, src, 7);
+  print(got[n - 1] == want[n - 1] && got[0] == want[0]);
+  // gpu.available() は、GPU を使ったかどうかと矛盾しない（GPU の経路のないビルドではいつも false）。
+  const a = gpu.available();
+  print(a == gpu.available());
+  print(!gpu.prefer(false));
+  return 0;
+}

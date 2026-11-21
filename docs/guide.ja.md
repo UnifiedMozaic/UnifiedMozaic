@@ -451,6 +451,16 @@ UM_METAL=1 node src/cli.ts build x.um --target host -o x    # --target arm64-mac
 - **選ばれなかった側も、ときどき測り直します**（およそ 64 回に1回。差が大きいほど、勝ち負けが変わらないほど間隔を広げます）。
 - **途中で実行先が変わっても、結果は同じです**（kernel の意味を CPU と GPU で揃えてあるため。RacyBuffer で競合する書き方は除きます）。
 - `UM_GPU_THRESHOLD=N` を付けると実測をやめ、「要素数が N 以上なら GPU」という固定の規則になります。
+- wgpu の経路（`UM_WGPU=1`）では、Buffer がいま CPU と GPU のどちらにあるか（送る量・読み戻す量）も見込みに入れ、同じ kernel の並びを繰り返すプログラムでは「GPU に寄せる」判断も試して周期の短いほうを使います（[wgpu での GPU 実行](wgpu.ja.md)の「自動判断」）。
+
+**GPU を優先する・GPU があるか（どのビルドでも書けます）:**
+
+| 書き方 | 意味 |
+| --- | --- |
+| `gpu.prefer(on: bool): bool` | `true` のあいだ、`dispatch` / `dispatchGroups` は GPU が使えるかぎり GPU で実行し、使えなければ CPU で実行します。前の値を返します。GPU の経路のないビルドでは印を覚えるだけ（効果はない） |
+| `gpu.available(): bool` | 実行時に GPU が使えるか。GPU の経路のないビルドでは `false` |
+
+`gpu.dispatch` は GPU の経路のないビルドではコンパイルエラーなので、どのビルドでも使うコードで GPU を優先したいときは `gpu.prefer(true)` と `dispatch` を使います。
 
 ### 同期の dispatch を速くする仕組み
 

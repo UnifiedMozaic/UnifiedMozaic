@@ -1,0 +1,218 @@
+// 速さの計測: 動画編集ソフトの描画に近い形。1280x720 の画面について、毎フレーム
+//   CPU が元の画像（YUV に見立てた RGBA8）を書く（復号の代わり。cpu.dispatch）
+//   → キャンバス（vec4<f32>、14.7 MB）を消して、元の画像を重ね、効果をかけ、窓の画素に写す（全画面の kernel 10 個）
+//   → CPU が窓の画素の上の部分（操作の画面）を描き、窓の画素を読む（表示の代わり）
+// を繰り返し、1フレームあたりの時間を測る。どの Buffer も CPU が書くか、kernel がその場で書き換える（mut）ので、
+// Buffer の置き場所を考えない判断では、どの kernel も単独では送る分だけ遅く見える。
+// cpu.dispatch（CPU の全コア）、gpu.dispatch（GPU に固定）、自動の dispatch、gpu.prefer(true) の dispatch を比べる。
+// 自動の dispatch は初めの数十フレームで実測して選ぶので、初めの 200 フレームを除いた時間も出す。初めの 10 フレームは
+// 効果を 1 つずつ足していく（kernel ごとに GPU を試す回がずれるので、どの kernel も前後が CPU のまま単独で試され、
+// Buffer の置き場所を考えない判断では「全部 CPU」から抜け出せない）。
+// 作り方と結果は docs/wgpu.ja.md の「速さ」。
+
+kernel function decodeFrame(i: u32, dst: mut Buffer<u32>, f: u32): void {
+  dst[i] = (i * 2654435761 + f * 977) | 0xff000000;
+}
+
+kernel function clearCanvas(i: u32, canvas: mut Buffer<vec4<f32>>, color: vec4<f32>): void {
+  canvas[i] = color;
+}
+
+kernel function composite(i: u32, canvas: mut Buffer<vec4<f32>>, src: Buffer<u32>, alpha: f32): void {
+  const p = src[i];
+  const s = vec4((p & 255) as f32, ((p >> 8) & 255) as f32, ((p >> 16) & 255) as f32, (p >> 24) as f32) / 255.0;
+  canvas[i] = canvas[i] * (1.0 - alpha) + s * alpha;
+}
+
+kernel function brightness(i: u32, px: mut Buffer<vec4<f32>>, amount: f32): void {
+  const c = px[i];
+  px[i] = vec4(c.x + amount, c.y + amount, c.z + amount, c.w);
+}
+
+kernel function contrast(i: u32, px: mut Buffer<vec4<f32>>, k: f32): void {
+  const c = px[i];
+  px[i] = vec4((c.x - 0.5) * k + 0.5, (c.y - 0.5) * k + 0.5, (c.z - 0.5) * k + 0.5, c.w);
+}
+
+kernel function saturation(i: u32, px: mut Buffer<vec4<f32>>, k: f32): void {
+  const c = px[i];
+  const l = c.x * 0.299 + c.y * 0.587 + c.z * 0.114;
+  px[i] = vec4(l + (c.x - l) * k, l + (c.y - l) * k, l + (c.z - l) * k, c.w);
+}
+
+const R: u32 = 4;
+
+kernel function blurX(i: u32, dst: mut Buffer<vec4<f32>>, src: Buffer<vec4<f32>>, w: u32): void {
+  const x = i % w;
+  const row = i - x;
+  let s = vec4(0.0 as f32, 0, 0, 0);
+  for (let k: u32 = 0; k <= 2 * R; k++) {
+    let xx = x + k;
+    xx = Math.max(xx, R) - R;
+    s = s + src[row + Math.min(xx, w - 1)];
+  }
+  dst[i] = s / ((2 * R + 1) as f32);
+}
+
+kernel function blurY(i: u32, dst: mut Buffer<vec4<f32>>, src: Buffer<vec4<f32>>, w: u32, h: u32): void {
+  const x = i % w;
+  const y = i / w;
+  let s = vec4(0.0 as f32, 0, 0, 0);
+  for (let k: u32 = 0; k <= 2 * R; k++) {
+    let yy = y + k;
+    yy = Math.max(yy, R) - R;
+    s = s + src[Math.min(yy, h - 1) * w + x];
+  }
+  dst[i] = s / ((2 * R + 1) as f32);
+}
+
+kernel function vignette(i: u32, px: mut Buffer<vec4<f32>>, w: u32, h: u32): void {
+  const dx = ((i % w) as f32) / (w as f32) - 0.5;
+  const dy = ((i / w) as f32) / (h as f32) - 0.5;
+  const v = 1.0 - (dx * dx + dy * dy) * 1.2;
+  const c = px[i];
+  px[i] = vec4(c.x * v, c.y * v, c.z * v, c.w);
+}
+
+kernel function tint(i: u32, px: mut Buffer<vec4<f32>>, r: f32, g: f32, b: f32): void {
+  const c = px[i];
+  px[i] = vec4(c.x * r, c.y * g, c.z * b, c.w);
+}
+
+// キャンバスを窓の画素（上の 80 行は操作の画面なので書かない）に写す。
+kernel function blit(i: u32, win: mut Buffer<u32>, canvas: Buffer<vec4<f32>>, w: u32): void {
+  if (i < 80 * w) {
+    return;
+  }
+  const c = canvas[i];
+  const r = (Math.min(Math.max(c.x, 0.0), 1.0) * 255.0) as u32;
+  const g = (Math.min(Math.max(c.y, 0.0), 1.0) * 255.0) as u32;
+  const b = (Math.min(Math.max(c.z, 0.0), 1.0) * 255.0) as u32;
+  win[i] = r | (g << 8) | (b << 16) | (255 << 24);
+}
+
+// 1フレームの描画（10 個の kernel）。mode: 0 = 自動（dispatch）、1 = CPU、2 = GPU。
+// 自動では、初めの upto 個の kernel だけを実行する（効果を 1 つずつ足していく使い方。下の run の stagger）。
+function render(mode: i32, upto: u32, src: Buffer<u32>, win: mut Buffer<u32>, canvas: mut Buffer<vec4<f32>>, tmp: mut Buffer<vec4<f32>>,
+                w: u32, h: u32): void {
+  const n = w * h;
+  const bg = vec4(0.1 as f32, 0.1, 0.12, 1.0);
+  if (mode == 1) {
+    cpu.dispatch(clearCanvas, n, mut canvas, bg);
+    cpu.dispatch(composite, n, mut canvas, src, 0.9);
+    cpu.dispatch(brightness, n, mut canvas, 0.05);
+    cpu.dispatch(contrast, n, mut canvas, 1.1);
+    cpu.dispatch(saturation, n, mut canvas, 1.2);
+    cpu.dispatch(blurX, n, mut tmp, canvas, w);
+    cpu.dispatch(blurY, n, mut canvas, tmp, w, h);
+    cpu.dispatch(vignette, n, mut canvas, w, h);
+    cpu.dispatch(tint, n, mut canvas, 1.0, 0.95, 0.9);
+    cpu.dispatch(blit, n, mut win, canvas, w);
+  } else if (mode == 2) {
+    gpu.dispatch(clearCanvas, n, mut canvas, bg);
+    gpu.dispatch(composite, n, mut canvas, src, 0.9);
+    gpu.dispatch(brightness, n, mut canvas, 0.05);
+    gpu.dispatch(contrast, n, mut canvas, 1.1);
+    gpu.dispatch(saturation, n, mut canvas, 1.2);
+    gpu.dispatch(blurX, n, mut tmp, canvas, w);
+    gpu.dispatch(blurY, n, mut canvas, tmp, w, h);
+    gpu.dispatch(vignette, n, mut canvas, w, h);
+    gpu.dispatch(tint, n, mut canvas, 1.0, 0.95, 0.9);
+    gpu.dispatch(blit, n, mut win, canvas, w);
+  } else {
+    if (upto > 0) {
+      dispatch(clearCanvas, n, mut canvas, bg);
+    }
+    if (upto > 1) {
+      dispatch(composite, n, mut canvas, src, 0.9);
+    }
+    if (upto > 2) {
+      dispatch(brightness, n, mut canvas, 0.05);
+    }
+    if (upto > 3) {
+      dispatch(contrast, n, mut canvas, 1.1);
+    }
+    if (upto > 4) {
+      dispatch(saturation, n, mut canvas, 1.2);
+    }
+    if (upto > 5) {
+      dispatch(blurX, n, mut tmp, canvas, w);
+    }
+    if (upto > 6) {
+      dispatch(blurY, n, mut canvas, tmp, w, h);
+    }
+    if (upto > 7) {
+      dispatch(vignette, n, mut canvas, w, h);
+    }
+    if (upto > 8) {
+      dispatch(tint, n, mut canvas, 1.0, 0.95, 0.9);
+    }
+    if (upto > 9) {
+      dispatch(blit, n, mut win, canvas, w);
+    }
+  }
+}
+
+// 1フレーム: 復号（CPU）、描画、操作の画面を描いて（CPU）、表示する（CPU が窓の画素を読む）。
+function frame(mode: i32, upto: u32, f: u32, src: mut Buffer<u32>, win: mut Buffer<u32>, canvas: mut Buffer<vec4<f32>>, tmp: mut Buffer<vec4<f32>>,
+               w: u32, h: u32): u32 {
+  cpu.dispatch(decodeFrame, w * h, mut src, f);
+  render(mode, upto, src, mut win, mut canvas, mut tmp, w, h);
+  for (let i: u32 = 0; i < 80 * w; i++) {
+    win[i] = 0xff303030 + (f & 15);
+  }
+  let s: u32 = 0;
+  for (let i: u32 = 0; i < win.length; i += 61) {
+    s = s ^ win[i];
+  }
+  return s;
+}
+
+function run(label: string, mode: i32, stagger: bool, frames: i32, skip: i32, src: mut Buffer<u32>, win: mut Buffer<u32>, canvas: mut Buffer<vec4<f32>>,
+             tmp: mut Buffer<vec4<f32>>, w: u32, h: u32): u32 {
+  let sink: u32 = 0;
+  let t0 = clock();
+  let t1 = t0;
+  for (let f = 0; f < frames; f++) {
+    if (f == skip) {
+      t1 = clock();
+    }
+    // stagger: 初めのフレームでは kernel を 1 つずつ足す（kernel ごとに、GPU を試す回がずれる）。
+    const upto: u32 = stagger && f < 10 ? (f + 1) as u32 : 10;
+    sink = sink ^ frame(mode, upto, f as u32, mut src, mut win, mut canvas, mut tmp, w, h);
+  }
+  const t2 = clock();
+  if (skip > 0) {
+    print(`${label} ${(t2 - t0) * 1000 / (frames as f64)} ms/frame (after ${skip} frames: ${(t2 - t1) * 1000 / ((frames - skip) as f64)} ms/frame)`);
+  } else {
+    print(`${label} ${(t2 - t0) * 1000 / (frames as f64)} ms/frame`);
+  }
+  return sink;
+}
+
+export function main(): i32 {
+  const w: u32 = 1280;
+  const h: u32 = 720;
+  const n = w * h;
+  let src = new Buffer<u32>(n);
+  let win = new Buffer<u32>(n);
+  let canvas = new Buffer<vec4<f32>>(n);
+  let tmp = new Buffer<vec4<f32>>(n);
+  print(`gpu available: ${gpu.available()}`);
+
+  // CPU と GPU で同じ結果か（そのあと CPU でもう一度描いて、Buffer を CPU に置いた状態から始める）。
+  const want = frame(1, 10, 0, mut src, mut win, mut canvas, mut tmp, w, h);
+  print(frame(2, 10, 0, mut src, mut win, mut canvas, mut tmp, w, h) == want);
+  frame(1, 10, 0, mut src, mut win, mut canvas, mut tmp, w, h);
+
+  let sink: u32 = 0;
+  sink = sink ^ run("cpu (all cores):     ", 1, false, 100, 0, mut src, mut win, mut canvas, mut tmp, w, h);
+  // 自動判断の初めの実行は、効果を 1 つずつ足していく（kernel ごとに GPU を試す回がずれ、どの kernel も単独で試される）。
+  sink = sink ^ run("auto (dispatch):     ", 0, true, 600, 200, mut src, mut win, mut canvas, mut tmp, w, h);
+  sink = sink ^ run("gpu (gpu.dispatch):  ", 2, false, 100, 0, mut src, mut win, mut canvas, mut tmp, w, h);
+  gpu.prefer(true);
+  sink = sink ^ run("gpu.prefer(true):    ", 0, false, 100, 0, mut src, mut win, mut canvas, mut tmp, w, h);
+  gpu.prefer(false);
+  print(sink != 1);
+  return 0;
+}

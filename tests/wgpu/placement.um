@@ -1,0 +1,87 @@
+// Buffer の置き場所を見込む自動判断（docs/wgpu.ja.md「自動判断」）。動画編集ソフトの描画の形（CPU が元の画像を書き、
+// キャンバスをその場で書き換える kernel を続けて実行し、CPU が出来上がりを読む）を 150 フレーム繰り返す。
+// 自動判断は途中で GPU と CPU を行き来し（試しの回、周期の比較で GPU に寄せる・戻す）、kernel ごとに置き場所が変わるが、
+// どのフレームの結果も CPU だけで計算したものと一致することを確かめる。
+// expect: 0
+
+kernel function decode(i: u32, dst: mut Buffer<u32>, f: u32): void {
+  dst[i] = i * 2654435761 + f * 977;
+}
+
+kernel function clear(i: u32, canvas: mut Buffer<u32>, c: u32): void {
+  canvas[i] = c;
+}
+
+kernel function over(i: u32, canvas: mut Buffer<u32>, src: Buffer<u32>): void {
+  canvas[i] = (canvas[i] >> 1) + (src[i] >> 1);
+}
+
+kernel function mix(i: u32, canvas: mut Buffer<u32>, k: u32): void {
+  const v = canvas[i];
+  canvas[i] = (v ^ (v >> 7)) * k + (v << 3);
+}
+
+kernel function shift(i: u32, dst: mut Buffer<u32>, src: Buffer<u32>, w: u32): void {
+  const x = i % w;
+  dst[i] = src[i - x + (x + 3) % w] + src[i];
+}
+
+kernel function out(i: u32, win: mut Buffer<u32>, canvas: Buffer<u32>, w: u32): void {
+  if (i >= 40 * w) {
+    win[i] = canvas[i] | 0xff000000;
+  }
+}
+
+function frame(auto: bool, f: u32, src: mut Buffer<u32>, canvas: mut Buffer<u32>, tmp: mut Buffer<u32>, win: mut Buffer<u32>, w: u32): u32 {
+  const n = src.length;
+  cpu.dispatch(decode, n, mut src, f);
+  if (auto) {
+    dispatch(clear, n, mut canvas, f);
+    dispatch(over, n, mut canvas, src);
+    dispatch(mix, n, mut canvas, 3);
+    dispatch(shift, n, mut tmp, canvas, w);
+    dispatch(mix, n, mut tmp, 5);
+    dispatch(shift, n, mut canvas, tmp, w);
+    dispatch(out, n, mut win, canvas, w);
+  } else {
+    cpu.dispatch(clear, n, mut canvas, f);
+    cpu.dispatch(over, n, mut canvas, src);
+    cpu.dispatch(mix, n, mut canvas, 3);
+    cpu.dispatch(shift, n, mut tmp, canvas, w);
+    cpu.dispatch(mix, n, mut tmp, 5);
+    cpu.dispatch(shift, n, mut canvas, tmp, w);
+    cpu.dispatch(out, n, mut win, canvas, w);
+  }
+  // 操作の画面（上の 40 行）を CPU が描いてから、全体を読む（表示）。
+  for (let i: u32 = 0; i < 40 * w; i++) {
+    win[i] = f;
+  }
+  let s: u32 = 0;
+  for (let i: u32 = 0; i < win.length; i++) {
+    s = s * 31 + win[i];
+  }
+  return s;
+}
+
+export function main(): i32 {
+  const w: u32 = 1280;
+  const n: u32 = w * 720;
+  let a0 = new Buffer<u32>(n);
+  let a1 = new Buffer<u32>(n);
+  let a2 = new Buffer<u32>(n);
+  let a3 = new Buffer<u32>(n);
+  let b0 = new Buffer<u32>(n);
+  let b1 = new Buffer<u32>(n);
+  let b2 = new Buffer<u32>(n);
+  let b3 = new Buffer<u32>(n);
+  let bad = 0;
+  for (let f: u32 = 0; f < 150; f++) {
+    const x = frame(true, f, mut a0, mut a1, mut a2, mut a3, w);
+    const y = frame(false, f, mut b0, mut b1, mut b2, mut b3, w);
+    if (x != y) {
+      bad++;
+    }
+  }
+  print(bad);
+  return 0;
+}

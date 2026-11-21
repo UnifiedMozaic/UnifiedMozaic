@@ -20,6 +20,7 @@
 //                      確かめる（64 ビットの整数や simdgroup の集計を gpu.dispatch で使う、Metal だけの機能）。
 //                      `// wgsl: 名前` があれば、その kernel の WGSL を実行するフォルダに <名前>.wgsl として書く（gpu.loadKernel 用）。
 //                      UM_TEST_WGPU_BACKENDS=vulkan,dx12 のように書くと、wgpu のバックエンドごとに実行する。
+//                      `// cpu-build` があれば、GPU の経路のないビルド（UM_WGPU なしのネイティブと wasm32）でも実行して照合する。
 //   tests/io/*.um      標準入力の届き方に左右される動作。pipe_driver.c がパイプに書く（「待たない」設定のパイプ、
 //                      1行を2回に分けて書く）。ネイティブだけ。
 //   tests/threads/*.um スレッド（ネイティブだけ）。`// expect:` か `// panic:` と照合する。`// sorted` があれば出力を
@@ -797,6 +798,29 @@ for (const f of files('tests/metal')) {
     fail(`${f} [metal]`, String(e));
   } finally {
     delete process.env.UM_METAL;
+  }
+}
+
+// `// cpu-build` のある tests/wgpu のテストは、GPU の経路のないビルド（UM_WGPU なしのネイティブと wasm32）でも
+// コンパイルして実行し、同じ出力になることを確かめる（gpu.prefer / gpu.available などはどのビルドでも書ける）。
+for (const f of files('tests/wgpu')) {
+  const src = readFileSync(join(root, f), 'utf8');
+  if (!/^\/\/ cpu-build\s*$/m.test(src)) continue;
+  const want = directives(src, 'expect');
+  const tag = f.replace(/[^a-z0-9]/gi, '_');
+  try {
+    const n = runNative(src, `${tag}_cpu`, join(root, f));
+    if (same(n.out, want)) ok(`${f} [host, no GPU]`);
+    else fail(`${f} [host, no GPU]`, `expected: ${want.join(' ')}\nactual:   ${n.out.join(' ')}`);
+  } catch (e) {
+    fail(`${f} [host, no GPU]`, String(e));
+  }
+  try {
+    const w = await runWasm(src, `${tag}_cpu`);
+    if (same(w.out, want)) ok(`${f} [wasm32]`);
+    else fail(`${f} [wasm32]`, `expected: ${want.join(' ')}\nactual:   ${w.out.join(' ')}`);
+  } catch (e) {
+    fail(`${f} [wasm32]`, String(e));
   }
 }
 

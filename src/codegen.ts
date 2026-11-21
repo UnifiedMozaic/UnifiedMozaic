@@ -1664,6 +1664,8 @@ class ModuleGen {
 
     // ランタイム関数。wasmでは env モジュールからの import になる。
     const imports = ['void um_print_i64(i64)', 'void um_print_u64(i64)', 'void um_print_f64(double)', 'void um_print_bool(i32)', `void um_print_str(ptr, ${this.usz})`];
+    // `gpu.prefer(on)` の印（0 でなければ、自動の dispatch は GPU が使えるかぎり GPU で実行する）。GPU の経路のないビルドでも覚える。
+    out.push('@um.gpu_prefer = internal global i32 0, align 4');
     if (this.gpu === 'webgpu') {
       // GPU（WebGPU）での実行。実装は runtime/host.mjs。
       imports.push('i32 um_gpu_available()', 'i32 um_gpu_pick(i32, i32)', 'void um_gpu_dispatch(i32, ptr, i32, i32, ptr, i32, ptr, i32)');
@@ -1678,7 +1680,7 @@ class ModuleGen {
         out.push('declare void @um_gpu_cpu_done(i32, i32) #0', 'declare void @um_gpu_flush() #0', 'declare void @um_gpu_group(i32) #0');
         out.push('declare i64 @um_gpu_submit(i32, ptr, i32, i32, ptr, i32, ptr, i32) #0', 'declare i32 @um_gpu_ready(i64) #0', 'declare void @um_gpu_wait(i64) #0');
         out.push(`declare i32 @um_gpu_load(ptr, ${this.usz}) #0`, 'declare i32 @um_gpu_run(i32, i32, ptr, i32, ptr, i32) #0');
-        out.push('declare i32 @um_gpu_set_flags(i32) #0');
+        out.push('declare i32 @um_gpu_set_flags(i32) #0', 'declare i32 @um_gpu_pick_bufs(i32, i32, ptr, i32) #0');
       } else {
         out.push(`define internal ptr @um_wgpu_alloc(${this.usz} %n, ${this.usz} %s) #0 {`, `  %p = call ptr @um_alloc_zeroed(${this.usz} %n, ${this.usz} %s)`, '  ret ptr %p', '}');
       }
@@ -4118,6 +4120,26 @@ class FnGen {
       if (this.m.gpu === 'metal') this.emit(`call void @um_gpu_untracked(ptr ${data})`);
       return '';
     }
+    if (e.callee === '__gpu_available') {
+      if (!this.m.gpu) return 'false';
+      if (this.m.gpu === 'wgpu') this.m.usesGpuRuntime = true;
+      const r = this.tmp();
+      const b = this.tmp();
+      this.emit(`${r} = call i32 @um_gpu_available()`);
+      this.emit(`${b} = icmp ne i32 ${r}, 0`);
+      return b;
+    }
+    if (e.callee === '__gpu_prefer') {
+      const v = this.expr(e.args[0].expr);
+      const w = this.tmp();
+      const old = this.tmp();
+      const b = this.tmp();
+      this.emit(`${w} = zext i1 ${v} to i32`);
+      this.emit(`${old} = load i32, ptr @um.gpu_prefer, align 4`);
+      this.emit(`store i32 ${w}, ptr @um.gpu_prefer, align 4`);
+      this.emit(`${b} = icmp ne i32 ${old}, 0`);
+      return b;
+    }
     if (e.callee === '__gpu_load' || e.callee === '__gpu_run') return this.gpuLoadCall(e);
     if (e.callee === '__gpu_commit') {
       if (this.m.gpu === 'metal') this.emit('call void @um_gpu_commit()');
@@ -4252,6 +4274,7 @@ class FnGen {
       throw new CompileError(WGSL_SIMDGROUP, `kernel '${e.kernel}' uses simdgroup functions, which WebGPU (WGSL) does not support`, e.pos,
         'simdgroup functions run on Metal and on the CPU; use `dispatch` / `dispatchGroups` (they run such a kernel on the CPU here) or `cpu.dispatchGroups`');
     }
+    let pre: [string, number, string, number] | null = null;
     if (k) {
       // wasm32 では GPU（WebGPU）でも実行できる。auto は実行時にランタイムが選び、gpu は GPU がなければ停止する。
       const use = this.tmp();
@@ -4271,13 +4294,33 @@ class FnGen {
         this.check(none, PANIC_NO_GPU, e.pos.line);
         this.br(gpuL);
       } else {
-        this.emit(`${use} = call i32 @um_gpu_pick(i32 ${k.id}, i32 ${n})`);
+        // 自動: `gpu.prefer(true)` なら GPU が使えるかぎり GPU。そうでなければランタイムが選ぶ。
+        // wgpu では Buffer の表も渡し、Buffer の置き場所（GPU にあるか）を判断に入れる（runtime/wgpu.c の um_gpu_pick_bufs）。
+        if (this.m.gpu === 'wgpu') pre = this.gpuArgs(params, args);
+        const flag = this.tmp();
+        const on = this.tmp();
+        const prefL = this.newLabel('dispatch.prefer');
+        const pickL = this.newLabel('dispatch.pick');
+        this.emit(`${flag} = load i32, ptr @um.gpu_prefer, align 4`);
+        this.emit(`${on} = icmp ne i32 ${flag}, 0`);
+        this.emit(`br i1 ${on}, label %${prefL}, label %${pickL}`);
+        this.terminated = true;
+        this.label(prefL);
+        const avail = this.tmp();
+        this.emit(`${avail} = call i32 @um_gpu_available()`);
+        const a = this.tmp();
+        this.emit(`${a} = icmp ne i32 ${avail}, 0`);
+        this.emit(`br i1 ${a}, label %${gpuL}, label %${cpuL}`);
+        this.terminated = true;
+        this.label(pickL);
+        if (pre) this.emit(`${use} = call i32 @um_gpu_pick_bufs(i32 ${k.id}, i32 ${n}, ptr ${pre[2]}, i32 ${pre[3]})`);
+        else this.emit(`${use} = call i32 @um_gpu_pick(i32 ${k.id}, i32 ${n})`);
         this.emit(`${yes} = icmp ne i32 ${use}, 0`);
         this.emit(`br i1 ${yes}, label %${gpuL}, label %${cpuL}`);
         this.terminated = true;
       }
       this.label(gpuL);
-      const got = this.gpuDispatch(k, n, params, args, submit, size);
+      const got = this.gpuDispatch(k, n, params, args, submit, size, pre);
       if (submit) this.emit(`store i64 ${got}, ptr ${ticket}`);
       // Metal は dispatch を積むだけなので、ここで提出して完了を待つ。次の文も dispatch なら待ちをそちらに任せる。
       // wgpu も同じ形で、um_gpu_flush は提出するだけで待たない（結果は CPU が読むときに読み戻す。runtime/wgpu.c）。
@@ -4576,8 +4619,9 @@ class FnGen {
    * GPU での実行をランタイムに頼む。値の引数は GPU 側の struct と同じ並び（gpuLayout）の塊にし、
    * Buffer は（データの場所、要素数、要素の大きさ、書き込みの有無）の表にして渡す。
    */
-  gpuDispatch(k: { id: number; global: string; bytes: number }, n: string, params: FnSig['params'], args: string[], submit = false, group = ''): string {
-    const [block, bytes, table, nbufs] = this.gpuArgs(params, args);
+  gpuDispatch(k: { id: number; global: string; bytes: number }, n: string, params: FnSig['params'], args: string[], submit = false, group = '',
+    pre: [string, number, string, number] | null = null): string {
+    const [block, bytes, table, nbufs] = pre ?? this.gpuArgs(params, args);
     const call = `(i32 ${k.id}, ptr ${k.global}, i32 ${k.bytes}, i32 ${n}, ptr ${block}, i32 ${bytes}, ptr ${table}, i32 ${nbufs})`;
     // dispatchGroups: グループの大きさを、すぐ次の dispatch / submit に渡す（ランタイムがスレッドごとに覚えて、使ったら消す）。
     if (group) this.emit(`call void @um_gpu_group(i32 ${group})`);
