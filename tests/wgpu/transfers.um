@@ -1,0 +1,128 @@
+// CPU と GPU の写し（docs/wgpu.ja.md「Buffer の写し」）。GPU が書いた Buffer は、CPU が触ったときに読み戻され、
+// CPU が書いた Buffer は、次に GPU に渡したときに送り直される。どの並びでも、CPU だけで計算した結果と一致することを確かめる:
+//   1. GPU で続けて実行し、最後に CPU で読む（途中で読み戻さない）
+//   2. GPU が書いた Buffer の一部を CPU で書き換えてから、また GPU に渡す
+//   3. GPU が読んだだけの Buffer を CPU で書き換えてから、また GPU に渡す
+//   4. 複数のスレッドが、GPU が書いた Buffer を同時に読み書きする（cpu.dispatch）
+//   5. GPU が書いた Buffer を clone し、fill し、解放する
+//   6. 長さ 1 と 0 の Buffer、8 ビットの要素の Buffer
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: 0
+
+kernel function step(i: u32, out: mut Buffer<u32>, src: Buffer<u32>, k: u32): void {
+  out[i] = src[i] * 1664525 + src[i + 1] + k;
+}
+
+kernel function bump(i: u32, xs: mut Buffer<u32>): void {
+  xs[i] = xs[i] * 3 + i;
+}
+
+kernel function bytes(i: u32, out: mut Buffer<u8>, src: Buffer<u8>): void {
+  out[i] = ((src[i] as u32) + i) as u8;
+}
+
+function diff(a: Buffer<u32>, b: Buffer<u32>): u32 {
+  let bad: u32 = 0;
+  for (let i: u32 = 0; i < a.length; i++) {
+    if (a[i] != b[i]) {
+      bad += 1;
+    }
+  }
+  return bad;
+}
+
+export function main(): i32 {
+  const n: u32 = 300000;
+  let a = new Buffer<u32>(n);
+  let b = new Buffer<u32>(n);
+  let ca = new Buffer<u32>(n);
+  let cb = new Buffer<u32>(n);
+  for (let i: u32 = 0; i < n; i++) {
+    a[i] = i * 2654435761;
+    ca[i] = a[i];
+  }
+
+  // 1.
+  for (let k: u32 = 0; k < 10; k++) {
+    gpu.dispatch(step, n, mut b, a, k);
+    gpu.dispatch(step, n, mut a, b, k);
+    cpu.dispatch(step, n, mut cb, ca, k);
+    cpu.dispatch(step, n, mut ca, cb, k);
+  }
+  print(diff(a, ca));
+
+  // 2.
+  for (let k: u32 = 0; k < 5; k++) {
+    gpu.dispatch(bump, n, mut a);
+    cpu.dispatch(bump, n, mut ca);
+    a[k * 1000] = k;
+    ca[k * 1000] = k;
+    a[n - 1] = a[n - 2] + 1;
+    ca[n - 1] = ca[n - 2] + 1;
+  }
+  print(diff(a, ca));
+
+  // 3.
+  for (let k: u32 = 0; k < 5; k++) {
+    gpu.dispatch(step, n, mut b, a, 7);
+    cpu.dispatch(step, n, mut cb, ca, 7);
+    a[k * 7] = 12345 + k;
+    ca[k * 7] = 12345 + k;
+  }
+  print(diff(b, cb));
+
+  // 4. GPU が書いた a を、CPU の複数のスレッドが読み、書く（読み戻しは1回だけで、スレッドの書き込みは失われない）。
+  for (let k: u32 = 0; k < 5; k++) {
+    gpu.dispatch(bump, n, mut a);
+    cpu.dispatch(bump, n, mut ca);
+    cpu.dispatch(bump, n, mut a);
+    cpu.dispatch(bump, n, mut ca);
+  }
+  print(diff(a, ca));
+
+  // 5.
+  gpu.dispatch(bump, n, mut a);
+  cpu.dispatch(bump, n, mut ca);
+  const copy = a.clone();
+  let bad: u32 = 0;
+  for (let i: u32 = 0; i < n; i++) {
+    if (copy[i] != ca[i]) {
+      bad += 1;
+    }
+  }
+  gpu.dispatch(bump, n, mut a);
+  a.fill(5);
+  gpu.dispatch(bump, n, mut a);
+  for (let i: u32 = 0; i < n; i++) {
+    if (a[i] != 15 + i) {
+      bad += 1;
+    }
+  }
+  print(bad);
+
+  // 6.
+  let one = new Buffer<u32>(1);
+  let none = new Buffer<u32>(0);
+  gpu.dispatch(bump, 1, mut one);
+  gpu.dispatch(bump, 0, mut none);
+  print(one[0] + none.length);
+  let s = new Buffer<u8>(1001);
+  let d = new Buffer<u8>(1001);
+  for (let i: u32 = 0; i < 1001; i++) {
+    s[i] = (i * 7) as u8;
+  }
+  gpu.dispatch(bytes, 1001, mut d, s);
+  bad = 0;
+  for (let i: u32 = 0; i < 1001; i++) {
+    if (d[i] != (((i * 7) & 255) + i) as u8) {
+      bad += 1;
+    }
+  }
+  print(bad);
+  return 0;
+}

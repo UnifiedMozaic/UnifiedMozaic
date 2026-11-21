@@ -1,0 +1,63 @@
+// 速さの計測: 小さな dispatch（4096 要素）を何度も繰り返す。前の結果を次の入力にする。
+// CPU の全コア（cpu.dispatch）と GPU（gpu.dispatch）、自動判断（dispatch）で、1回あたりの時間を測る。
+// GPU は2通り: 毎回 CPU が結果を読む場合（往復を含む）と、最後にだけ読む場合（提出だけが続く）。
+// 作り方と結果は docs/wgpu.ja.md の「速さ」。
+
+kernel function step(i: u32, out: mut Buffer<f32>, src: Buffer<f32>, k: f32): void {
+  const l = src[Math.max(i, 1) - 1];
+  const r = src[i + 1];
+  out[i] = (l + src[i] * 2 + r) * 0.25 + k;
+}
+
+export function main(): i32 {
+  const n: u32 = 4096;
+  const reps = 2000;
+  const rf = reps as f64;
+  let a = new Buffer<f32>(n);
+  let b = new Buffer<f32>(n);
+  let ca = new Buffer<f32>(n);
+  let cb = new Buffer<f32>(n);
+  for (let i: u32 = 0; i < n; i++) {
+    a[i] = (i % 17) as f32;
+    ca[i] = a[i];
+  }
+  let sink: f32 = 0;
+
+  gpu.dispatch(step, n, mut b, a, 0.5);
+  cpu.dispatch(step, n, mut cb, ca, 0.5);
+  print(b[100] == cb[100]);
+
+  let t0 = clock();
+  for (let r = 0; r < reps; r++) {
+    cpu.dispatch(step, n, mut cb, ca, 0.5);
+    cpu.dispatch(step, n, mut ca, cb, 0.5);
+  }
+  sink += ca[7];
+  print(`cpu (all cores):         ${(clock() - t0) * 1e6 / (rf * 2)} us/dispatch`);
+
+  t0 = clock();
+  for (let r = 0; r < reps; r++) {
+    gpu.dispatch(step, n, mut b, a, 0.5);
+    gpu.dispatch(step, n, mut a, b, 0.5);
+  }
+  sink += a[7];
+  print(`gpu, read at the end:    ${(clock() - t0) * 1e6 / (rf * 2)} us/dispatch`);
+
+  t0 = clock();
+  for (let r = 0; r < reps; r++) {
+    gpu.dispatch(step, n, mut b, a, 0.5);
+    gpu.dispatch(step, n, mut a, b, 0.5);
+    sink += a[(r as u32) % n];
+  }
+  print(`gpu, CPU reads each time: ${(clock() - t0) * 1e6 / (rf * 2)} us/dispatch`);
+
+  t0 = clock();
+  for (let r = 0; r < reps; r++) {
+    dispatch(step, n, mut b, a, 0.5);
+    dispatch(step, n, mut a, b, 0.5);
+  }
+  sink += a[7];
+  print(`auto, read at the end:   ${(clock() - t0) * 1e6 / (rf * 2)} us/dispatch`);
+  print(sink != 0);
+  return 0;
+}

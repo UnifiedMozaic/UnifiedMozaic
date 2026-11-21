@@ -6,11 +6,13 @@ UnifiedMozaic のコンパイラを手元で使えるようにする手順です
 
 ## 対応している環境
 
-| 環境 | ネイティブ | GPU（Metal） | wasm32 |
-| --- | --- | --- | --- |
-| macOS（Apple Silicon） | ○ | ○ | ○（Homebrew の LLVM と lld が要る） |
-| Linux（x86_64 / arm64） | ○ | — | ○（`lld` が要る） |
-| Windows（x86_64） | ○（Visual Studio か Build Tools の MSVC が要る） | — | ○ |
+| 環境 | ネイティブ | GPU（wgpu） | GPU（Metal） | wasm32 |
+| --- | --- | --- | --- | --- |
+| macOS（Apple Silicon） | ○ | △（未確認） | ○ | ○（Homebrew の LLVM と lld が要る） |
+| Linux（x86_64 / arm64） | ○ | △（未確認） | — | ○（`lld` が要る） |
+| Windows（x86_64） | ○（Visual Studio か Build Tools の MSVC が要る） | ○ | — | ○ |
+
+GPU（wgpu）には wgpu-native が要ります（[wgpu での GPU 実行](wgpu.ja.md)の「準備」）。
 
 ## 1. Node.js（22.18 以上）
 
@@ -92,6 +94,9 @@ um build examples/structs.um --target host -o structs
 um build examples/structs.um --target host -o structs
 .structs.exe
 
+# wgpu（どの OS でも）。kernel を GPU でも実行する。UM_WGPU_HOME に wgpu-native を展開した場所
+UM_WGPU=1 um build examples/gpu_submit.um --target host -o gpu_submit
+
 # Metal（Mac）。kernel を GPU でも実行する
 UM_METAL=1 um build examples/gpu_submit.um --target host -o gpu_submit
 ./gpu_submit                # 30、true、285、3 と出る
@@ -133,5 +138,6 @@ code --install-extension unifiedmozaic-0.1.0.vsix
 | `この clang は wasm32 を出力できない` | macOS は `brew install llvm lld`。Linux は `lld` を入れる |
 | Windows で `unable to find a Visual Studio installation`、`link.exe` や `kernel32.lib` が見つからない | Visual Studio か Build Tools に「C++ によるデスクトップ開発」（MSVC と Windows SDK）を入れる |
 | Windows のコンソールで日本語が化ける | ネイティブのプログラムは、コンソールに出す間だけ出力の文字コードを UTF-8 にする。化けるときは、コンソールのフォントがその文字を持っているか確かめる |
-| `gpu.dispatch` がコンパイルエラーになる | GPU の経路は `UM_METAL=1` を付けた Mac のネイティブのビルドだけ。付けないときは `dispatch` か `cpu.dispatch` を使う |
+| `gpu.dispatch` がコンパイルエラーになる | ネイティブの GPU の経路は `UM_WGPU=1`（どの OS でも。[wgpu での GPU 実行](wgpu.ja.md)）か `UM_METAL=1`（Mac）を付けたビルドだけ。付けないときは `dispatch` か `cpu.dispatch` を使う |
+| `wgpu-native was not found` | wgpu-native のリリースを展開し、`UM_WGPU_HOME` にその場所を入れる（[wgpu での GPU 実行](wgpu.ja.md)の「準備」） |
 | 実行時に `panic: the GPU is not available` | `gpu.dispatch` は GPU がないと停止する。`dispatch`（自動）なら CPU で動く |

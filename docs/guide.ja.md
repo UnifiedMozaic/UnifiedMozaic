@@ -28,7 +28,7 @@ export function main(): i32 {
 }
 ```
 
-**いまの状態:** 言語とランタイムは試験段階で、よく変わります。`kernel` 関数は、ネイティブでは CPU の複数のスレッドで、Mac（Apple Silicon）では Metal で GPU でも実行できます（下の「Metal（Mac）での GPU 実行」）。wasm32 向けの WebGPU での実行は実験的で、今後は保守しません（下の「ブラウザでの GPU 実行（WebGPU、実験的）」）。
+**いまの状態:** 言語とランタイムは試験段階で、よく変わります。`kernel` 関数は、ネイティブでは CPU の複数のスレッドで、さらに GPU でも実行できます。ネイティブの GPU の経路は2つです: どの OS でも動く wgpu（`UM_WGPU=1`。kernel を WGSL にして wgpu-native で実行する。[wgpu での GPU 実行](wgpu.ja.md)）と、Mac（Apple Silicon）の Metal（`UM_METAL=1`。下の「Metal（Mac）での GPU 実行」）です。wasm32 では、同じ WGSL をブラウザの WebGPU で実行できます（下の「ブラウザでの GPU 実行（WebGPU）」）。
 
 ## 必要なもの・使い方
 
@@ -46,6 +46,9 @@ node runtime/run-node.mjs structs.wasm
 # このマシン向けのネイティブバイナリ
 node src/cli.ts build examples/structs.um --target host -o structs
 ./structs
+
+# kernel を GPU でも実行するネイティブバイナリ（Windows・Linux・macOS。wgpu-native が要る。docs/wgpu.ja.md）
+UM_WGPU=1 node src/cli.ts build examples/kernels.um --target host -o kernels
 
 # Mac で kernel を GPU（Metal）でも実行するネイティブバイナリ
 UM_METAL=1 node src/cli.ts build examples/kernels.um --target host -o kernels
@@ -71,7 +74,7 @@ node src/cli.ts build examples/structs.um --emit-llvm -o structs.ll
 | 文 | `let` / `const`（`let x: T;` はゼロで初期化）、代入と複合代入、`++` / `--`、`if` / `else`、`while`、`do ... while`、`for (;;)`、`for...of`、`switch`、`match`、`break`、`continue`、`return` |
 | 式 | 四則演算と剰余、比較、`&&` / `\|\|` / `!`、条件式 `a ? b : c`、`x ?? 既定値`、ビット演算とシフト、`as` による変換、関数とメソッドの呼び出し、`new`、`this`、フィールドと添字、オブジェクトリテラル、配列リテラル、`new Array<T>(n)`、`xs.length`、テンプレート文字列 `` `x = ${x}` ``、`String(x)` |
 | 配列のメソッド | `push`、`pop`、`clear`、`clone`、一括の書き込み `fill(v)` / `fill(v, start, end)`（Buffer / RacyBuffer にも。下の「一括の書き込み」） |
-| 組み込み | `print(x)`（数、`bool`、文字列）、`dispatch` / `cpu.dispatch` / `gpu.dispatch`、グループで実行する `dispatchGroups`（下の「グループ（共有配列・barrier）と kernel の中のアトミック演算」）、`gpu.submit` / `gpu.ready` / `gpu.wait`、`gpu.flags` / `gpu.commit` / `gpu.untracked`（下の「Metal（Mac）での GPU 実行」）、`thread.*`（下の「スレッド」）、`Math.sqrt` / `floor` / `ceil` / `abs` / `min` / `max`、ビット演算の `Math.popcount` / `clz` / `ctz`、マスクつきシフト `Math.shl` / `Math.shr`（下の「マスクつきシフトと範囲チェックの除去」）、先読み `Math.prefetch(arr, i)`（下の「先読み」）、SIMD の `Simd.*`（下の「SIMD のベクトル」） |
+| 組み込み | `print(x)`（数、`bool`、文字列）、`dispatch` / `cpu.dispatch` / `gpu.dispatch`、グループで実行する `dispatchGroups`（下の「グループ（共有配列・barrier）と kernel の中のアトミック演算」）、`gpu.submit` / `gpu.ready` / `gpu.wait`、`gpu.flags` / `gpu.commit` / `gpu.untracked`（下の「Metal（Mac）での GPU 実行」）、実行時に WGSL の kernel を読み込む `gpu.loadKernel` / `gpu.runKernel`（[wgpu での GPU 実行](wgpu.ja.md)）、`thread.*`（下の「スレッド」）、`Math.sqrt` / `floor` / `ceil` / `abs` / `min` / `max`、ビット演算の `Math.popcount` / `clz` / `ctz`、マスクつきシフト `Math.shl` / `Math.shr`（下の「マスクつきシフトと範囲チェックの除去」）、先読み `Math.prefetch(arr, i)`（下の「先読み」）、SIMD の `Simd.*`（下の「SIMD のベクトル」） |
 | 入出力の組み込み | `readLine()`、`inputReady()`、`clock()`、`stringFromBytes(bytes)`、`readFile(path)`、`writeFile(path, bytes)`、`fileSize(path)`、`readFileRange(path, offset, length)`、`appendFile(path, bytes)`、`args()`、`eprint(text)`（下の「入出力」） |
 
 それぞれの書き方は、下の各節と「そのほかの機能」の例にあります。
@@ -154,7 +157,7 @@ const d = STEP[dir][k];
 - **置き場所はプログラムの読み取り専用のデータです。** ヒープを使わず、使う所ごとのコピーもしません。添字は固定長配列と同じく検査され、`x & 63`、`x % 81`、`if (i < N)` の中のように範囲内と分かる添字では検査が省かれます（下の「マスクつきシフトと範囲チェックの除去」）。
 - **書き換えられません。** 要素への代入と `mut` での貸し出しはコンパイルエラーです。`let t = STEP[0];` のように変数に写せば、その写しは書き換えられます。関数の引数（修飾なし）にはコピーせずに貸します。
 - **大きさ。** 定数の配列は 4,194,304 個まで持てます。ただし、値としてコピーする使い方（変数に入れる、`own` で渡す、kernel の値の引数にする）ができるのは、普通の固定長配列と同じ 4096 個までです。大きな表は添字で読みます。
-- **kernel の中でも読めます**（kernel で使える型の表に限ります）。CPU では同じ読み取り専用のデータを読み、Metal では MSL のプログラムの範囲の `constant` の変数になります（kernel の引数は増えません）。範囲外の添字は固定長配列と同じく最後の要素に切り詰めます。WebGPU（WGSL）には対応しません。wasm32 では、定数の配列を使う kernel の `dispatch` は CPU で実行し、`gpu.dispatch` はコンパイルエラー（`webgpu-const-array`）です。
+- **kernel の中でも読めます**（kernel で使える型の表に限ります）。CPU では同じ読み取り専用のデータを読み、Metal では MSL のプログラムの範囲の `constant` の変数に、WGSL（wgpu と WebGPU）ではモジュールの範囲の `const` になります（kernel の引数は増えません）。範囲外の添字は固定長配列と同じく最後の要素に切り詰めます。
 - **まだできないこと:** 関数の呼び出しで表を作ること（`const T: u64[81] = makeTable();` のようなコンパイル時の関数の実行）。大きな表は、生成するスクリプトで `.um` の配列リテラルを書き出してください。`struct` の要素の表もまだです。
 
 例: [examples/const_arrays.um](../examples/const_arrays.um)、[tests/metal/const_arrays.um](../tests/metal/const_arrays.um)・[tests/metal/const_arrays_i64.um](../tests/metal/const_arrays_i64.um)（Metal。64 ビットの整数の表も CPU と同じ値になる）。
@@ -248,7 +251,7 @@ export function main(): i32 {
 - **kernel は確保・`print`・通常の関数の呼び出し・再帰ができません。** 補助関数も `kernel function` として書きます。
 - **kernel は停止しません（GPU に停止がないため）。** 範囲外の添字は最後の要素に切り詰めます。整数のゼロ除算は `x / 0 = x`、`x % 0 = 0`、シフト量はビット幅で割った余りです。
 - **`dispatch` の個数は、書き込み先の Buffer の長さ以下でなければなりません。** 超えると停止します。
-- **実行先は `dispatch` が自動で選びます。** 明示するときは `cpu.dispatch` / `gpu.dispatch` と書きます。GPU で実行できるビルドは、Mac の Metal（`UM_METAL=1`）と wasm32（WebGPU）です。それ以外のネイティブのビルドでは `dispatch` は常に CPU で、`gpu.dispatch` はコンパイルエラーです。`gpu.dispatch` は、GPU が使えない環境で実行すると停止します。
+- **実行先は `dispatch` が自動で選びます。** 明示するときは `cpu.dispatch` / `gpu.dispatch` と書きます。GPU で実行できるビルドは、ネイティブの wgpu（`UM_WGPU=1`。Windows・Linux・macOS）と Metal（`UM_METAL=1`。Mac）、wasm32（WebGPU）です。それ以外のネイティブのビルドでは `dispatch` は常に CPU で、`gpu.dispatch` はコンパイルエラーです。`gpu.dispatch` は、GPU が使えない環境で実行すると停止します。
 - **GPU で実行できるビルドでは、dispatch する kernel に値として渡す struct や配列に `bool` を含められません**（CPU と GPU でビット表現が違うため。`u32` の 0 / 1 を使うか、`cpu.dispatch` で呼びます）。
 - **CPU と GPU を同時に走らせるには `gpu.submit` を使います**（下の「Metal（Mac）での GPU 実行」）。
 
@@ -273,7 +276,7 @@ kernel function count(i: u32, out: mut Buffer<u32>, boards: Buffer<Bb>): void {
 ```
 
 - **意味は 32 ビットと同じ規則です。** 演算はラップし、シフト量は 64 で割った余り、ゼロ除算は `x / 0 = x`、`x % 0 = 0`、最小値 / -1 = 最小値です。`f32` からの変換は範囲外で飽和し、NaN は 0 です。64 ビットの添字は、範囲外なら最後の要素に切り詰めます。
-- **GPU で実行できるのは Metal だけです。** MSL の `long` / `ulong` をそのまま使います（Apple M4 で `tests/metal/i64.um` が CPU と全要素一致）。WebGPU（WGSL）には 64 ビットの整数がないので、64 ビットの整数を使う kernel（呼ぶ補助の kernel を含む）は、wasm32 では `dispatch` / `gpu.submit` が CPU で実行し、`gpu.dispatch` はコンパイルエラー（`kernel-type`）になります。
+- **GPU で実行できるのは Metal だけです。** MSL の `long` / `ulong` をそのまま使います（Apple M4 で `tests/metal/i64.um` が CPU と全要素一致）。WGSL には 64 ビットの整数がないので、64 ビットの整数を使う kernel（呼ぶ補助の kernel を含む）は、wgpu（`UM_WGPU=1`）と wasm32 では `dispatch` / `gpu.submit` が CPU で実行し、`gpu.dispatch` はコンパイルエラー（`kernel-type`）になります。
 - **64 ビットのアトミック演算（`fetchAdd` / `compareExchange` など）は kernel の外だけです**（Apple の GPU にも 64 ビットのアトミックな加算・比較交換はありません）。kernel の中の `RacyBuffer<u64>` の `b[i]` は普通の 8 バイトの読み書きです。CPU ではちぎれませんが、Metal が 8 バイトの読み書きを 1 回で行うことは仕様では保証されていません（別の実行が同じ要素を同時に書くと、上下 32 ビットが別々の値になりうると考えてください）。
 - **並び**: `i64` / `u64` は 8 バイトで 8 バイト境界です（struct の中では前に詰め物が入ります。CPU と MSL で同じ並び）。dispatch の値の引数も、GPU 側の引数の struct と同じ境界に揃えて渡します（`src/codegen.ts` の `gpuDispatch`）。
 - 例: [tests/metal/i64.um](../tests/metal/i64.um)（Metal）。
@@ -325,14 +328,14 @@ dispatchGroups(groupSum, n / 256, 256, mut sums, xs);
 ```
 
 - **kernel の中で使えるもの**: `group.local()` / `group.id()` / `group.size()` / `group.count()`（いずれも `u32`）、`group.barrier()`、`let t: T[N] = group.shared();`（T は `i32` / `u32` / `f32`）。これらを使う kernel は `dispatchGroups` でしか実行できず、関数として呼ぶこともできません。
-- **対応する実行先**: グループの機能は CPU と Metal で揃えています。WebGPU（wasm32）で使えるのは共有配列・barrier・kernel の中のアトミック演算までで、simdgroup の集計などの新しい機能は「WebGPU は対応しない」というコンパイルエラーになります。
+- **対応する実行先**: グループの機能は CPU と Metal で揃えています。WGSL（wgpu と wasm32 の WebGPU）で使えるのは共有配列・barrier・kernel の中のアトミック演算までです。simdgroup の集計を使う kernel は、wgpu では `dispatchGroups` が CPU で実行し `gpu.dispatchGroups` はコンパイルエラー（`webgpu-simdgroup`）、wasm32 ではコンパイルエラー（`kernel-restriction`）になります。
 - **大きさ**: グループの大きさは 1〜1024 です（それ以外と、`groups × size` が `u32` に収まらないときは停止）。WebGPU が必ず許すのは 256 まで、Metal は kernel ごとに上限があり（ふつう 1024）、超えると GPU の実行がエラーで止まります。共有配列は kernel ごとに合わせて 16 KiB まで（WebGPU が必ず用意する大きさ）です。
 - **共有配列は本体の直下で宣言し、添字で1要素ずつ読み書きします**（配列ごと写したり、関数に渡したりはできません）。範囲外の添字は最後の要素に切り詰めます。
 - **`group.barrier()` はグループの全スレッドが通る場所にだけ置けます**（GPU では、通らないスレッドがあると止まりうるため）。barrier を囲む `if` / `while` / `for` の条件は、グループの全スレッドで同じ値になる式（定数、値の引数、`group.id()` / `size()` / `count()`、Buffer の長さと、それらだけから計算した変数）に限ります。型検査が控えめに確かめ、満たさなければコンパイルエラーです。barrier を含むループの中の `break` / `continue`、barrier を使う kernel の `return`、`for...of` の中の barrier も使えません。
 - **barrier は共有配列の読み書きをそろえます。** barrier なしで、ほかのスレッドが書いた共有配列の要素を読んだときの値は決まりません（メモリは壊れません）。
 - **CPU では、グループを1つずつ実行します**（グループどうしはスレッドプールで並列）。barrier の間の文を、グループの全スレッドについて順に実行し、barrier を含む文の条件はスレッド 0 の値で決めます（上の規則により全スレッドで同じ）。barrier をまたいで生きる変数はスレッドごとの置き場所に置きます。barrier を使わない kernel は、スレッドを1つずつ最後まで実行します。GPU と CPU で、足す順番が同じ計算は同じ結果になります（`tests/metal/groups.um`）。
 - **kernel の中でも `RacyBuffer` のアトミック演算 `load` / `store` / `fetchAdd` / `compareExchange` が使えます**（要素は `i32` / `u32`、`load` / `store` は `f32` も）。書き換える演算は `mut` の RacyBuffer だけです。順序は CPU では seq_cst、GPU では relaxed（Metal の `atomic_*_explicit`、WebGPU の `atomic*`）です。kernel の中でアトミック演算を使う RacyBuffer は、GPU ではアトミックな型の配列として渡し、`b[j]` の読み書きもアトミック（relaxed）になります。
-- **simdgroup の集計**（CPU と Metal だけ。WebGPU は対応しません）: simdgroup は、グループの中の連続した 32 スレッドです（グループの大きさが 32 で割り切れなければ、最後のものは短くなります）。
+- **simdgroup の集計**（CPU と Metal だけ。WGSL は対応しません）: simdgroup は、グループの中の連続した 32 スレッドです（グループの大きさが 32 で割り切れなければ、最後のものは短くなります）。
   - `const s = group.simdSum(x);`（和）、`group.simdMin(x)`、`group.simdMax(x)`: 同じ simdgroup の全スレッドの x（`i32` / `u32` / `f32`）を集めた値。
   - `const y = group.simdShuffle(x, lane);`: 同じ simdgroup の lane 番目のスレッドの x（lane が simdgroup の外なら最後のスレッド）。
   - `group.simdLane()`（`u32`）: simdgroup の中の番号（`group.local() % 32`）。
@@ -372,7 +375,7 @@ UM_METAL=1 node src/cli.ts build x.um --target host -o x    # --target arm64-mac
 ./x
 ```
 
-- **`UM_METAL=1` はコンパイル時の指定です。** 付けないと、ネイティブのビルドは GPU を使いません（`dispatch` は CPU、`gpu.dispatch` はコンパイルエラー）。Mac 以外では `UM_METAL=1` は効きません。
+- **`UM_METAL=1` はコンパイル時の指定です。** 付けないと、ネイティブのビルドは GPU を使いません（`dispatch` は CPU、`gpu.dispatch` はコンパイルエラー。`UM_WGPU=1` のときを除く）。Mac 以外では `UM_METAL=1` は効きません。どの OS でも動く GPU の経路は [wgpu](wgpu.ja.md)（`UM_WGPU=1`）です。Mac では Metal の経路を既定とします（Buffer をコピーせずに GPU に渡せるため。理由は [wgpu での GPU 実行](wgpu.ja.md)の「バックエンドの選び方」）。
 - **kernel は MSL（Metal Shading Language）に変換されてバイナリに入り、初めて GPU で実行するときに Metal がコンパイルします。** 浮動小数点の近似は切ってあり（`MTLMathModeSafe` と精度の高い数学関数）、`tests/metal/parity.um` の kernel は CPU と同じ結果になります。macOS 15 より前では精度の指定の一部が使えず、`sqrt` の丸めが CPU と違う可能性があります（未確認）。
 - **Buffer はコピーせずに GPU と共有します**（ユニファイドメモリ）。`UM_METAL=1` のビルドでは Buffer をページ境界に確保し、そのまま GPU に渡します。
 - **GPU の準備（数十ミリ秒）は、初めて GPU を使うときまでしません。** CPU だけで済むプログラムには、この手間がかかりません。
@@ -535,11 +538,11 @@ CPU の並列実行とスレッドについては、下の「スレッド」の 
 - 64 ビットのアトミック演算は kernel の中では使えません（kernel の外だけ）。
 - GPU の仕事がシェーダのコンパイルや実行に失敗すると、プログラムは停止します（`panic: the GPU could not run a kernel (...)`）。
 
-## ブラウザでの GPU 実行（WebGPU、実験的）
+## ブラウザでの GPU 実行（WebGPU）
 
-**この経路は実験的で、今後は保守しません。** 今後足す kernel の機能は CPU と Metal だけを対象にし、WGSL では対応しない（コンパイルエラーにする）ことがあります。
+kernel を WGSL（WebGPU のシェーダ言語）にする変換（`src/wgsl.ts`）は、ネイティブの wgpu の経路（`UM_WGPU=1`。[wgpu での GPU 実行](wgpu.ja.md)）と共通の、主な GPU の経路の一つです。wgpu の経路で確かめた WGSL の修正（割り算と平方根の正しい丸め、FMA にまとめない掛け算、定数の配列など）は、ブラウザでもそのまま使われます。ブラウザの側のランタイム（`runtime/host.mjs`）は、wgpu の経路にある「Buffer を GPU に置いたままにする」仕組みや実測による自動判断を持たない、簡単なものです。
 
-wasm32 向けにビルドすると、dispatch している kernel が WGSL（WebGPU のシェーダ言語）に変換されて wasm に埋め込まれます。`runtime/host.mjs` の `instantiate` が、WebGPU でその kernel を実行します。
+wasm32 向けにビルドすると、dispatch している kernel が WGSL に変換されて wasm に埋め込まれます。`runtime/host.mjs` の `instantiate` が、WebGPU でその kernel を実行します。
 
 ```js
 import { instantiate } from './runtime/host.mjs';
@@ -550,9 +553,9 @@ await exports.main();   // GPU が使える環境では Promise が返るので�
 - **自動判断は単純です。** GPU が使えて、要素数がしきい値（既定 4096、`gpuThreshold` で変更可）以上なら GPU で実行します。実測による判断はありません。
 - **dispatch のたびに Buffer を送り、書き込み先を読み戻します。** WebGPU では CPU と GPU のメモリが別だからです。小さい仕事や、CPU と頻繁に行き来する処理では、CPU の方が速くなります。
 - **`gpu.submit` は、その場で最後まで実行して券 0 を返します。** `gpu.flags` / `gpu.commit` / `gpu.untracked` は何もしません。
-- **WGSL にできない kernel があります。** 64 ビットの整数や定数の配列を使う kernel は、`dispatch` / `gpu.submit` では CPU で実行し、`gpu.dispatch` ではコンパイルエラーになります。simdgroup の集計（`group.simdSum` など）を使う kernel はコンパイルエラーです。
+- **WGSL にできない kernel があります。** 64 ビットの整数を使う kernel は、`dispatch` / `gpu.submit` では CPU で実行し、`gpu.dispatch` ではコンパイルエラーになります。simdgroup の集計（`group.simdSum` など）を使う kernel はコンパイルエラーです。
 - **JSPI（WebAssembly の実行を一時停止して Promise を待つ機能）が必要です。** WebGPU の読み戻しは非同期でしか行えないためです。JSPI か WebGPU がない環境では GPU なしとして動き、`dispatch` は CPU で実行されます。デスクトップ版の Chrome / Edge 137 以降で使えます。
-- **確かめた範囲**: Android の Chrome 系ブラウザ（Adreno GPU）で一度実行し、3本のテストのうち2本が一致しました。残り1本は範囲外の小数→整数変換だけの不一致で、その修正は実機で再確認していません。8 / 16 ビットの整数の kernel は、Deno の WebGPU で CPU と一致することを確かめました。
+- **確かめた範囲**: 生成する WGSL は、ネイティブの wgpu（Windows の NVIDIA、Vulkan と Direct3D 12）で `tests/metal` と `tests/wgpu` の kernel が CPU と一致することを確かめています。ブラウザでの実行は、以前の版の WGSL を Android の Chrome 系ブラウザ（Adreno GPU）で一度試しただけで、今の版では確かめていません。
 - **生成される WGSL を見るには** `node src/cli.ts build x.um --emit-wgsl` とします。
 
 ## MSL（Metal Shading Language）の出力
@@ -634,7 +637,7 @@ bad.um:1:15: error[ts-feature]: type 'number' is not available
 
 - **言語**: 関数値（アロー関数、`map` / `filter` などのコールバック）、グローバル変数（最上位の `let`。値の変わらない最上位の `const` と固定長配列の定数は使えます）、`struct` の定数と可変長配列の定数、定数を関数の呼び出しで作ること（コンパイル時の関数の実行）、型の別名（`type`）、`static`、`readonly`、getter / setter、`async` / `await`、`unsafe`、interface を値の型として使うこと、ジェネリックなメソッド、ジェネリック関数の export、`switch` の case の途中の `break`、行列の演算子。
 - **配列**: ヒープを持つ要素の配列の `.clone()`、固定長配列にヒープを持つ要素を入れること、配列の一部を指すビュー、`f4` を1バイトに2個詰めること、2^32 要素以上の Buffer。
-- **kernel と GPU**: `f16` / `f8` / `f4` の Buffer と kernel、Metal 以外のネイティブの GPU、ループをまたいで dispatch をまとめること（いまは隣り合った dispatch 文だけ）。
+- **kernel と GPU**: `f16` / `f8` / `f4` の Buffer と kernel、ループをまたいで dispatch をまとめること（Metal。いまは隣り合った dispatch 文だけ）。
 - **入出力**: 上の「入出力」にある関数だけです。ファイルの一部だけの書き換え、フォルダの操作、環境変数の読み取り、ネットワークはありません。
 - **wasm32**: スレッド（合流の時点でその場で実行します）、simd128。
 
