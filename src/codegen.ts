@@ -25,6 +25,7 @@ const PANIC_PLUGIN_BUFFER = 15;
 // 11 = ウィンドウの関数をメインスレッド以外から呼んだ、12 = ウィンドウの関数の引数が正しくない（runtime/window.c が停止する）。
 // 13 = wasm の番号（モジュール・インスタンス）か配列の範囲が正しくない、14 = 使っている最中の wasm のインスタンスを解放した
 // （runtime/wasm.c が停止する）。
+// 20 = 動画・音声の番号（読み手・書き手）が正しくない、21 = 使っている最中の読み手・書き手を閉じた（runtime/media.c が停止する）。
 /** グループの大きさの上限（Metal の1グループのスレッド数の上限）。 */
 const MAX_GROUP_SIZE = 1024;
 
@@ -1090,6 +1091,8 @@ class ModuleGen {
   usesWindow = false;
   /** WebAssembly の組み込み（wasmCompile など）を使ったか。使ったときだけランタイムの宣言を出す。 */
   usesWasm = false;
+  /** 動画・音声の組み込み（mediaOpen など）を使ったか。使ったときだけランタイムの宣言を出す。 */
+  usesMedia = false;
   /** GPU で実行する kernel。名前 → 番号と、WGSL を入れたグローバル定数。 */
   gpuKernels = new Map<string, { id: number; global: string; bytes: number }>();
   /** プログラムのどこかに f16 が現れるか。現れるときだけ変換の関数を出す。 */
@@ -1699,6 +1702,21 @@ class ModuleGen {
       out.push(`declare i32 @um_wasm_invoke(i64, ptr, ${u}, ptr, ${u}, ptr, ${u}, ptr, ${u}, i32, i32) #0`);
       out.push(`declare i32 @um_wasm_read(i64, i64, ptr, ${u}, ${u}, i64, i64, i32) #0`, `declare i32 @um_wasm_write(i64, i64, ptr, ${u}, ${u}, i64, i64, i32) #0`);
       out.push('declare i64 @um_wasm_memory_size(i64, i32) #0', `declare i32 @um_wasm_wat(ptr, ${u}, ptr, ptr) #0`, 'declare void @um_wasm_error(ptr, ptr) #0');
+    }
+    // 動画・音声（runtime/media.c）。使ったときだけ宣言する。ドライバはこの宣言を見て media.c と FFmpeg をリンクする。
+    if (this.usesMedia) {
+      const u = this.usz;
+      out.push(`declare i64 @um_media_open(ptr, ${u}, i32, ptr, ${u}, i32) #0`, 'declare void @um_media_close(i64, i32) #0');
+      out.push('declare void @um_media_info_numbers(i64, ptr, ptr, i32) #0', 'declare void @um_media_info_text(i64, ptr, ptr, i32) #0');
+      out.push(`declare double @um_media_read_video(i64, double, ptr, ${u}, ${u}, i32, i32, i32, i32, i32, i32) #0`);
+      out.push(`declare i64 @um_media_read_audio(i64, double, ptr, ${u}, ${u}, i32, i32, i32) #0`, 'declare double @um_media_last_time(i64, i32) #0');
+      out.push(`declare i64 @um_media_create(ptr, ${u}, i32) #0`);
+      out.push(`declare i32 @um_media_add_video(i64, ptr, ${u}, i32, i32, i32, i32, i64, ptr, ${u}, i32) #0`);
+      out.push(`declare i32 @um_media_add_audio(i64, ptr, ${u}, i32, i32, i64, ptr, ${u}, i32) #0`);
+      out.push(`declare i32 @um_media_write_video(i64, ptr, ${u}, ${u}, i32, i32, i32, i32, i32) #0`);
+      out.push(`declare i32 @um_media_write_audio(i64, ptr, ${u}, ${u}, i32, i64, i32) #0`, 'declare i32 @um_media_finish(i64, i32) #0');
+      out.push('declare void @um_media_writer_text(i64, ptr, ptr, i32) #0', 'declare void @um_media_encoders(i32, ptr, ptr) #0');
+      out.push('declare void @um_media_error(ptr, ptr) #0', 'declare void @um_media_version(ptr, ptr) #0');
     }
     // wasm では LLVM が f16 を整数のビット列として変換関数に渡すので、ランタイム（wasm_rt.c）が直接その関数を持つ。
     out.push('declare zeroext i8 @um_f8_enc(double) #0', 'declare zeroext i8 @um_f4_enc(double) #0');
@@ -3520,6 +3538,152 @@ class FnGen {
     if (name.startsWith('wasm')) {
       this.m.usesWasm = true;
       return this.wasmCall(e, name, outSlots, optional, flag);
+    }
+    if (name.startsWith('media')) {
+      this.m.usesMedia = true;
+      return this.mediaCall(e, name, outSlots, flag);
+    }
+    throw new Error(`internal: builtin ${name}`);
+  }
+
+  /**
+   * 動画・音声の組み込み（runtime/media.c）。番号の検査はランタイムが行い、違反なら行番号つきで停止する。
+   * 失敗（開けない、壊れたデータ、Buffer の型や長さが合わないなど）は停止せず、null / false / 負の値を返す（理由は mediaError）。
+   * 画素・標本の配列は、場所・要素の数・要素のバイト数・要素の型の印（型検査の mediaArrayParam）で渡す。
+   */
+  mediaCall(e: Expr & { kind: 'call' }, name: string, outSlots: () => [string, string], flag: (call: string) => string): string {
+    const usz = this.m.usz;
+    const line = e.pos.line;
+    // 番号（0 は失敗）を i64 | null にする。
+    const handle = (call: string): string => {
+      const id = this.tmp();
+      this.emit(`${id} = call i64 ${call}`);
+      const t = llTy(e.ty!);
+      const some = this.tmp();
+      const a = this.tmp();
+      const b = this.tmp();
+      this.emit(`${some} = icmp ne i64 ${id}, 0`);
+      this.emit(`${a} = insertvalue ${t} undef, i1 ${some}, 0`);
+      this.emit(`${b} = insertvalue ${t} ${a}, i64 ${id}, 1`);
+      return b;
+    };
+    // ランタイムが書いた配列（場所と長さ）を受け取る。
+    const array = (call: (d: string, l: string) => string): string => {
+      const [d, l] = outSlots();
+      this.emit(`call void ${call(d, l)}`);
+      const data = this.tmp();
+      const len = this.tmp();
+      this.emit(`${data} = load ptr, ptr ${d}`);
+      this.emit(`${len} = load ${usz}, ptr ${l}`);
+      return this.arrayValue(data, len, len);
+    };
+    // 配列の要素のバイト数と、要素の型の印。
+    const elemInfo = (x: Expr): [string | number, number] => {
+      const t = x.ty!;
+      return [t.k === 'heap' ? this.m.sizeOf(t.elem) : 1, e.elemScalar ?? 0];
+    };
+    switch (name) {
+      case 'mediaOpen': {
+        const pathParts = this.heapParts(e.args[0].expr);
+        const kind = this.expr(e.args[1].expr);
+        const hwParts = this.heapParts(e.args[2].expr);
+        const [p, pl] = pathParts();
+        const [h, hl] = hwParts();
+        return handle(`@um_media_open(ptr ${p}, ${usz} ${pl}, i32 ${kind}, ptr ${h}, ${usz} ${hl}, i32 ${line})`);
+      }
+      case 'mediaClose': {
+        const h = this.expr(e.args[0].expr);
+        this.emit(`call void @um_media_close(i64 ${h}, i32 ${line})`);
+        return '';
+      }
+      case 'mediaInfoNumbers':
+      case 'mediaInfoText':
+      case 'mediaWriterText': {
+        const h = this.expr(e.args[0].expr);
+        const fn = name === 'mediaInfoNumbers' ? 'um_media_info_numbers' : name === 'mediaInfoText' ? 'um_media_info_text' : 'um_media_writer_text';
+        return array((d, l) => `@${fn}(i64 ${h}, ptr ${d}, ptr ${l}, i32 ${line})`);
+      }
+      case 'mediaReadVideo': {
+        const h = this.expr(e.args[0].expr);
+        const time = this.expr(e.args[1].expr);
+        const parts = this.heapParts(e.args[2].expr);
+        const [fmt, w, ht, filter] = e.args.slice(3).map((a) => this.expr(a.expr));
+        const [data, len] = parts();
+        const [size, scalar] = elemInfo(e.args[2].expr);
+        const r = this.tmp();
+        this.emit(`${r} = call double @um_media_read_video(i64 ${h}, double ${time}, ptr ${data}, ${usz} ${len}, ${usz} ${size}, i32 ${scalar}, ` +
+          `i32 ${fmt}, i32 ${w}, i32 ${ht}, i32 ${filter}, i32 ${line})`);
+        return r;
+      }
+      case 'mediaReadAudio': {
+        const h = this.expr(e.args[0].expr);
+        const time = this.expr(e.args[1].expr);
+        const parts = this.heapParts(e.args[2].expr);
+        const rate = this.expr(e.args[3].expr);
+        const [data, len] = parts();
+        const [size, scalar] = elemInfo(e.args[2].expr);
+        const r = this.tmp();
+        this.emit(`${r} = call i64 @um_media_read_audio(i64 ${h}, double ${time}, ptr ${data}, ${usz} ${len}, ${usz} ${size}, i32 ${scalar}, i32 ${rate}, i32 ${line})`);
+        return r;
+      }
+      case 'mediaLastTime': {
+        const h = this.expr(e.args[0].expr);
+        const r = this.tmp();
+        this.emit(`${r} = call double @um_media_last_time(i64 ${h}, i32 ${line})`);
+        return r;
+      }
+      case 'mediaCreateWriter': {
+        const [p, pl] = this.heapParts(e.args[0].expr)();
+        return handle(`@um_media_create(ptr ${p}, ${usz} ${pl}, i32 ${line})`);
+      }
+      case 'mediaAddVideo': {
+        const h = this.expr(e.args[0].expr);
+        const encParts = this.heapParts(e.args[1].expr);
+        const [w, ht, fn, fd, br] = e.args.slice(2, 7).map((a) => this.expr(a.expr));
+        const optParts = this.heapParts(e.args[7].expr);
+        const [ep, el] = encParts();
+        const [op, ol] = optParts();
+        return flag(`@um_media_add_video(i64 ${h}, ptr ${ep}, ${usz} ${el}, i32 ${w}, i32 ${ht}, i32 ${fn}, i32 ${fd}, i64 ${br}, ptr ${op}, ${usz} ${ol}, i32 ${line})`);
+      }
+      case 'mediaAddAudio': {
+        const h = this.expr(e.args[0].expr);
+        const encParts = this.heapParts(e.args[1].expr);
+        const [rate, ch, br] = e.args.slice(2, 5).map((a) => this.expr(a.expr));
+        const optParts = this.heapParts(e.args[5].expr);
+        const [ep, el] = encParts();
+        const [op, ol] = optParts();
+        return flag(`@um_media_add_audio(i64 ${h}, ptr ${ep}, ${usz} ${el}, i32 ${rate}, i32 ${ch}, i64 ${br}, ptr ${op}, ${usz} ${ol}, i32 ${line})`);
+      }
+      case 'mediaWriteVideo': {
+        const h = this.expr(e.args[0].expr);
+        const parts = this.heapParts(e.args[1].expr);
+        const [fmt, w, ht] = e.args.slice(2).map((a) => this.expr(a.expr));
+        const [data, len] = parts();
+        const [size, scalar] = elemInfo(e.args[1].expr);
+        return flag(`@um_media_write_video(i64 ${h}, ptr ${data}, ${usz} ${len}, ${usz} ${size}, i32 ${scalar}, i32 ${fmt}, i32 ${w}, i32 ${ht}, i32 ${line})`);
+      }
+      case 'mediaWriteAudio': {
+        const h = this.expr(e.args[0].expr);
+        const parts = this.heapParts(e.args[1].expr);
+        const count = this.expr(e.args[2].expr);
+        const [data, len] = parts();
+        const [size, scalar] = elemInfo(e.args[1].expr);
+        return flag(`@um_media_write_audio(i64 ${h}, ptr ${data}, ${usz} ${len}, ${usz} ${size}, i32 ${scalar}, i64 ${count}, i32 ${line})`);
+      }
+      case 'mediaFinishWriter': {
+        const h = this.expr(e.args[0].expr);
+        return flag(`@um_media_finish(i64 ${h}, i32 ${line})`);
+      }
+      case 'mediaEncoderList': {
+        const probe = this.expr(e.args[0].expr);
+        const p32 = this.tmp();
+        this.emit(`${p32} = zext i1 ${probe} to i32`);
+        return array((d, l) => `@um_media_encoders(i32 ${p32}, ptr ${d}, ptr ${l})`);
+      }
+      case 'mediaError':
+        return array((d, l) => `@um_media_error(ptr ${d}, ptr ${l})`);
+      case 'mediaVersion':
+        return array((d, l) => `@um_media_version(ptr ${d}, ptr ${l})`);
     }
     throw new Error(`internal: builtin ${name}`);
   }

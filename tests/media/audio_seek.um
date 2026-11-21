@@ -1,0 +1,95 @@
+// 音のシークが標本単位で合っているか。全体を順に読んだものと、途中の時刻から読んだものを比べ、
+// 素材と同じ標本化周波数（44.1 kHz）ではずれが 0 標本、変換する（48 kHz）ときは ±1 標本（約 21 マイクロ秒）以内。
+// 最初より前の時刻は無音で埋める。
+//
+// expect: 44100 Hz 0.25 s: offset 0, close
+// expect: 44100 Hz 1.5 s: offset 0, close
+// expect: 44100 Hz 3.3 s: offset 0, close
+// expect: 44100 Hz 0.75 s: offset 0, close
+// expect: 44100 Hz -0.1 s -> 0 s, starts at 0
+// expect: 44100 Hz 100 s: end
+// expect: 48000 Hz 0.25 s: offset 0, close
+// expect: 48000 Hz 1.5 s: offset 0, close
+// expect: 48000 Hz 3.3 s: offset 0, close
+// expect: 48000 Hz 0.75 s: offset 0, close
+// expect: 48000 Hz -0.1 s -> 0 s, starts at 0
+// expect: 48000 Hz 100 s: end
+
+export function main(): i32 {
+  if (check(44100, false) != 0) {
+    return 1;
+  }
+  return check(48000, true);
+}
+
+function check(rate: i32, loose: bool): i32 {
+  let all: f32[] = [];
+  match (mediaOpenAudio("clip.mp4")) {
+    Result.Err(why) => {
+      print(why);
+      return 1;
+    }
+    Result.Ok(r) => {
+      let buf = new Buffer<f32>(10000);
+      while (true) {
+        match (mediaNextSamples(r, mut buf, rate)) {
+          MediaAudioRead.Samples(_, n) => {
+            for (let k = 0; k < n * 2; k++) {
+              all.push(buf[k]);
+            }
+          }
+          MediaAudioRead.End => { break; }
+          MediaAudioRead.Failed(why) => {
+            print(why);
+            break;
+          }
+        }
+      }
+      let part = new Buffer<f32>(2000);
+      const times = [0.25, 1.5, 3.3, 0.75];
+      for (const t of times) {
+        match (mediaSamples(r, t, mut part, rate)) {
+          MediaAudioRead.Samples(at, n) => {
+            // 順に読んだものの中で、いちばんよく合うずれを ±20 標本の中から探す。
+            const base = (t * (rate as f64) + 0.5) as i32;
+            let best = 0;
+            let bestErr = 1.0e9;
+            for (let d = -20; d <= 20; d++) {
+              let err = 0.0;
+              for (let k = 100; k < 900; k++) {
+                const diff = (part[k * 2] - all[(base + d + k) * 2]) as f64;
+                err += diff * diff;
+              }
+              if (err < bestErr) {
+                bestErr = err;
+                best = d;
+              }
+            }
+            let close = "close";
+            if (bestErr > 0.01) {
+              close = `far (${bestErr})`;
+            }
+            if (loose && (best == 1 || best == -1)) {
+              best = 0;  // 変換のときは ±1 標本まで許す
+            }
+            print(`${rate} Hz ${at} s: offset ${best}, ${close}`);
+          }
+          MediaAudioRead.End => { print(`${rate} Hz ${t} s: end`); }
+          MediaAudioRead.Failed(why) => { print(`${t} s: ${why}`); }
+        }
+      }
+      match (mediaSamples(r, -0.1, mut part, rate)) {
+        MediaAudioRead.Samples(at, _) => { print(`${rate} Hz -0.1 s -> ${at} s, starts at 0`); }
+        MediaAudioRead.End => { print(`${rate} Hz -0.1 s: end`); }
+        MediaAudioRead.Failed(why) => { print(why); }
+      }
+      match (mediaSamples(r, 100.0, mut part, rate)) {
+        MediaAudioRead.Samples(at, _) => { print(`${rate} Hz 100 s: got samples at ${at}`); }
+        MediaAudioRead.End => { print(`${rate} Hz 100 s: end`); }
+        MediaAudioRead.Failed(why) => { print(why); }
+      }
+      mediaClose(r);
+    }
+  }
+  return 0;
+}

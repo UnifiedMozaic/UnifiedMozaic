@@ -1,0 +1,174 @@
+// 読めない・壊れたファイルや、合わない引数では止まらず、理由を返す。
+// 理由の文は FFmpeg の版で変わりうるので、決まった語を含むかだけを確かめる。
+//
+// expect: missing.mp4: failed (No such file)
+// expect: garbage.mp4: failed
+// expect: broken.mp4 probe: failed
+// expect: clip.mp4 probe has audio: ok
+// expect: Argb32 into Buffer<u8>: pixels in Argb32 need a Buffer<u32>
+// expect: short Buffer: the Buffer is too short for 320x240 Rgba8 (it needs 307200 elements)
+// expect: video reader read as audio: this reader was not opened for audio (use mediaOpenAudio)
+// expect: after the failures: ok
+// expect: unknown hwaccel: unknown hardware decoder 'warp-drive' (use none, auto, d3d11va, dxva2, cuda, qsv, videotoolbox, vaapi, vulkan, ...)
+// expect: bframes.mp4 has no audio: failed (has no audio stream)
+// expect: bad container: cannot tell the container format from the file name 'out.nothing' (use .mp4, .mov, .mkv, ...)
+// expect: unknown encoder: no video encoder named 'warp264' in this FFmpeg build (see mediaEncoders)
+// expect: unknown option: the encoder mpeg4 has no option 'warp'
+// expect: write before adding: the writer has no video stream (call mediaAddVideo first)
+// expect: finish without streams: the writer has no streams (call mediaAddVideo or mediaAddAudio first)
+// expect: wrong frame type: pixels in Rgba8 need a Buffer<u8>
+// expect: mpeg4 into mp4 after a bad frame: ok
+
+function contains(s: string, part: string): bool {
+  if (part.length > s.length) {
+    return false;
+  }
+  for (let i: usize = 0; i + part.length <= s.length; i++) {
+    let same = true;
+    for (let k: usize = 0; k < part.length; k++) {
+      if (s[i + k] != part[k]) {
+        same = false;
+        break;
+      }
+    }
+    if (same) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function failsWith(label: string, r: Result<i64, string>, part: string): void {
+  match (r) {
+    Result.Ok(h) => {
+      print(label + ": opened?!");
+      mediaClose(h);
+    }
+    Result.Err(why) => {
+      if (why.length == 0) {
+        print(label + ": failed without a reason");
+      } else if (part.length == 0) {
+        print(label + ": failed");
+      } else if (contains(why, part)) {
+        print(label + ": failed (" + part + ")");
+      } else {
+        print(label + ": failed, but the reason was: " + why);
+      }
+    }
+  }
+}
+
+function showRead(label: string, x: MediaRead): void {
+  match (x) {
+    MediaRead.Frame(_) => { print(label + ": ok"); }
+    MediaRead.End => { print(label + ": end"); }
+    MediaRead.Failed(why) => { print(label + ": " + why); }
+  }
+}
+
+function showWrite(label: string, err: string | null): void {
+  if (err == null) {
+    print(label + ": ok");
+  } else {
+    print(label + ": " + err);
+  }
+}
+
+export function main(): i32 {
+  failsWith("missing.mp4", mediaOpenVideo("missing.mp4", "none"), "No such file");
+  failsWith("garbage.mp4", mediaOpenVideo("garbage.mp4", "none"), "");
+  match (mediaProbe("broken.mp4")) {
+    Result.Ok(_) => { print("broken.mp4 probe: opened?!"); }
+    Result.Err(why) => {
+      print("broken.mp4 probe: failed");
+      eprint("broken.mp4: " + why);
+    }
+  }
+  // 情報だけの読み手（mediaProbe）は音も映像も見るだけ。
+  match (mediaProbe("clip.mp4")) {
+    Result.Ok(i) => { print(`clip.mp4 probe has audio: ${if_ok(i.hasAudio)}`); }
+    Result.Err(why) => { print("clip.mp4: " + why); }
+  }
+  match (mediaOpenVideo("clip.mp4", "none")) {
+    Result.Err(why) => { print("cannot open clip.mp4: " + why); }
+    Result.Ok(r) => {
+      let wrong = new Buffer<u8>(320 * 240 * 4);
+      showRead("Argb32 into Buffer<u8>", mediaFrame(r, 0.0, mut wrong, MediaPixels.Argb32, 0, 0));
+      let short = new Buffer<u8>(320 * 240 * 4 - 1);
+      showRead("short Buffer", mediaFrame(r, 0.0, mut short, MediaPixels.Rgba8, 0, 0));
+      let samples = new Buffer<f32>(1024);
+      match (mediaSamples(r, 0.0, mut samples, 48000)) {
+        MediaAudioRead.Samples(_, _) => { print("video reader read as audio: ok?!"); }
+        MediaAudioRead.End => { print("video reader read as audio: end"); }
+        MediaAudioRead.Failed(why) => { print("video reader read as audio: " + why); }
+      }
+      // 失敗のあとも、同じ読み手で続けて読める。
+      showRead("after the failures", mediaFrame(r, 1.0, mut wrong, MediaPixels.Rgba8, 0, 0));
+      mediaClose(r);
+    }
+  }
+  match (mediaOpenVideo("clip.mp4", "warp-drive")) {
+    Result.Ok(r) => { print("unknown hwaccel: opened?!"); mediaClose(r); }
+    Result.Err(why) => { print("unknown hwaccel: " + why); }
+  }
+  failsWith("bframes.mp4 has no audio", mediaOpenAudio("bframes.mp4"), "has no audio stream");
+
+  // 書く側。
+  match (mediaCreate("out.nothing")) {
+    Result.Ok(w) => { print("bad container: created?!"); mediaFinish(w); }
+    Result.Err(why) => { print("bad container: " + why); }
+  }
+  match (mediaCreate("bad.mp4")) {
+    Result.Err(why) => { print("cannot create bad.mp4: " + why); }
+    Result.Ok(w) => {
+      let v = new MediaVideoSettings();
+      v.width = 64;
+      v.height = 48;
+      v.encoder = "warp264";
+      match (mediaAddVideoStream(w, v)) {
+        Result.Ok(_) => { print("unknown encoder: added?!"); }
+        Result.Err(why) => { print("unknown encoder: " + why); }
+      }
+      v.encoder = "mpeg4";
+      v.options = "warp=9";
+      match (mediaAddVideoStream(w, v)) {
+        Result.Ok(_) => { print("unknown option: added?!"); }
+        Result.Err(why) => { print("unknown option: " + why); }
+      }
+      let px = new Buffer<u8>(64 * 48 * 4);
+      showWrite("write before adding", mediaWriteFrame(w, px, MediaPixels.Rgba8, 64, 48));
+      showWrite("finish without streams", mediaFinish(w));
+    }
+  }
+  match (mediaCreate("good.mp4")) {
+    Result.Err(why) => { print("cannot create good.mp4: " + why); }
+    Result.Ok(w) => {
+      let v = new MediaVideoSettings();
+      v.width = 64;
+      v.height = 48;
+      v.encoder = "mpeg4";
+      match (mediaAddVideoStream(w, v)) {
+        Result.Ok(_) => {}
+        Result.Err(why) => { print("mpeg4: " + why); }
+      }
+      let wrong = new Buffer<u32>(64 * 48);
+      showWrite("wrong frame type", mediaWriteFrame(w, wrong, MediaPixels.Rgba8, 64, 48));
+      let px = new Buffer<u8>(64 * 48 * 4);
+      for (let k = 0; k < 5; k++) {
+        const e = mediaWriteFrame(w, px, MediaPixels.Rgba8, 64, 48);
+        if (e != null) {
+          print("mpeg4 frame: " + e);
+        }
+      }
+      showWrite("mpeg4 into mp4 after a bad frame", mediaFinish(w));
+    }
+  }
+  return 0;
+}
+
+function if_ok(b: bool): string {
+  if (b) {
+    return "ok";
+  }
+  return "no audio";
+}

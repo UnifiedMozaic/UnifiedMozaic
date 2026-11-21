@@ -99,7 +99,8 @@ export type Expr = { pos: Pos; ty?: Ty; /** コンパイラが enum / match か�
   | { kind: 'ident'; name: string; sym?: Sym }
   | { kind: 'unary'; op: string; expr: Expr }
   | { kind: 'binary'; op: string; left: Expr; right: Expr }
-  | { kind: 'call'; callee: string; args: Arg[] }
+  // elemScalar: 動画・音声の組み込みに渡す配列の要素の型の印（型検査が入れる。src/checker.ts の mediaArrayParam）。
+  | { kind: 'call'; callee: string; args: Arg[]; elemScalar?: number }
   | { kind: 'mcall'; recv: Expr; name: string; args: Arg[]; key?: string }
   | { kind: 'new'; cls: string; args: Arg[]; typeArgs?: TypeNode[] }
   | { kind: 'newArray'; elemNode: TypeNode; args: Arg[]; buffer?: boolean; racy?: boolean }

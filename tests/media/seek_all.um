@@ -1,0 +1,58 @@
+// すべてのコマを、混ぜた順にシークして取り出す（ソフトウェアと、使えればハードウェアの展開 "auto"）。
+// どのコマも、指定の時刻のコマ（色に入れた番号が一致する）が返ること。コマの途中の時刻（+ 1/3 コマ）も試す。
+// ハードウェアの展開がない環境では "auto" はソフトウェアに戻るので、結果は同じ。
+//
+// expect: clip.mp4 none: 100 of 100 frames found
+// expect: clip.mp4 auto: 100 of 100 frames found
+// expect: bframes.mp4 none: 75 of 75 frames found
+// expect: bframes.mp4 auto: 75 of 75 frames found
+
+function numberOf(px: Buffer<u8>, w: i32, h: i32): i32 {
+  const at = ((h / 2) * w + w / 2) * 4;
+  return (px[at] as i32) / 16 + (px[at + 1] as i32) / 16 * 16;
+}
+
+function seekAll(path: string, hw: string, frames: i32, fps: f64): void {
+  match (mediaOpenVideo(path, hw)) {
+    Result.Err(why) => { print("cannot open: " + why); }
+    Result.Ok(r) => {
+      const info = mediaInfoOf(r);
+      eprint(`${path}: decoding with ${info.hwaccel}`);
+      const w = info.width;
+      const h = info.height;
+      let px = new Buffer<u8>(w * h * 4);
+      let found = 0;
+      // 37 は frames と互いに素なので、k * 37 mod frames は 0..frames-1 を一度ずつ混ぜた順に回る。
+      for (let k = 0; k < frames; k++) {
+        const n = (k * 37) % frames;
+        const t = (n as f64) / fps + (if_odd(k) as f64) / (3.0 * fps);
+        match (mediaFrame(r, t, mut px, MediaPixels.Rgba8, 0, 0)) {
+          MediaRead.Frame(_) => {
+            const got = numberOf(px, w, h);
+            if (got == n) {
+              found += 1;
+            } else {
+              eprint(`${path} ${hw}: at ${t} s got frame ${got}, wanted ${n}`);
+            }
+          }
+          MediaRead.End => { eprint(`${path} ${hw}: at ${t} s got the end`); }
+          MediaRead.Failed(why) => { eprint(`${path} ${hw}: at ${t} s failed: ${why}`); }
+        }
+      }
+      print(`${path} ${hw}: ${found} of ${frames} frames found`);
+      mediaClose(r);
+    }
+  }
+}
+
+function if_odd(k: i32): i32 {
+  return k % 2;
+}
+
+export function main(): i32 {
+  seekAll("clip.mp4", "none", 100, 25.0);
+  seekAll("clip.mp4", "auto", 100, 25.0);
+  seekAll("bframes.mp4", "none", 75, 25.0);
+  seekAll("bframes.mp4", "auto", 75, 25.0);
+  return 0;
+}

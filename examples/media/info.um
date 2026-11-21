@@ -1,0 +1,36 @@
+// 動画・音声のファイルの情報を表示する。
+// 使い方: info [ファイル]（省略すると clip.mp4。テストでは tests/run.ts が作る素材）
+//
+// expect: format: mov,mp4,m4a,3gp,3g2,mj2
+// expect: video: h264 320x240, 25/1 fps, 100 frames, 4 s
+// expect: pixels: yuv420p, 8 bit, rotation 0, sample aspect 1:1
+// expect: audio: aac 44100 Hz, 2 channels (stereo)
+
+export function main(): i32 {
+  let path = "clip.mp4";
+  const a = args();
+  if (a.length > 0) {
+    path = a[0].clone();
+  }
+  match (mediaProbe(path)) {
+    Result.Err(why) => {
+      eprint("cannot open: " + why);
+      return 1;
+    }
+    Result.Ok(i) => {
+      print(`format: ${i.format}`);
+      if (i.hasVideo) {
+        print(`video: ${i.videoCodec} ${i.width}x${i.height}, ${i.fpsNum}/${i.fpsDen} fps, ${i.frameCount} frames, ${i.videoDuration} s`);
+        print(`pixels: ${i.pixelFormat}, ${i.bitDepth} bit, rotation ${i.rotation}, sample aspect ${i.sarNum}:${i.sarDen}`);
+        // 色の情報（素材によっては書いていない: unknown）。
+        eprint(`color: matrix ${i.colorSpace}, primaries ${i.colorPrimaries}, transfer ${i.colorTransfer}, range ${i.colorRange}, profile ${i.videoProfile}`);
+      }
+      if (i.hasAudio) {
+        print(`audio: ${i.audioCodec} ${i.sampleRate} Hz, ${i.channels} channels (${i.channelLayout})`);
+      }
+      eprint(`duration: ${i.duration} s, ${i.bitRate} bit/s`);
+    }
+  }
+  eprint(mediaVersion());
+  return 0;
+}

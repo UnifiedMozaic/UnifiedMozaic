@@ -1,0 +1,108 @@
+// コマ単位で正確なシーク。素材は色にコマの番号を入れてある（tests/run.ts の makeMediaClips）。
+// clip.mp4: H.264、25 コマ毎秒、キーフレームは 25 コマごと。bframes.mp4: MPEG-4 の B フレームつき、キーフレームは 12 コマごと。
+// 時刻を飛び飛びに指定し（前へも後ろへも、キーフレームの直前・直後、コマの途中、最後のコマ、終わりより後ろ）、
+// 返ったコマの番号と時刻を確かめる。シークのあとの mediaNextFrame は、その次のコマを返す。
+//
+// expect: clip.mp4 2 -> 50 at 2
+// expect: clip.mp4 0 -> 0 at 0
+// expect: clip.mp4 3.96 -> 99 at 3.96
+// expect: clip.mp4 0.999 -> 24 at 0.96
+// expect: clip.mp4 1 -> 25 at 1
+// expect: clip.mp4 1.03 -> 25 at 1
+// expect: clip.mp4 0.5 -> 12 at 0.48
+// expect: clip.mp4 3.03 -> 75 at 3
+// expect: clip.mp4 1.52 -> 38 at 1.52
+// expect: clip.mp4 1.56 -> 39 at 1.56
+// expect: clip.mp4 1.6 -> 40 at 1.6
+// expect: clip.mp4 1.52 -> 38 at 1.52
+// expect: clip.mp4 10 -> end
+// expect: clip.mp4 next after 2.4: 61 62 63
+// expect: bframes.mp4 1.32 -> 33 at 1.32
+// expect: bframes.mp4 0.44 -> 11 at 0.44
+// expect: bframes.mp4 0.48 -> 12 at 0.48
+// expect: bframes.mp4 2.96 -> 74 at 2.96
+// expect: bframes.mp4 0.04 -> 1 at 0.04
+// expect: bframes.mp4 1.99 -> 49 at 1.96
+// expect: bframes.mp4 next after 0.4: 11 12 13
+// expect: scaled 64x48 frame 30, 1x1 frame 31
+
+function numberOf(px: Buffer<u8>, w: i32, h: i32): i32 {
+  const at = ((h / 2) * w + w / 2) * 4;
+  return (px[at] as i32) / 16 + (px[at + 1] as i32) / 16 * 16;
+}
+
+function check(path: string, times: f64[]): void {
+  match (mediaOpenVideo(path, "none")) {
+    Result.Err(why) => { print("cannot open: " + why); }
+    Result.Ok(r) => {
+      const info = mediaInfoOf(r);
+      const w = info.width;
+      const h = info.height;
+      let px = new Buffer<u8>(w * h * 4);
+      for (const t of times) {
+        match (mediaFrame(r, t, mut px, MediaPixels.Rgba8, 0, 0)) {
+          MediaRead.Frame(at) => { print(`${path} ${t} -> ${numberOf(px, w, h)} at ${at}`); }
+          MediaRead.End => { print(`${path} ${t} -> end`); }
+          MediaRead.Failed(why) => { print(`${path} ${t} -> failed: ${why}`); }
+        }
+      }
+      mediaClose(r);
+    }
+  }
+}
+
+function nextAfter(path: string, t: f64): void {
+  match (mediaOpenVideo(path, "none")) {
+    Result.Err(why) => { print("cannot open: " + why); }
+    Result.Ok(r) => {
+      const info = mediaInfoOf(r);
+      const w = info.width;
+      const h = info.height;
+      let px = new Buffer<u8>(w * h * 4);
+      let line = `${path} next after ${t}:`;
+      match (mediaFrame(r, t, mut px, MediaPixels.Rgba8, 0, 0)) {
+        MediaRead.Frame(_) => {}
+        MediaRead.End => { line = line + " end"; }
+        MediaRead.Failed(why) => { line = line + " failed " + why; }
+      }
+      for (let k = 0; k < 3; k++) {
+        match (mediaNextFrame(r, mut px, MediaPixels.Rgba8, 0, 0)) {
+          MediaRead.Frame(_) => { line = line + ` ${numberOf(px, w, h)}`; }
+          MediaRead.End => { line = line + " end"; }
+          MediaRead.Failed(why) => { line = line + " failed " + why; }
+        }
+      }
+      print(line);
+      mediaClose(r);
+    }
+  }
+}
+
+export function main(): i32 {
+  check("clip.mp4", [2.0, 0.0, 3.96, 0.999, 1.0, 1.03, 0.5, 3.03, 1.52, 1.56, 1.6, 1.52, 10.0]);
+  nextAfter("clip.mp4", 2.4);
+  check("bframes.mp4", [1.32, 0.44, 0.48, 2.96, 0.04, 1.99]);
+  nextAfter("bframes.mp4", 0.4);
+  // 拡大縮小して受け取る。
+  match (mediaOpenVideo("clip.mp4", "none")) {
+    Result.Err(why) => { print("cannot open: " + why); }
+    Result.Ok(r) => {
+      let small = new Buffer<u8>(64 * 48 * 4);
+      let one = new Buffer<u8>(4);
+      let line = "scaled";
+      match (mediaFrameScaled(r, 1.2, mut small, MediaPixels.Rgba8, 64, 48, MediaScale.Lanczos)) {
+        MediaRead.Frame(_) => { line = line + ` 64x48 frame ${numberOf(small, 64, 48)}`; }
+        MediaRead.End => { line = line + " end"; }
+        MediaRead.Failed(why) => { line = line + " failed " + why; }
+      }
+      match (mediaFrameScaled(r, -1.0, mut one, MediaPixels.Rgba8, 1, 1, MediaScale.Fast)) {
+        MediaRead.Frame(_) => { line = line + `, 1x1 frame ${numberOf(one, 1, 1)}`; }
+        MediaRead.End => { line = line + " end"; }
+        MediaRead.Failed(why) => { line = line + " failed " + why; }
+      }
+      print(line);
+      mediaClose(r);
+    }
+  }
+  return 0;
+}

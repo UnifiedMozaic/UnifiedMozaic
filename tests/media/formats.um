@@ -1,0 +1,91 @@
+// 同じコマ（clip.mp4 の 10 番目: R = 10 * 16 + 8 = 168、G = 8、B = 128）を、すべての画素の形式で受け取って比べる。
+// 圧縮と色の変換で値は少し揺れるので、±6（8 ビット）の範囲で確かめる。YUV の形式は素材の値のまま（ffmpeg が RGB から
+// BT.601 の限られた範囲で作った値。Yuv420p10 は 4 で割って 8 ビットにして比べる）。
+//
+// expect: Rgba8 168 8 128 255
+// expect: Argb32 168 8 128 255
+// expect: RgbaF32 168 8 128 255
+// expect: vec4 168 8 128 255
+// expect: Rgba16 168 8 128 255
+// expect: Yuv420p8 y 76 u 157 v 190
+// expect: Yuv420p10 y 76 u 157 v 190
+// expect: odd size 33x17 Yuv420p8: 867 bytes, Rgba8: 2244 bytes
+
+// 期待の値に近ければ期待の値を、遠ければ実際の値を出す（違いが分かるように）。
+function near(v: i32, want: i32): i32 {
+  if (v >= want - 6 && v <= want + 6) {
+    return want;
+  }
+  return v;
+}
+
+function show(name: string, r: i32, g: i32, b: i32, a: i32): void {
+  print(`${name} ${near(r, 168)} ${near(g, 8)} ${near(b, 128)} ${a}`);
+}
+
+export function main(): i32 {
+  match (mediaOpenVideo("clip.mp4", "none")) {
+    Result.Err(why) => {
+      print("cannot open: " + why);
+      return 1;
+    }
+    Result.Ok(r) => {
+      const w = 320;
+      const h = 240;
+      const t = 0.4;
+      const c = (h / 2) * w + w / 2;
+      let b8 = new Buffer<u8>(w * h * 4);
+      mediaFrame(r, t, mut b8, MediaPixels.Rgba8, 0, 0);
+      show("Rgba8", b8[c * 4] as i32, b8[c * 4 + 1] as i32, b8[c * 4 + 2] as i32, b8[c * 4 + 3] as i32);
+
+      let b32 = new Buffer<u32>(w * h);
+      mediaFrame(r, t, mut b32, MediaPixels.Argb32, 0, 0);
+      const p = b32[c];
+      show("Argb32", ((p >> 16) & 255) as i32, ((p >> 8) & 255) as i32, (p & 255) as i32, (p >> 24) as i32);
+
+      let bf = new Buffer<f32>(w * h * 4);
+      mediaFrame(r, t, mut bf, MediaPixels.RgbaF32, 0, 0);
+      show("RgbaF32", (bf[c * 4] * 255.0 + 0.5) as i32, (bf[c * 4 + 1] * 255.0 + 0.5) as i32, (bf[c * 4 + 2] * 255.0 + 0.5) as i32,
+        (bf[c * 4 + 3] * 255.0 + 0.5) as i32);
+
+      let bv = new Buffer<vec4<f32>>(w * h);
+      mediaFrame(r, t, mut bv, MediaPixels.RgbaF32, 0, 0);
+      const v = bv[c];
+      show("vec4", (v.x * 255.0 + 0.5) as i32, (v.y * 255.0 + 0.5) as i32, (v.z * 255.0 + 0.5) as i32, (v.w * 255.0 + 0.5) as i32);
+
+      let b16 = new Buffer<u16>(w * h * 4);
+      mediaFrame(r, t, mut b16, MediaPixels.Rgba16, 0, 0);
+      show("Rgba16", (b16[c * 4] / 257) as i32, (b16[c * 4 + 1] / 257) as i32, (b16[c * 4 + 2] / 257) as i32, (b16[c * 4 + 3] / 257) as i32);
+
+      // YUV 4:2:0: Y が w*h、U と V が (w/2)*(h/2) ずつ。
+      const cw = w / 2;
+      const ch = h / 2;
+      const uc = (h / 4) * cw + w / 4;
+      let y8 = new Buffer<u8>(w * h + 2 * cw * ch);
+      mediaFrame(r, t, mut y8, MediaPixels.Yuv420p8, 0, 0);
+      print(`Yuv420p8 y ${near(y8[c] as i32, 76)} u ${near(y8[w * h + uc] as i32, 157)} v ${near(y8[w * h + cw * ch + uc] as i32, 190)}`);
+
+      let y10 = new Buffer<u16>(w * h + 2 * cw * ch);
+      mediaFrame(r, t, mut y10, MediaPixels.Yuv420p10, 0, 0);
+      print(`Yuv420p10 y ${near((y10[c] / 4) as i32, 76)} u ${near((y10[w * h + uc] / 4) as i32, 157)} v ${near((y10[w * h + cw * ch + uc] / 4) as i32, 190)}`);
+
+      // 奇数の大きさ（4:2:0 の色の面は切り上げ: 17x9）。ちょうどの長さで足りること。
+      let odd = new Buffer<u8>(33 * 17 + 2 * 17 * 9);
+      let oddRgba = new Buffer<u8>(33 * 17 * 4);
+      let line = "odd size 33x17";
+      match (mediaFrame(r, t, mut odd, MediaPixels.Yuv420p8, 33, 17)) {
+        MediaRead.Frame(_) => { line = line + ` Yuv420p8: ${odd.length} bytes`; }
+        MediaRead.End => { line = line + " end"; }
+        MediaRead.Failed(why) => { line = line + " failed: " + why; }
+      }
+      match (mediaFrame(r, t, mut oddRgba, MediaPixels.Rgba8, 33, 17)) {
+        MediaRead.Frame(_) => { line = line + `, Rgba8: ${oddRgba.length} bytes`; }
+        MediaRead.End => { line = line + " end"; }
+        MediaRead.Failed(why) => { line = line + " failed: " + why; }
+      }
+      print(line);
+      mediaClose(r);
+    }
+  }
+  return 0;
+}

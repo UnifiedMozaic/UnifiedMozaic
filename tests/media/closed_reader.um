@@ -1,0 +1,15 @@
+// 閉じた読み手の番号を使うと停止する（番号の誤用はプログラムの誤り）。
+// panic: invalid media call (an unknown or closed reader / writer)
+// expect: opened
+export function main(): i32 {
+  match (mediaOpenVideo("clip.mp4", "none")) {
+    Result.Err(why) => { print(why); }
+    Result.Ok(r) => {
+      print("opened");
+      mediaClose(r);
+      const info = mediaInfoOf(r);
+      print(`${info.width}`);
+    }
+  }
+  return 0;
+}

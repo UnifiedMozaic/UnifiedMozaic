@@ -20,13 +20,16 @@
 //   tests/panics/*.um  `// panic: メッセージ` で停止することを確認。
 //   examples/wasm/*.um WebAssembly の組み込み（wasmtime。ネイティブだけ）。`// expect:` と照合する。
 //   tests/wasm/*.um    同じく。`// expect:` か `// panic:` と照合する。wasmtime の C API が見つからなければ飛ばす。
+//   examples/media/*.um 動画・音声の組み込み（FFmpeg。ネイティブだけ）。`// expect:` と照合する。
+//   tests/media/*.um   同じく。`// expect:` か `// panic:` と照合する。素材は ffmpeg のコマンドで一時フォルダに作る
+//                      （makeMediaClips）。FFmpeg のライブラリか ffmpeg のコマンドが見つからなければ飛ばす。
 
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { CompileError, CompileErrors } from '../src/diag.ts';
-import { build, CLANG, compileMsl, compileToLL, compileWgsl, exePath, wasmtimeAvailable } from '../src/driver.ts';
+import { build, CLANG, compileMsl, compileToLL, compileWgsl, exePath, ffmpegAvailable, wasmtimeAvailable } from '../src/driver.ts';
 import { smallMagnitudes } from '../src/codegen.ts';
 // @ts-ignore 型定義のないJSモジュール
 import { instantiate, UmPanic } from '../runtime/host.mjs';
@@ -815,6 +818,70 @@ if (!wasmtimeAvailable()) {
       } else if (n.panic) fail(`${f} [host]`, n.panic);
       else if (same(n.out, want)) ok(`${f} [host]`);
       else fail(`${f} [host]`, `expected: ${want.join(' ')}\nactual:   ${n.out.join(' ')}`);
+    } catch (e) {
+      fail(`${f} [host]`, String(e));
+    }
+  }
+}
+
+/**
+ * 素材を作る ffmpeg のコマンド。UM_FFMPEG_HOME の bin にあればそれ、なければ PATH の ffmpeg。
+ * 素材を作るためだけに使う（プログラムにリンクするのはライブラリのほう）。
+ */
+function ffmpegCommand(): string | null {
+  const home = process.env.UM_FFMPEG_HOME;
+  const cands = home ? [join(home, 'bin', windows ? 'ffmpeg.exe' : 'ffmpeg'), 'ffmpeg'] : ['ffmpeg'];
+  for (const c of cands) {
+    if (spawnSync(c, ['-hide_banner', '-version'], { stdio: 'ignore' }).status === 0) return c;
+  }
+  return null;
+}
+
+/**
+ * tests/media と examples/media が読む素材を tmp に作る。どのコマも、画素の色にコマの番号 N を入れてある
+ * （R = (N mod 16) * 16 + 8、G = floor(N / 16) * 16 + 8、B = 128）。読んだコマの番号を色から確かめられる。
+ *   clip.mp4     H.264（使える符号器）320x240、25 コマ毎秒、4 秒（100 コマ）、キーフレームは 1 秒ごと。音は 440 Hz、44.1 kHz のステレオの AAC
+ *   bframes.mp4  MPEG-4 Part 2 の B フレームつき（表示の順と復号の順が違う）、160x120、25 コマ毎秒、3 秒、キーフレームは 12 コマごと
+ *   ten.mov      ProRes 422 の 10 ビット、64x64、24 コマ毎秒、1 秒
+ *   broken.mp4   clip.mp4 の先頭の 3000 バイトだけ（途中で切れたファイル）
+ *   garbage.mp4  動画ではないバイト列
+ */
+function makeMediaClips(ffmpeg: string): void {
+  const enc = execFileSync(ffmpeg, ['-hide_banner', '-encoders'], { encoding: 'utf8' });
+  const h264 = ['libopenh264', 'libx264', 'h264_mf', 'h264_videotoolbox'].find((e) => new RegExp(`\\s${e}\\s`).test(enc));
+  const coded = (size: string, rate: number) =>
+    `color=black:s=${size}:r=${rate},format=rgb24,geq=r='mod(N\\,16)*16+8':g='floor(N/16)*16+8':b=128`;
+  const run = (args: string[]) => execFileSync(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-y', ...args], { cwd: tmp, stdio: ['ignore', 'ignore', 'inherit'] });
+  run(['-f', 'lavfi', '-i', coded('320x240', 25), '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=44100', '-t', '4',
+    '-c:v', h264 ?? 'mpeg4', '-g', '25', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ac', '2', '-b:a', '128k', '-shortest', 'clip.mp4']);
+  run(['-f', 'lavfi', '-i', coded('160x120', 25), '-t', '3', '-c:v', 'mpeg4', '-bf', '2', '-g', '12', '-q:v', '2', '-pix_fmt', 'yuv420p', 'bframes.mp4']);
+  run(['-f', 'lavfi', '-i', coded('64x64', 24), '-t', '1', '-c:v', 'prores_ks', '-profile:v', '2', '-pix_fmt', 'yuv422p10le', 'ten.mov']);
+  writeFileSync(join(tmp, 'broken.mp4'), readFileSync(join(tmp, 'clip.mp4')).subarray(0, 3000));
+  writeFileSync(join(tmp, 'garbage.mp4'), Buffer.from('this is not a video file
+'.repeat(200)));
+}
+
+// 動画・音声の組み込み（FFmpeg。ネイティブだけ）。
+const ffmpegCli = ffmpegAvailable() ? ffmpegCommand() : null;
+if (!ffmpegAvailable()) {
+  console.log('note: FFmpeg のライブラリが見つからないため、examples/media と tests/media は省略します（UM_FFMPEG_HOME を設定してください。docs/media.ja.md）');
+} else if (!ffmpegCli) {
+  console.log('note: 素材を作る ffmpeg のコマンドが見つからないため、examples/media と tests/media は省略します');
+} else {
+  makeMediaClips(ffmpegCli);
+  for (const f of [...files('examples/media'), ...files('tests/media')]) {
+    const src = readFileSync(join(root, f), 'utf8');
+    const want = directives(src, 'expect');
+    const panic = directives(src, 'panic')[0];
+    const tag = f.replace(/[^a-z0-9]/gi, '_');
+    try {
+      const n = runNative(src, tag, join(root, f));
+      if (panic !== undefined) {
+        if (n.panic === `panic: ${panic}` && same(n.out, want)) ok(`${f} [host]`);
+        else fail(`${f} [host]`, `expected: panic: ${panic}\nactual:   ${n.panic ?? 'no panic'} (output: ${n.out.join(' ')})`);
+      } else if (n.panic) fail(`${f} [host]`, n.panic);
+      else if (same(n.out, want)) ok(`${f} [host]`);
+      else fail(`${f} [host]`, `expected: ${want.join(' | ')}\nactual:   ${n.out.join(' | ')}`);
     } catch (e) {
       fail(`${f} [host]`, String(e));
     }

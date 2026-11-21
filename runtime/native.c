@@ -170,6 +170,8 @@ _Noreturn void um_panic(int32_t code, int32_t line) {
     case 13: msg = "invalid wasm call (an unknown or freed module / instance, or a range outside the array)"; break;
     case 14: msg = "a wasm instance was freed while another thread was using it"; break;
     case 15: msg = "an exported function of a wasm32-plugin module replaced a Buffer that the host lent it"; break;
+    case 20: msg = "invalid media call (an unknown or closed reader / writer)"; break;
+    case 21: msg = "a media reader or writer was closed while another thread was using it"; break;
   }
   // 複数のスレッドが同時に停止しても、メッセージは1回だけ。2番目以降は、終わるまで寝る。
   if (atomic_exchange(&um_panicking, 1)) {
