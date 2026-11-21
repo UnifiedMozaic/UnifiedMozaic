@@ -1,0 +1,8 @@
+// mut で借りた Buffer を差し替える export（tests/wasm/plugin-replace.um が呼ぶ）。
+export function replace(px: mut Buffer<u8>): void {
+  px = new Buffer<u8>(4);
+}
+
+export function touch(px: mut Buffer<u8>): void {
+  px[0] = 9;
+}

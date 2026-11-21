@@ -1,0 +1,6 @@
+// error: plugin-export
+// target: wasm32-plugin
+// wasm32-plugin の export は、Buffer を own で受け取れない（領域はホストのもの）。
+export function take(px: own Buffer<u8>): u32 {
+  return px.length;
+}

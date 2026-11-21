@@ -102,6 +102,7 @@ node runtime/run-node.mjs structs.wasm
 ```
 
 Programs that open a window ([docs/window.md](window.md)) also need SDL3.
+Programs that run WebAssembly modules ([docs/wasm.md](wasm.md)) also need the wasmtime C API.
 
 ## 6. Tests
 

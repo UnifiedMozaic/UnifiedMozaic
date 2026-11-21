@@ -12,7 +12,7 @@ usage:
   um check <file.um> [--target T] [--json]
   um build <file.um> [--target T] [-o <out>] [--emit-llvm] [-O<level>] [--json]
 
-targets (T): wasm32 (default), arm64-macos, host
+targets (T): wasm32 (default), wasm32-plugin (a wasm module with no imports, to load from a host), arm64-macos, host
   --emit-llvm   write LLVM IR text instead of a binary
   --emit-wgsl   also write the WGSL of each kernel as <out>.<kernel>.wgsl (wasm32 only)
   --emit-msl    also write the MSL of each kernel as <out>.<kernel>.metal (UM_METAL=1 native builds compile the same MSL at run time)
@@ -103,7 +103,7 @@ function main(argv: string[]): void {
   }
 
   const objectOnly = target === 'arm64-macos' && process.platform !== 'darwin';
-  const path = out ?? (target === 'wasm32' ? `${stem}.wasm` : objectOnly ? `${stem}.o` : stem);
+  const path = out ?? (target === 'wasm32' || target === 'wasm32-plugin' ? `${stem}.wasm` : objectOnly ? `${stem}.o` : stem);
   if (emitWgsl) {
     if (target !== 'wasm32') fail('--emit-wgsl needs the wasm32 target');
     for (const [name, text] of compileWgsl(src, file)) writeFileSync(`${path}.${name}.wgsl`, text);

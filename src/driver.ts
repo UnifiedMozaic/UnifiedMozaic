@@ -11,10 +11,16 @@ import { parse } from './parser.ts';
 import type { Decl, Module } from './ast.ts';
 import { CompileError } from './diag.ts';
 
-export type TargetName = 'wasm32' | 'arm64-macos' | 'host';
+/**
+ * wasm32-plugin: ホストのプログラムに組み込んで使う wasm（プラグイン）。import を一切持たない（入出力・GPU なし、
+ * 停止は unreachable のトラップ）。export した関数は Buffer を (位置, 長さ) で受け取れ、メモリを確保する umAlloc / umFree も export する。
+ * docs/wasm.ja.md の「UM で書いたプラグイン」を参照。
+ */
+export type TargetName = 'wasm32' | 'wasm32-plugin' | 'arm64-macos' | 'host';
 
 export const TARGETS: Record<TargetName, { kind: TargetKind; ptrBits: 32 | 64 }> = {
   wasm32: { kind: 'wasm32', ptrBits: 32 },
+  'wasm32-plugin': { kind: 'wasm32', ptrBits: 32 },
   'arm64-macos': { kind: 'native', ptrBits: 64 },
   host: { kind: 'native', ptrBits: 64 },
 };
@@ -41,7 +47,7 @@ function clangOnPath(): boolean {
  */
 export function clangFor(target: TargetName): string {
   if (process.env.UM_CLANG) return process.env.UM_CLANG;
-  if (target === 'wasm32' && process.platform === 'darwin') {
+  if (TARGETS[target].kind === 'wasm32' && process.platform === 'darwin') {
     for (const c of BREW_CLANGS) if (existsSync(c)) return c;
   }
   if (process.platform === 'win32' && !clangOnPath()) {
@@ -185,6 +191,60 @@ export function wasmtimeAvailable(): boolean {
   }
 }
 
+/** wasm のバイナリの import の名前（"モジュール.名前"）。 */
+export function wasmImports(bin: Uint8Array): string[] {
+  const out: string[] = [];
+  let p = 8;
+  const leb = (): number => {
+    let v = 0;
+    let shift = 0;
+    for (;;) {
+      const b = bin[p++];
+      v += (b & 127) * 2 ** shift;
+      if ((b & 128) === 0) return v;
+      shift += 7;
+    }
+  };
+  const name = (): string => {
+    const n = leb();
+    const s = Buffer.from(bin.subarray(p, p + n)).toString('utf8');
+    p += n;
+    return s;
+  };
+  while (p < bin.length) {
+    const id = bin[p++];
+    const size = leb();
+    const end = p + size;
+    if (id === 2) {
+      const count = leb();
+      for (let i = 0; i < count; i++) {
+        const mod = name();
+        const field = name();
+        out.push(`${mod}.${field}`);
+        // 中身（種類と型）は読み飛ばす必要がないよう、このセクションを読み終えたら end に移る。
+        const kind = bin[p++];
+        if (kind === 0) leb();
+        else if (kind === 1) { p++; const f = leb(); leb(); if (f & 1) leb(); }
+        else if (kind === 2) { const f = leb(); leb(); if (f & 1) leb(); }
+        else if (kind === 3) { p++; p++; }
+        else { p++; leb(); }
+      }
+    }
+    p = end;
+  }
+  return out;
+}
+
+/** プラグインが使ってしまった import を、UM の言葉で説明する。 */
+function describeImport(imp: string): string {
+  const field = imp.replace(/^env./, '');
+  if (field.startsWith('um_print_')) return `print (${field})`;
+  if (field === 'um_fmt_f64') return 'a conversion of f64 to string (um_fmt_f64)';
+  if (field.startsWith('um_host_')) return `input / output (${field})`;
+  if (field.startsWith('um_gpu_')) return `the GPU (${field})`;
+  return imp;
+}
+
 /** 生成した LLVM IR がウィンドウの組み込みを使っているか（codegen は使ったときだけ宣言を出す）。 */
 function usesWindow(ll: string): boolean {
   return ll.includes('declare i32 @um_window_open(');
@@ -315,6 +375,7 @@ export function compileToLL(src: string, target: TargetName, sanitize: boolean |
   const t = TARGETS[target];
   // GPU バックエンドがあるのは wasm32（WebGPU）と、UM_METAL=1 のときの Mac のネイティブ（Metal）。
   const metal = metalEnabled(target);
+  // プラグインは GPU を使わない（kernel の dispatch は CPU の1スレッドで実行する）。
   const prog = check(parseProgram(src, file), t.ptrBits, target === 'wasm32' || metal);
   if (t.kind === 'native') {
     // 実行ファイルには入口が要る。
@@ -329,7 +390,7 @@ export function compileToLL(src: string, target: TargetName, sanitize: boolean |
   const appleArm = process.env.UM_GENERIC_SIMD !== '1' &&
     (target === 'arm64-macos' || (target === 'host' && process.platform === 'darwin' && process.arch === 'arm64'));
   const windows = target === 'host' && process.platform === 'win32';
-  return generate(prog, t.kind, sanitize, metal, appleArm, windows);
+  return generate(prog, t.kind, sanitize, metal, appleArm, windows, target === 'wasm32-plugin');
 }
 
 /**
@@ -397,7 +458,8 @@ export function build(ll: string, target: TargetName, outPath: string, optLevel 
     writeFileSync(llPath, ll, { mode: 0o600 });
     const opt = `-O${optLevel}`;
 
-    if (target === 'wasm32') {
+    if (target === 'wasm32' || target === 'wasm32-plugin') {
+      const plugin = target === 'wasm32-plugin';
       clang([
         '--target=wasm32-unknown-unknown', opt, '-nostdlib', '-ffreestanding', '-fno-builtin',
         // メモリのコピーと初期化に wasm の命令（memory.copy / memory.fill）を使う。
@@ -406,8 +468,19 @@ export function build(ll: string, target: TargetName, outPath: string, optLevel 
         // スタックを線形メモリの先頭に置く。あふれたときにデータを壊さず、範囲外アクセスとして止まる。
         '-Wl,--stack-first',
         '-Wl,-z,stack-size=1048576',
+        // プラグインでは、ランタイムが停止を import ではなくトラップにし、umAlloc / umFree を export する。
+        // wasmtime はどの CPU でも SIMD を使えるので、ループをベクトル化できるよう simd128 を有効にする。
+        ...(plugin ? ['-DUM_PLUGIN', '-msimd128'] : []),
         '-o', out, llPath, RUNTIME_WASM_C,
       ], quiet, clangFor('wasm32'));
+      if (plugin) {
+        const imports = wasmImports(readFileSync(out));
+        if (imports.length > 0) {
+          rmSync(out, { force: true });
+          throw new CompileError('plugin-import', `a wasm32-plugin module cannot use host functions, but this program needs: ${imports.map(describeImport).join(', ')}`,
+            { line: 1, col: 1 }, 'plugins run without any host functions: remove print, input / output, and conversions of f64 to string (String, template strings)');
+        }
+      }
       return { output: out, objectOnly: false };
     }
 

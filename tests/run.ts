@@ -24,7 +24,7 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { CompileError, CompileErrors } from '../src/diag.ts';
 import { build, CLANG, compileMsl, compileToLL, compileWgsl, exePath, wasmtimeAvailable } from '../src/driver.ts';
 import { smallMagnitudes } from '../src/codegen.ts';
@@ -131,9 +131,10 @@ async function runWasm(src: string, tag: string): Promise<{ out: string[]; panic
   return { out };
 }
 
-function runNative(src: string, tag: string): { out: string[]; panic?: string } {
+function runNative(src: string, tag: string, file?: string): { out: string[]; panic?: string } {
   const exe = join(tmp, `${tag}.bin`);
-  build(compileToLL(src, 'host'), 'host', exe);
+  // file はソースの場所（import を解決するため。なければ import は使えない）。
+  build(compileToLL(src, 'host', false, file), 'host', exe);
   const r = spawnSync(exe, [], { encoding: 'utf8', input: stdinText(src), cwd: tmp });
   const out = r.stdout.split('\n').filter((l) => l !== '');
   return r.status === 101 ? { out, panic: r.stderr.trim() } : { out };
@@ -417,8 +418,9 @@ for (const f of files('tests/gpu')) {
 for (const f of files('tests/errors')) {
   const src = readFileSync(join(root, f), 'utf8');
   const want = directives(src, 'error');
-  // 既定は wasm32。ターゲットによって変わるエラーは `// target: host` で指定する。
-  const target = directives(src, 'target')[0] === 'host' ? 'host' : 'wasm32';
+  // 既定は wasm32。ターゲットによって変わるエラーは `// target: host`（または wasm32-plugin）で指定する。
+  const t = directives(src, 'target')[0];
+  const target = t === 'host' || t === 'wasm32-plugin' ? t : 'wasm32';
   try {
     compileToLL(src, target);
     fail(f, `compiled without error; expected: ${want.join(', ')}`);
@@ -776,6 +778,19 @@ for (const f of files('tests/panics')) {
   }
 }
 
+// wasm32-plugin: ホストの関数を使うプログラムは、ビルドの時点で失敗する（import を持たないことを確かめる）。
+{
+  const name = 'wasm32-plugin rejects host functions (print) [wasm32-plugin build]';
+  try {
+    const src = 'export function f(x: f64): void { print(x); }';
+    build(compileToLL(src, 'wasm32-plugin'), 'wasm32-plugin', join(tmp, 'plugin_print.wasm'), '2', false, true);
+    fail(name, 'built without error');
+  } catch (e) {
+    if (e instanceof CompileError && e.code === 'plugin-import' && /print/.test(e.message)) ok(name);
+    else fail(name, String(e));
+  }
+}
+
 // WebAssembly の組み込み（wasmtime。ネイティブだけ）。wasmtime の C API が見つからなければ飛ばす。
 // examples/wasm/*.um は `// expect:`、tests/wasm/*.um は `// expect:` か `// panic:` と照合する。
 if (!wasmtimeAvailable()) {
@@ -787,7 +802,13 @@ if (!wasmtimeAvailable()) {
     const panic = directives(src, 'panic')[0];
     const tag = f.replace(/[^a-z0-9]/gi, '_');
     try {
-      const n = runNative(src, tag);
+      // `// plugin: 相対パス.um` は、実行の前に --target wasm32-plugin でビルドして、実行する場所に「名前.wasm」で置く。
+      for (const rel of directives(src, 'plugin')) {
+        const path = join(root, dirname(f), rel);
+        const name = rel.replace(/^.*[\\/]/, '').replace(/\.um$/, '.wasm');
+        build(compileToLL(readFileSync(path, 'utf8'), 'wasm32-plugin', false, path), 'wasm32-plugin', join(tmp, name));
+      }
+      const n = runNative(src, tag, join(root, f));
       if (panic !== undefined) {
         if (n.panic === `panic: ${panic}` && same(n.out, want)) ok(`${f} [host]`);
         else fail(`${f} [host]`, `expected: panic: ${panic}\nactual:   ${n.panic ?? 'no panic'} (output: ${n.out.join(' ')})`);

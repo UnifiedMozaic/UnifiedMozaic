@@ -87,6 +87,7 @@ node src/cli.ts build examples/kernels.um --target host --emit-msl -o kernels   
 - [環境構築](docs/setup.ja.md) — Node.js と clang の入れ方、`um` コマンド、テストの実行
 - [言語ガイド](docs/guide.ja.md) — 文法、所有権、kernel と Buffer、GPU での実行、スレッド、安全性の保証
 - [ウィンドウ](docs/window.ja.md) — ウィンドウを開いて画素を表示し、マウスとキーボードの入力を受け取る（ネイティブ、SDL3）
+- [WebAssembly の実行](docs/wasm.ja.md) — wasm のモジュールを隔離して読み込み、呼び出す。UM で書いたプラグイン（ネイティブ、wasmtime）
 - [examples/](examples) — 動くサンプル。どれもテストを兼ねます（`// expect:` の行）
 - [vscode-extension](https://github.com/UnifiedMozaic/vscode-extension) — VSCode 拡張（色分け、保存時の型検査、ビルドと実行）
 - [SECURITY.md](SECURITY.md) — セキュリティ方針と、脆弱性の報告のしかた

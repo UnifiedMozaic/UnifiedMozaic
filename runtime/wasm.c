@@ -14,6 +14,10 @@
 //   インスタンスを作れない（stubImports を付けると、import を「呼ぶとトラップする関数」で埋める）。
 // - 上限: 燃料（呼び出し1回あたりの命令の目安。0 は上限なし）、時間（呼び出し1回あたりのミリ秒。epoch で測る）、
 //   メモリ（インスタンスの線形メモリのバイト数）。
+// - 燃料と epoch の検査は、生成するコードに入れると遅くなる（燃料と epoch で 15〜35%）。そこでエンジンを3つ持ち、
+//   インスタンスの上限に合わせて使い分ける: 上限なし → 検査なし、時間だけ → epoch、燃料あり → 燃料と epoch。
+//   モジュールは読み込むときに「検査なし」でコンパイルし（壊れていればここで失敗）、ほかの2つは使うときにコンパイルする
+//   （バイト列の写しを持っておく。ディスクのキャッシュが効く）。
 
 #ifdef _WIN32
 #define _CRT_SECURE_NO_WARNINGS
@@ -57,11 +61,22 @@ void *um_alloc(size_t count, size_t elem_size);
 #define FUEL_UNLIMITED ((uint64_t)1 << 62)
 #define EPOCH_FAR ((uint64_t)1 << 62)
 
+// エンジンの種類（生成するコードに入れる検査）。
+#define ENGINE_PLAIN 0  // 検査なし
+#define ENGINE_EPOCH 1  // 時間の上限（epoch）
+#define ENGINE_FUEL 2   // 燃料と時間の上限
+#define ENGINES 3
+
 typedef struct {
-  wasmtime_module_t *module;
+  uint8_t *bytes;  // コンパイルし直すためのバイト列の写し
+  size_t len;
+  wasmtime_module_t *mods[ENGINES];  // エンジンごとのコンパイル結果（まだなら NULL）
+  pthread_mutex_t lock;              // mods を埋めるとき
+  _Atomic int refs;                  // 表から 1、インスタンスを作っている最中の呼び出しから 1 ずつ
 } um_wmodule;
 
 typedef struct {
+  int engine;  // ENGINE_*
   wasmtime_store_t *store;
   wasmtime_context_t *ctx;
   wasmtime_instance_t instance;
@@ -81,8 +96,8 @@ typedef struct {
 static um_table modules, instances;
 static pthread_mutex_t table_lock = PTHREAD_MUTEX_INITIALIZER;
 
-static wasm_engine_t *engine;
-static pthread_once_t engine_once = PTHREAD_ONCE_INIT;
+static wasm_engine_t *_Atomic engines[ENGINES];
+static pthread_mutex_t engine_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_once_t ticker_once = PTHREAD_ONCE_INIT;
 
 // ---- 失敗の理由（スレッドごと） ----
@@ -169,24 +184,29 @@ static void set_error_from_trap(const char *fn, size_t fn_len, wasm_trap_t *trap
 
 // ---- エンジンと時計 ----
 
-static void engine_init(void) {
-  wasm_config_t *config = wasm_config_new();
-  // 燃料と epoch による中断を、生成するコードに入れる（入れておかないと、あとから上限を付けられない）。
-  wasmtime_config_consume_fuel_set(config, true);
-  wasmtime_config_epoch_interruption_set(config, true);
-  // コンパイル結果のキャッシュ（ディスク）。同じバイト列の2回目からは、コンパイルせずに読み込む。
-  // UM_WASM_CACHE=0 で切る。キャッシュの場所と大きさの上限は wasmtime の設定ファイルに従う。
-  const char *cache = getenv("UM_WASM_CACHE");
-  if (!cache || strcmp(cache, "0") != 0) {
-    wasmtime_error_t *err = wasmtime_config_cache_config_load(config, NULL);
-    if (err) wasmtime_error_delete(err);  // キャッシュが使えなくても、毎回コンパイルするだけ
+// エンジン（コンパイラと、生成するコードの設定）。最初に使うときに作る。
+static wasm_engine_t *get_engine(int kind) {
+  wasm_engine_t *e = atomic_load(&engines[kind]);
+  if (e) return e;
+  pthread_mutex_lock(&engine_lock);
+  e = atomic_load(&engines[kind]);
+  if (!e) {
+    wasm_config_t *config = wasm_config_new();
+    // 燃料と epoch による中断の検査を、生成するコードに入れるかどうか。
+    wasmtime_config_consume_fuel_set(config, kind == ENGINE_FUEL);
+    wasmtime_config_epoch_interruption_set(config, kind != ENGINE_PLAIN);
+    // コンパイル結果のキャッシュ（ディスク）。同じバイト列の2回目からは、コンパイルせずに読み込む。
+    // UM_WASM_CACHE=0 で切る。キャッシュの場所と大きさの上限は wasmtime の設定ファイルに従う。
+    const char *cache = getenv("UM_WASM_CACHE");
+    if (!cache || strcmp(cache, "0") != 0) {
+      wasmtime_error_t *err = wasmtime_config_cache_config_load(config, NULL);
+      if (err) wasmtime_error_delete(err);  // キャッシュが使えなくても、毎回コンパイルするだけ
+    }
+    e = wasm_engine_new_with_config(config);
+    atomic_store(&engines[kind], e);
   }
-  engine = wasm_engine_new_with_config(config);
-}
-
-static wasm_engine_t *get_engine(void) {
-  pthread_once(&engine_once, engine_init);
-  return engine;
+  pthread_mutex_unlock(&engine_lock);
+  return e;
 }
 
 // epoch を「起動からのミリ秒」として進める係。時間の上限を使うインスタンスを初めて作ったときに起こす。
@@ -210,7 +230,11 @@ static void *ticker_main(void *arg) {
 #endif
     uint64_t want = (uint64_t)(now_ms() - origin);
     while (ticks < want) {
-      wasmtime_engine_increment_epoch(engine);
+      // epoch を使うエンジン（まだ作っていなければ飛ばす。期限は「今の epoch から」なので、途中から数えてよい）。
+      for (int k = ENGINE_EPOCH; k < ENGINES; k++) {
+        wasm_engine_t *e = atomic_load(&engines[k]);
+        if (e) wasmtime_engine_increment_epoch(e);
+      }
       ticks++;
     }
   }
@@ -283,26 +307,50 @@ static void give_string(const char *s, size_t n, unsigned char **out, size_t *le
 // ---- モジュール ----
 
 // バイト列（wasm のバイナリ）をコンパイルして、モジュールの番号を返す。失敗なら 0。
+// 「検査なし」のエンジンでコンパイルし（壊れたバイナリはここで失敗）、バイト列の写しを持っておく。
 int64_t um_wasm_compile(const uint8_t *bytes, size_t len, int32_t line) {
-  (void)line;
-  wasm_engine_t *e = get_engine();
   wasmtime_module_t *m = NULL;
-  wasmtime_error_t *err = wasmtime_module_new(e, bytes, len, &m);
+  wasmtime_error_t *err = wasmtime_module_new(get_engine(ENGINE_PLAIN), bytes, len, &m);
   if (err) {
     set_error_from("could not compile the module", err);
     return 0;
   }
-  um_wmodule *w = malloc(sizeof *w);
-  if (!w) um_panic(5, line);
-  w->module = m;
+  um_wmodule *w = calloc(1, sizeof *w);
+  if (!w || !(w->bytes = malloc(len ? len : 1))) um_panic(5, line);
+  memcpy(w->bytes, bytes, len);
+  w->len = len;
+  w->mods[ENGINE_PLAIN] = m;
+  pthread_mutex_t init = PTHREAD_MUTEX_INITIALIZER;
+  w->lock = init;
+  atomic_store(&w->refs, 1);
   int64_t h = table_add(&modules, KIND_MODULE, w);
   if (!h) {
     wasmtime_module_delete(m);
+    free(w->bytes);
     free(w);
     set_error("too many modules are loaded (at most %d)", MAX_SLOTS);
     return 0;
   }
   return h;
+}
+
+// モジュールの参照を1つ減らし、なくなったら消す（インスタンスは wasmtime のモジュールを自分で持っているので、先に消してよい）。
+static void module_unref(um_wmodule *w) {
+  if (atomic_fetch_sub(&w->refs, 1) != 1) return;
+  for (int k = 0; k < ENGINES; k++) {
+    if (w->mods[k]) wasmtime_module_delete(w->mods[k]);
+  }
+  free(w->bytes);
+  free(w);
+}
+
+// 番号からモジュールを借りる（使い終わったら module_unref）。
+static um_wmodule *module_ref(int64_t h, int32_t line) {
+  pthread_mutex_lock(&table_lock);
+  um_wmodule *w = modules.items[slot_of(&modules, KIND_MODULE, h, line)];
+  atomic_fetch_add(&w->refs, 1);
+  pthread_mutex_unlock(&table_lock);
+  return w;
 }
 
 void um_wasm_free_module(int64_t h, int32_t line) {
@@ -312,9 +360,22 @@ void um_wasm_free_module(int64_t h, int32_t line) {
   modules.items[i] = NULL;
   modules.gens[i]++;
   pthread_mutex_unlock(&table_lock);
-  // インスタンスはモジュールを自分で持っているので、モジュールを先に解放してもかまわない。
-  wasmtime_module_delete(w->module);
-  free(w);
+  module_unref(w);
+}
+
+// エンジン kind 向けのコンパイル結果（なければここでコンパイルする）。失敗なら NULL（理由を書く）。
+static wasmtime_module_t *module_for(um_wmodule *w, int kind) {
+  pthread_mutex_lock(&w->lock);
+  if (!w->mods[kind]) {
+    wasmtime_error_t *err = wasmtime_module_new(get_engine(kind), w->bytes, w->len, &w->mods[kind]);
+    if (err) {
+      w->mods[kind] = NULL;
+      set_error_from("could not compile the module", err);
+    }
+  }
+  wasmtime_module_t *m = w->mods[kind] ? wasmtime_module_clone(w->mods[kind]) : NULL;
+  pthread_mutex_unlock(&w->lock);
+  return m;
 }
 
 static char valtype_char(const wasm_valtype_t *t) {
@@ -339,11 +400,10 @@ typedef struct {
 void um_wasm_exports(int64_t h, um_bytes **out, size_t *len, int32_t line) {
   *out = NULL;
   *len = 0;
-  pthread_mutex_lock(&table_lock);
-  um_wmodule *w = modules.items[slot_of(&modules, KIND_MODULE, h, line)];
   // 一覧を作るあいだに解放されないよう、モジュールの参照を1つ増やしておく。
-  wasmtime_module_t *m = wasmtime_module_clone(w->module);
-  pthread_mutex_unlock(&table_lock);
+  um_wmodule *w = module_ref(h, line);
+  wasmtime_module_t *m = wasmtime_module_clone(w->mods[ENGINE_PLAIN]);
+  module_unref(w);
   wasm_exporttype_vec_t ex;
   wasmtime_module_exports(m, &ex);
   if (ex.size > 0) {
@@ -387,6 +447,13 @@ void um_wasm_exports(int64_t h, um_bytes **out, size_t *len, int32_t line) {
 
 // ---- インスタンス ----
 
+// 呼び出しの前に、燃料と時間の上限を設定し直す（上限は呼び出し1回ごと）。燃料の上限がなくても時間の上限があれば、
+// 燃料のエンジンでは燃料を「実質なし」にしておく。
+static void arm_limits(um_winstance *w) {
+  if (w->engine == ENGINE_FUEL) wasmtime_context_set_fuel(w->ctx, w->fuel ? w->fuel : FUEL_UNLIMITED);
+  if (w->engine != ENGINE_PLAIN) wasmtime_context_set_epoch_deadline(w->ctx, w->timeout_ms ? w->timeout_ms : EPOCH_FAR);
+}
+
 // インスタンスを作る。fuel / timeout_ms / memory_bytes は 0 で上限なし。stub_imports が 0 でなければ、
 // import を「呼ぶとトラップする関数」で埋める（0 なら import を持つモジュールは失敗）。失敗なら 0。
 int64_t um_wasm_instantiate(int64_t mh, int64_t fuel, int64_t timeout_ms, int64_t memory_bytes, int32_t stub_imports, int32_t line) {
@@ -394,23 +461,25 @@ int64_t um_wasm_instantiate(int64_t mh, int64_t fuel, int64_t timeout_ms, int64_
     set_error("limits must not be negative (0 means no limit)");
     return 0;
   }
-  pthread_mutex_lock(&table_lock);
-  um_wmodule *wm = modules.items[slot_of(&modules, KIND_MODULE, mh, line)];
-  wasmtime_module_t *m = wasmtime_module_clone(wm->module);
-  pthread_mutex_unlock(&table_lock);
+  // 上限に合わせてエンジンを選ぶ（検査を入れるほど遅くなるので、要らない検査は入れない）。
+  int kind = fuel > 0 ? ENGINE_FUEL : timeout_ms > 0 ? ENGINE_EPOCH : ENGINE_PLAIN;
+  um_wmodule *wm = module_ref(mh, line);
+  wasmtime_module_t *m = module_for(wm, kind);
+  module_unref(wm);
+  if (!m) return 0;
 
-  wasm_engine_t *e = get_engine();
+  wasm_engine_t *e = get_engine(kind);
   if (timeout_ms > 0) pthread_once(&ticker_once, ticker_init);
   um_winstance *w = calloc(1, sizeof *w);
   if (!w) um_panic(5, line);
+  w->engine = kind;
   w->fuel = (uint64_t)fuel;
   w->timeout_ms = (uint64_t)timeout_ms;
   w->store = wasmtime_store_new(e, NULL, NULL);
   w->ctx = wasmtime_store_context(w->store);
   if (memory_bytes > 0) wasmtime_store_limiter(w->store, memory_bytes, -1, -1, -1, -1);
   // start 関数（インスタンスを作るときに走る）にも同じ上限をかける。
-  wasmtime_context_set_fuel(w->ctx, fuel > 0 ? (uint64_t)fuel : FUEL_UNLIMITED);
-  wasmtime_context_set_epoch_deadline(w->ctx, timeout_ms > 0 ? (uint64_t)timeout_ms : EPOCH_FAR);
+  arm_limits(w);
 
   wasmtime_linker_t *linker = wasmtime_linker_new(e);
   wasmtime_error_t *err = NULL;
@@ -467,11 +536,6 @@ void um_wasm_free_instance(int64_t h, int32_t line) {
   free(w);
 }
 
-// 呼び出しの前に、燃料と時間の上限を設定し直す（上限は呼び出し1回ごと）。
-static void arm_limits(um_winstance *w) {
-  wasmtime_context_set_fuel(w->ctx, w->fuel ? w->fuel : FUEL_UNLIMITED);
-  wasmtime_context_set_epoch_deadline(w->ctx, w->timeout_ms ? w->timeout_ms : EPOCH_FAR);
-}
 
 static const char *kind_name(int k) {
   switch (k) {

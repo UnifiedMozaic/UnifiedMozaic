@@ -4,6 +4,7 @@ import { isCopyTy, isPlace, passByPtr, simdInfo } from './checker.ts';
 import type { FnSig, Program } from './checker.ts';
 import { emitWgsl, gpuLayout, has64, WEBGPU_CONST_ARRAY } from './wgsl.ts';
 import { CompileError } from './diag.ts';
+import type { Pos } from './diag.ts';
 import { emitMsl } from './msl.ts';
 
 export type TargetKind = 'wasm32' | 'native';
@@ -19,6 +20,8 @@ const PANIC_NO_GPU = 7;
 // 8 = スレッドを起こせなかった（ランタイムが um_thread_start の中で停止する）。
 const PANIC_THREAD_IO = 9;
 const PANIC_GROUP = 10;
+/** プラグインの export が、ホストから借りた Buffer を差し替えた（wasm32-plugin だけ）。 */
+const PANIC_PLUGIN_BUFFER = 15;
 // 11 = ウィンドウの関数をメインスレッド以外から呼んだ、12 = ウィンドウの関数の引数が正しくない（runtime/window.c が停止する）。
 // 13 = wasm の番号（モジュール・インスタンス）か配列の範囲が正しくない、14 = 使っている最中の wasm のインスタンスを解放した
 // （runtime/wasm.c が停止する）。
@@ -1118,12 +1121,17 @@ class ModuleGen {
    */
   windows: boolean;
 
-  constructor(prog: Program, target: TargetKind, sanitize: boolean | 'thread' = false, metal = false, appleArm = false, windows = false) {
+  /** wasm32-plugin（import なし。export の Buffer 引数を (位置, 長さ) で受ける。src/driver.ts の TargetName を参照）。 */
+  plugin: boolean;
+
+  constructor(prog: Program, target: TargetKind, sanitize: boolean | 'thread' = false, metal = false, appleArm = false, windows = false, plugin = false) {
     this.prog = prog;
     this.target = target;
     this.appleArm = appleArm;
     this.windows = windows;
-    this.gpu = target === 'wasm32' ? 'webgpu' : metal ? 'metal' : null;
+    this.plugin = plugin;
+    // プラグインは GPU を使わない（dispatch は CPU の1スレッド）。
+    this.gpu = target === 'wasm32' && !plugin ? 'webgpu' : metal ? 'metal' : null;
     this.sanitize = sanitize;
     this.usz = `i${prog.ptrBits}`;
   }
@@ -1528,6 +1536,64 @@ class ModuleGen {
     return out;
   }
 
+  /**
+   * プラグイン（wasm32-plugin）の export の包み。ホストからは数と Buffer しか渡せないので、
+   * 引数は数（整数・f32・f64・bool）か Buffer（借用か mut）、戻り値は数か void に限る。
+   * Buffer の引数は、ホストから (要素の位置 i32, 要素の数 i32) の2つで受け取り、配列の管理情報をここで作って本体に貸す。
+   * 領域はホストのもの（ふつうは umAlloc で確保したもの）で、本体は借りるだけ。本体が mut の Buffer を差し替えたら
+   * （ホストの領域を解放してしまうので）停止（トラップ）する。
+   */
+  pluginExport(d: FnDecl, attr: string): string {
+    const name = d.name;
+    const bad = (pos: Pos, what: string): never => {
+      throw new CompileError('plugin-export', `the exported function '${name}' ${what}`, pos,
+        'a wasm32-plugin export can take numbers, bool and Buffer<T> (borrowed or `mut`), and return a number, bool or void');
+    };
+    const scalar = (t: Ty) => t.k === 'int' || t.k === 'bool' || (t.k === 'float' && (t.bits === 32 || t.bits === 64));
+    const ret = d.ret!;
+    if (ret.k !== 'void' && !scalar(ret)) bad(d.pos, `returns ${tyStr(ret)}, which the host cannot receive`);
+    const params: string[] = [];
+    const pre: string[] = [];
+    const args: string[] = [];
+    const post: string[] = [];
+    d.params.forEach((p, i) => {
+      const t = p.ty!;
+      if (t.k === 'heap' && t.buffer && !t.racy && !t.str) {
+        if (p.mode === 'own') bad(p.pos, `takes '${p.name}' as \`own\`; the host keeps the memory, so lend it instead`);
+        params.push(`i32 %b${i}.at`, `i32 %b${i}.n`);
+        pre.push(
+          `  %b${i}.p = inttoptr i32 %b${i}.at to ptr`,
+          `  %b${i}.h = alloca %um.Array`,
+          `  %b${i}.v0 = insertvalue %um.Array undef, ptr %b${i}.p, 0`,
+          `  %b${i}.v1 = insertvalue %um.Array %b${i}.v0, i32 %b${i}.n, 1`,
+          `  %b${i}.v2 = insertvalue %um.Array %b${i}.v1, i32 %b${i}.n, 2`,
+          `  store %um.Array %b${i}.v2, ptr %b${i}.h`,
+        );
+        args.push(`ptr %b${i}.h`);
+        if (p.mode === 'mut') {
+          post.push(
+            `  %b${i}.after = load ptr, ptr %b${i}.h`,
+            `  %b${i}.same = icmp eq ptr %b${i}.after, %b${i}.p`,
+            `  br i1 %b${i}.same, label %b${i}.ok, label %replaced`,
+            `b${i}.ok:`,
+          );
+        }
+      } else if (scalar(t) && p.mode === 'none') {
+        params.push(`${llTy(t)} %a${i}`);
+        args.push(`${llTy(t)} %a${i}`);
+      } else {
+        bad(p.pos, `takes '${p.name}' of type ${p.mode === 'none' ? '' : `${p.mode} `}${tyStr(t)}, which the host cannot pass`);
+      }
+    });
+    const rt = llTy(ret);
+    const call = `call ${rt} ${this.fnName(this.declKey(d))}(${args.join(', ')})`;
+    const out = [`define ${rt} @um.export.${name}(${params.join(', ')}) ${attr} {`, ...pre];
+    out.push(ret.k === 'void' ? `  ${call}` : `  %r = ${call}`, ...post, ret.k === 'void' ? '  ret void' : `  ret ${rt} %r`);
+    if (post.length > 0) out.push('replaced:', `  call void @um_panic(i32 ${PANIC_PLUGIN_BUFFER}, i32 ${d.pos.line})`, '  unreachable');
+    out.push('}');
+    return out.join('\n');
+  }
+
   fnName(key: string): string {
     return `@um.${key}`;
   }
@@ -1561,7 +1627,12 @@ class ModuleGen {
     let attrId = 100; // 100 以降は export 用。3〜 は import、40 は検査なし版の kernel
     for (const d of this.prog.decls) {
       let attr = '#0';
-      if (d.exported) {
+      if (d.exported && this.plugin) {
+        // プラグインでは、ホストから呼べる形の包みを export する（本体はふつうの関数のまま）。
+        const wattr = `#${attrId++}`;
+        exportAttrs.push(`attributes ${wattr} = { ${this.fnAttrs()} "wasm-export-name"="${d.name}" }`);
+        bodies.push(this.pluginExport(d, wattr), '');
+      } else if (d.exported) {
         attr = `#${attrId++}`;
         exportAttrs.push(`attributes ${attr} = { ${this.fnAttrs()} "wasm-export-name"="${d.name}" }`);
       }
@@ -1573,7 +1644,7 @@ class ModuleGen {
 
     // ランタイム関数。wasmでは env モジュールからの import になる。
     const imports = ['void um_print_i64(i64)', 'void um_print_u64(i64)', 'void um_print_f64(double)', 'void um_print_bool(i32)', `void um_print_str(ptr, ${this.usz})`];
-    if (this.target === 'wasm32') {
+    if (this.gpu === 'webgpu') {
       // GPU（WebGPU）での実行。実装は runtime/host.mjs。
       imports.push('i32 um_gpu_available()', 'i32 um_gpu_pick(i32, i32)', 'void um_gpu_dispatch(i32, ptr, i32, i32, ptr, i32, ptr, i32)');
       imports.push('void um_gpu_group(i32)');
@@ -1672,7 +1743,8 @@ class ModuleGen {
     out.push(`attributes #0 = { ${this.fnAttrs()} }`);
     // kernel の検査なし版は、必ず呼び出し側のループに埋め込む。
     out.push(`attributes #40 = { ${this.fnAttrs()} alwaysinline }`);
-    out.push('attributes #2 = { noreturn cold nounwind "wasm-import-module"="env" "wasm-import-name"="um_panic" }');
+    // プラグインでは um_panic はランタイム（wasm_rt.c）の中にあり、トラップする（import しない）。
+    out.push(this.plugin ? 'attributes #2 = { noreturn cold nounwind }' : 'attributes #2 = { noreturn cold nounwind "wasm-import-module"="env" "wasm-import-name"="um_panic" }');
     out.push(...importAttrs);
     out.push(...exportAttrs);
     return out.join('\n') + '\n';
@@ -4741,6 +4813,6 @@ class FnGen {
   }
 }
 
-export function generate(prog: Program, target: TargetKind, sanitize: boolean | 'thread' = false, metal = false, appleArm = false, windows = false): string {
-  return new ModuleGen(prog, target, sanitize, metal, appleArm, windows).generate();
+export function generate(prog: Program, target: TargetKind, sanitize: boolean | 'thread' = false, metal = false, appleArm = false, windows = false, plugin = false): string {
+  return new ModuleGen(prog, target, sanitize, metal, appleArm, windows, plugin).generate();
 }
