@@ -2676,8 +2676,8 @@ class Checker {
       return STR;
     }
 
-    // gpu.loadKernel / gpu.runKernel の検査済みの式（src/gpuload.ts）をもう一度検査するときは、前の結果の型。
-    if ((e.callee === '__gpu_load' || e.callee === '__gpu_run') && e.ty) return e.ty;
+    // gpu.loadKernel / gpu.runKernel（src/gpuload.ts）と gpu.available / gpu.prefer の検査済みの式をもう一度検査するときは、前の結果の型。
+    if ((e.callee === '__gpu_load' || e.callee === '__gpu_run' || e.callee === '__gpu_available' || e.callee === '__gpu_prefer') && e.ty) return e.ty;
     // 入出力の組み込み。検査済みの式（名前が `__io_...` になっている）をもう一度検査することもある。
     const io = e.callee.startsWith('__io_') ? e.callee.slice(5) : e.callee;
     if (IO_BUILTINS.has(io) && (io !== e.callee || (!this.fns.has(io) && !this.generics.has(io)))) return this.inferIo(e, io);
@@ -3346,6 +3346,25 @@ class Checker {
       node.kind = 'call';
       node.callee = '__gpu_untracked';
       return VOID;
+    }
+    // `gpu.available()`: 実行時に GPU が使えるか（GPU の経路のないビルドではいつも false）。
+    // `gpu.prefer(on)`: 自動の dispatch / dispatchGroups を、GPU が使えるかぎり GPU で実行するか（前の値を返す）。
+    // どちらもどのビルドでもコンパイルできる（GPU の経路のないビルドでは prefer は印を覚えるだけで効果はない）。
+    if (e.recv.kind === 'ident' && e.recv.name === 'gpu' && !this.lookup('gpu') && (e.name === 'available' || e.name === 'prefer')) {
+      this.noKernel(`\`gpu.${e.name}\``, e.pos);
+      const node = e as unknown as { kind: string; callee: string; args: Arg[] };
+      if (e.name === 'available') {
+        if (e.args.length !== 0) this.err('arg-count', '`gpu.available` takes no arguments', e.pos);
+      } else {
+        if (e.args.length !== 1) {
+          this.err('arg-count', '`gpu.prefer` takes exactly one argument (true to run `dispatch` on the GPU whenever one is available)', e.pos);
+        }
+        if (e.args[0].mode !== 'none') this.err('arg-mode', 'the setting is passed by value', e.args[0].expr.pos);
+        this.expect(e.args[0].expr, BOOL);
+      }
+      node.kind = 'call';
+      node.callee = e.name === 'available' ? '__gpu_available' : '__gpu_prefer';
+      return BOOL;
     }
     // `gpu.loadKernel(wgsl)` / `gpu.runKernel(k, count, ...)`: 実行時に読み込む kernel（src/gpuload.ts）。
     if (isGpuLoadCall(e, (n) => this.lookup(n))) return inferGpuLoad(this, e);

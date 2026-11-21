@@ -1661,6 +1661,8 @@ class ModuleGen {
 
     // ランタイム関数。wasmでは env モジュールからの import になる。
     const imports = ['void um_print_i64(i64)', 'void um_print_u64(i64)', 'void um_print_f64(double)', 'void um_print_bool(i32)', `void um_print_str(ptr, ${this.usz})`];
+    // `gpu.prefer(on)` の印（0 でなければ、自動の dispatch は GPU が使えるかぎり GPU で実行する）。GPU の経路のないビルドでも覚える。
+    out.push('@um.gpu_prefer = internal global i32 0, align 4');
     if (this.gpu === 'webgpu') {
       // GPU（WebGPU）での実行。実装は runtime/host.mjs。
       imports.push('i32 um_gpu_available()', 'i32 um_gpu_pick(i32, i32)', 'void um_gpu_dispatch(i32, ptr, i32, i32, ptr, i32, ptr, i32)');
@@ -3767,6 +3769,26 @@ class FnGen {
       if (this.m.gpu === 'metal') this.emit(`call void @um_gpu_untracked(ptr ${data})`);
       return '';
     }
+    if (e.callee === '__gpu_available') {
+      if (!this.m.gpu) return 'false';
+      if (this.m.gpu === 'wgpu') this.m.usesGpuRuntime = true;
+      const r = this.tmp();
+      const b = this.tmp();
+      this.emit(`${r} = call i32 @um_gpu_available()`);
+      this.emit(`${b} = icmp ne i32 ${r}, 0`);
+      return b;
+    }
+    if (e.callee === '__gpu_prefer') {
+      const v = this.expr(e.args[0].expr);
+      const w = this.tmp();
+      const old = this.tmp();
+      const b = this.tmp();
+      this.emit(`${w} = zext i1 ${v} to i32`);
+      this.emit(`${old} = load i32, ptr @um.gpu_prefer, align 4`);
+      this.emit(`store i32 ${w}, ptr @um.gpu_prefer, align 4`);
+      this.emit(`${b} = icmp ne i32 ${old}, 0`);
+      return b;
+    }
     if (e.callee === '__gpu_load' || e.callee === '__gpu_run') return this.gpuLoadCall(e);
     if (e.callee === '__gpu_commit') {
       if (this.m.gpu === 'metal') this.emit('call void @um_gpu_commit()');
@@ -3921,9 +3943,25 @@ class FnGen {
         this.check(none, PANIC_NO_GPU, e.pos.line);
         this.br(gpuL);
       } else {
-        // 自動: ランタイムが選ぶ。wgpu では Buffer の表も渡し、Buffer の置き場所（GPU にあるか）を判断に入れる
-        // （runtime/wgpu.c の um_gpu_pick_bufs）。
+        // 自動: `gpu.prefer(true)` なら GPU が使えるかぎり GPU。そうでなければランタイムが選ぶ。
+        // wgpu では Buffer の表も渡し、Buffer の置き場所（GPU にあるか）を判断に入れる（runtime/wgpu.c の um_gpu_pick_bufs）。
         if (this.m.gpu === 'wgpu') pre = this.gpuArgs(params, args);
+        const flag = this.tmp();
+        const on = this.tmp();
+        const prefL = this.newLabel('dispatch.prefer');
+        const pickL = this.newLabel('dispatch.pick');
+        this.emit(`${flag} = load i32, ptr @um.gpu_prefer, align 4`);
+        this.emit(`${on} = icmp ne i32 ${flag}, 0`);
+        this.emit(`br i1 ${on}, label %${prefL}, label %${pickL}`);
+        this.terminated = true;
+        this.label(prefL);
+        const avail = this.tmp();
+        this.emit(`${avail} = call i32 @um_gpu_available()`);
+        const a = this.tmp();
+        this.emit(`${a} = icmp ne i32 ${avail}, 0`);
+        this.emit(`br i1 ${a}, label %${gpuL}, label %${cpuL}`);
+        this.terminated = true;
+        this.label(pickL);
         if (pre) this.emit(`${use} = call i32 @um_gpu_pick_bufs(i32 ${k.id}, i32 ${n}, ptr ${pre[2]}, i32 ${pre[3]})`);
         else this.emit(`${use} = call i32 @um_gpu_pick(i32 ${k.id}, i32 ${n})`);
         this.emit(`${yes} = icmp ne i32 ${use}, 0`);
