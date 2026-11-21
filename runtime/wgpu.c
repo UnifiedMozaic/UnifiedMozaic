@@ -127,7 +127,7 @@ static WGPUStringView um_sv(const char *s) { return (WGPUStringView){s, strlen(s
 static int um_env_done;
 static int um_gpu_off;       // UM_GPU=0: GPU を使わない
 static int um_lazy = 1;      // UM_WGPU_LAZY=0: dispatch のたびに送って読み戻す（比較用）
-static int um_trace;         // UM_GPU_TRACE=1: 送り・読み戻し・dispatch を stderr に出す
+static int um_trace;         // UM_GPU_TRACE=1: 送り・読み戻し・dispatch を stderr に出す（2 なら自動判断の選択も）
 static int um_fixed_rule;    // UM_GPU_THRESHOLD=n: 実測をやめ、要素数が n 以上なら GPU
 static uint32_t um_threshold;
 
@@ -139,7 +139,7 @@ static void um_env_init(void) {
   v = getenv("UM_WGPU_LAZY");
   if (v && strcmp(v, "0") == 0) um_lazy = 0;
   v = getenv("UM_GPU_TRACE");
-  if (v && strcmp(v, "1") == 0) um_trace = 1;
+  if (v && (*v == '1' || *v == '2') && v[1] == 0) um_trace = *v - '0';
   v = getenv("UM_GPU_THRESHOLD");
   if (v && *v) {
     um_fixed_rule = 1;
@@ -170,6 +170,7 @@ typedef struct {
 static void um_note_read(um_region *r, double seconds);
 static void um_note_unread(int32_t writer);
 static int um_forced_readback;  // 自動判断の試しの回の読み戻し（CPU が読んだのではない）
+static double um_rb_spent;      // 読み戻しにかかった時間の合計（CPU で実行した kernel の時間から除くため）
 
 // base の昇順に並べた表。
 static um_region **um_regions;
@@ -414,6 +415,7 @@ static void um_readback_locked(um_region *r) {
   r->host_valid = 1;
   um_reprotect(r);
   double dt = um_now() - t0;
+  um_rb_spent += dt;
   um_note_read(r, dt);
   if (um_trace) fprintf(stderr, "wgpu: read back %llu bytes %.3f ms\n", (unsigned long long)r->used, dt * 1000.0);
 }
@@ -867,13 +869,21 @@ static void um_encode_locked(um_pipe *pipe, uint32_t count, uint32_t group, cons
 }
 
 // ---- 自動判断（dispatch）----
-// 実測から速いと見込まれるほうを選ぶ（runtime/metal.m と同じ考え方）。
-// GPU の時間は「実行（送りを含む）」と「読み戻し × CPU がその結果を読む割合」の和で見積もる:
-//   実行: GPU を試す回（初めの2回と、ときどきの測り直し）に、完了まで待って測る。
-//   読み戻し: 試す回には書いた Buffer をその場で読み戻して測る。ふだんの読み戻し（CPU が触ったとき）でも測り直す。
-//   割合: その kernel が書いた結果を、次に GPU が書く前に CPU が読んだか（1）、読まなかったか（0）を、ならして覚える。
-//         GPU で続けて使われる途中の結果（ぼかしの横の結果など）は 0 に近づき、読み戻しの費用を見込まなくなる。
-// CPU の時間には、GPU にしかない入力を読み戻す時間も入る（CPU で実行すると例外で読み戻すため）。
+// 実測と Buffer の置き場所から、速いと見込まれるほうを選ぶ（docs/wgpu.ja.md「自動判断」）。
+//   GPU の時間 = 実行 + 送る量（GPU の写しが古い Buffer）× 送る速さ
+//              + 書く Buffer の量 × 読み戻す速さ × CPU がその結果を読む割合
+//   CPU の時間 = 実行 + 読み戻す量（GPU だけが新しい Buffer）× 読み戻す速さ
+// 実行の時間は kernel ごとに測る（GPU は試しの回に、送り終えてから完了まで待って測る。CPU は読み戻しの時間を除く）。
+// 送る速さと読み戻す速さはプログラム全体で1つ（試しの回に測る）。
+// 割合は、その kernel が GPU で書いた結果を、次に GPU が書く前に、kernel の外の CPU のコード（表示など）が読んだか
+// （1）読まなかったか（0）を、ならして覚える。CPU で実行した kernel が読んだときの読み戻しは、その kernel の CPU の
+// 時間の側に入るので、割合には数えない。
+//
+// Buffer の置き場所だけで判断すると、どの Buffer も CPU にあるときは、どの kernel も単独では送る分だけ遅く見えて
+// 「全部 CPU」から抜け出せない（GPU で続けて実行すれば速い場合でも）。そこで、同じ kernel が繰り返し実行される
+// プログラムでは、送る費用を見込まない判断（「GPU に寄せる」）と、見込む判断（ふつう）を交互に試し、
+// 繰り返しの周期（目印の kernel が実行される間隔）が短いほうを使う。試すのは、送る費用だけで CPU を選んでいる
+// kernel があるときと、GPU に寄せているあいだ（ときどき、ふつうに戻して確かめる）。
 
 // GPU を候補にする最小の仕事の大きさ（CPU で実行したときの秒数）。wgpu は提出して読み戻すまで 0.1〜0.3 ms かかる。
 #define UM_GPU_MIN_SECONDS 100e-6
@@ -883,13 +893,18 @@ typedef struct {
   uint32_t cpu_runs, gpu_runs, since_probe, backoff;
   int last_winner;
   double cpu_per_elem, gpu_per_elem;
-  uint32_t rb_runs, rb_seen;
-  double rb_per_elem, rb_ratio;
+  uint32_t rb_seen;
+  double rb_ratio;
 } um_stat;
 static um_stat um_stats[UM_MAX_TRACKED];
 static _Thread_local int32_t um_cpu_kernel = -1, um_gpu_kernel_measure = -1;
-static _Thread_local double um_cpu_start, um_gpu_start;
+static _Thread_local double um_cpu_start, um_cpu_rb0;
 static _Thread_local uint32_t um_next_group;
+static int um_cpu_running;  // 自動判断で CPU を選んで実行中の kernel の数（その読み戻しは割合に数えない）
+
+// 送る速さと読み戻す速さ（秒 / バイト）。測るまでは 1 バイト 0.25 ns（4 GB/s）と見込む。
+static double um_up_rate = 0.25e-9, um_rb_rate = 0.25e-9;
+static uint32_t um_up_runs, um_rb_runs;
 
 static void um_blend(double *slot, double sample, uint32_t runs) {
   if (runs == 0) *slot = sample;
@@ -904,21 +919,107 @@ static uint32_t um_take_group(void) {
   return g;
 }
 
-int32_t um_gpu_pick(int32_t kernel, uint32_t count) {
+// ---- 周期の比較（GPU に寄せるか）----
+
+static int um_lean;               // 1 = GPU に寄せる（送る費用を見込まない）
+static int32_t um_anchor = -1;    // 周期を測る目印の kernel
+static double um_anchor_last;
+static int um_exp_phase;          // 0 = 待つ、1 = いまの判断で測る、2 = もう一方の判断で測る
+static uint32_t um_exp_skip, um_exp_n, um_exp_wait, um_exp_backoff;
+static double um_exp_samples[8], um_exp_base;
+static int um_stuck;              // 送る費用だけで CPU を選んだ kernel があった
+#define UM_EXP_SAMPLES 6
+
+// 周期の代表値: いちばん長いもの（たまたま遅れた回）を除いた平均。
+static double um_exp_typical(void) {
+  double sum = 0, max = 0;
+  for (uint32_t i = 0; i < UM_EXP_SAMPLES; i++) {
+    sum += um_exp_samples[i];
+    if (um_exp_samples[i] > max) max = um_exp_samples[i];
+  }
+  return (sum - max) / (UM_EXP_SAMPLES - 1);
+}
+
+// 目印の kernel の判断のたびに呼ぶ（鍵を持って）。
+static void um_exp_tick(void) {
+  double now = um_now();
+  double period = um_anchor_last > 0 ? now - um_anchor_last : 0;
+  um_anchor_last = now;
+  if (um_exp_phase == 0) {
+    if (um_exp_wait > 0) um_exp_wait--;
+    else if (um_lean || um_stuck) um_exp_phase = 1, um_exp_skip = 1, um_exp_n = 0;
+    return;
+  }
+  // 判断を切り替えた直後の数回は、Buffer の移動を含むので数えない。
+  if (um_exp_skip > 0) {
+    um_exp_skip--;
+    return;
+  }
+  um_exp_samples[um_exp_n++] = period;
+  if (um_exp_n < UM_EXP_SAMPLES) return;
+  double typical = um_exp_typical();
+  if (um_exp_phase == 1) {
+    um_exp_base = typical;
+    um_lean = !um_lean;
+    um_exp_phase = 2, um_exp_skip = 2, um_exp_n = 0;
+    return;
+  }
+  // GPU に寄せた判断は、試しに CPU で実行した kernel があっても GPU に戻りやすい。ふつうの判断は、そのとき Buffer が
+  // CPU に戻ると「全部 CPU」に落ちることがあるので、寄せた判断からふつうに戻すのは、はっきり速いときだけにする。
+  int keep = typical < um_exp_base * (um_lean ? 0.95 : 0.9);
+  if (um_trace) {
+    fprintf(stderr, "gpu: period %.3f ms (%s, tried) vs %.3f ms (%s): use %s\n", typical * 1000.0, um_lean ? "lean to GPU" : "normal",
+            um_exp_base * 1000.0, um_lean ? "normal" : "lean to GPU", (keep ? um_lean : !um_lean) ? "lean to GPU" : "normal");
+  }
+  if (keep) {
+    um_exp_backoff = 0;
+  } else {
+    um_lean = !um_lean;
+    if (um_exp_backoff < 6) um_exp_backoff++;
+  }
+  um_exp_phase = 0;
+  um_exp_wait = 16u << um_exp_backoff;
+  um_stuck = 0;
+}
+
+// ---- 判断 ----
+
+// Buffer の表から、GPU で実行するときに送る量・書く量と、CPU で実行するときに読み戻す量を数える（鍵を持って）。
+static void um_bytes_locked(const uint64_t *table, int32_t nbufs, double *up, double *out, double *back) {
+  *up = *out = *back = 0;
+  for (int32_t i = 0; i < nbufs; i++) {
+    um_region *r = um_region_at((uintptr_t)table[i * 4]);
+    double bytes = r ? (double)r->used : (double)(table[i * 4 + 1] * table[i * 4 + 2]);
+    if (!r || !r->gpu_valid || !um_lazy) *up += bytes;
+    if (table[i * 4 + 3] != 0) *out += bytes;
+    if (r && !r->host_valid) *back += bytes;
+  }
+}
+
+int32_t um_gpu_pick_bufs(int32_t kernel, uint32_t count, const uint64_t *table, int32_t nbufs) {
   um_env_init();
   if (um_gpu_off) return 0;
   if (um_fixed_rule || kernel < 0 || kernel >= UM_MAX_TRACKED) return count >= um_threshold && um_gpu_available();
   um_lock();
   um_stat *s = &um_stats[kernel];
+  double up, out, back;
+  um_bytes_locked(table, nbufs, &up, &out, &back);
   int gpu, measure = 0;
-  double cpu_time = s->cpu_per_elem * count;
+  double cpu_time = s->cpu_per_elem * count + back * um_rb_rate;
   if (s->cpu_runs < 2) gpu = 0;
   else if (cpu_time < UM_GPU_MIN_SECONDS) gpu = 0;
   else if (s->gpu_runs < 2) gpu = 1, measure = 1;
   else {
     double seen = s->rb_seen ? s->rb_ratio : 0.5;
-    double gpu_time = (s->gpu_per_elem + seen * s->rb_per_elem) * count;
+    double base = s->gpu_per_elem * count + out * um_rb_rate * seen;
+    double send = up * um_up_rate;
+    double gpu_time = base + (um_lean ? 0 : send);
     gpu = gpu_time < cpu_time;
+    // 送る費用がなければ GPU が速い kernel。周期の比較の目印にする。
+    if (!um_lean && !gpu && base < cpu_time) {
+      um_stuck = 1;
+      if (um_anchor < 0) um_anchor = kernel;
+    }
     if (gpu != s->last_winner) {
       s->last_winner = gpu;
       s->backoff = 0;
@@ -934,30 +1035,37 @@ int32_t um_gpu_pick(int32_t kernel, uint32_t count) {
       measure = gpu;
     }
   }
+  if (kernel == um_anchor) um_exp_tick();
   int ok = !gpu || um_init_locked();
-  um_unlock();
   if (gpu && !ok) gpu = 0;
+  if (!gpu) um_cpu_running++;
+  um_unlock();
   if (gpu) {
-    if (measure) {
-      um_gpu_kernel_measure = kernel;
-      um_gpu_start = um_now();
-    }
+    if (measure) um_gpu_kernel_measure = kernel;
   } else {
     um_cpu_kernel = kernel;
+    um_cpu_rb0 = um_rb_spent;
     um_cpu_start = um_now();
+  }
+  if (um_trace >= 2) {
+    fprintf(stderr, "pick: kernel %d count %u -> %s (send %.0f, write %.0f, back %.0f bytes)\n", kernel, count, gpu ? "gpu" : "cpu", up, out, back);
   }
   return gpu;
 }
 
-// 読み戻し（鍵を持って呼ぶ）: 最後に書いた kernel の読み戻しの時間と、CPU が読んだことを覚える。
+// Buffer の表を渡さない版（表がなければ、置き場所は見込まない）。
+int32_t um_gpu_pick(int32_t kernel, uint32_t count) { return um_gpu_pick_bufs(kernel, count, NULL, 0); }
+
+// 読み戻し（鍵を持って呼ぶ）: 試しの回なら読み戻す速さを測る。CPU のコードが読んだのなら、割合を 1 に寄せる。
 static void um_note_read(um_region *r, double seconds) {
+  if (um_forced_readback && r->used >= 65536) {
+    um_blend(&um_rb_rate, seconds / (double)r->used, um_rb_runs);
+    if (um_rb_runs < 2) um_rb_runs++;
+  }
   int32_t k = r->writer;
   r->writer = -1;
-  if (k < 0 || k >= UM_MAX_TRACKED || r->wcount == 0) return;
+  if (k < 0 || k >= UM_MAX_TRACKED || um_forced_readback || um_cpu_running > 0) return;
   um_stat *s = &um_stats[k];
-  um_blend(&s->rb_per_elem, seconds / r->wcount, s->rb_runs);
-  if (s->rb_runs < 2) s->rb_runs++;
-  if (um_forced_readback) return;
   s->rb_ratio = s->rb_seen ? s->rb_ratio * 0.5 + 0.5 : 1.0;
   s->rb_seen = 1;
 }
@@ -969,15 +1077,32 @@ static void um_note_unread(int32_t k) {
 }
 
 void um_gpu_cpu_done(int32_t kernel, uint32_t count) {
-  if (kernel != um_cpu_kernel || count == 0) return;
+  if (kernel != um_cpu_kernel) return;
   um_cpu_kernel = -1;
   double elapsed = um_now() - um_cpu_start;
   um_lock();
-  um_stat *s = &um_stats[kernel];
-  um_blend(&s->cpu_per_elem, elapsed / count, s->cpu_runs);
-  if (s->cpu_runs < 2) s->cpu_runs++;
+  um_cpu_running--;
+  // GPU だけが新しい Buffer を読み戻した時間は除く（その分は判断のときに Buffer の量から見込む）。
+  elapsed -= um_rb_spent - um_cpu_rb0;
+  if (elapsed < 0) elapsed = 0;
+  if (count > 0) {
+    um_stat *s = &um_stats[kernel];
+    um_blend(&s->cpu_per_elem, elapsed / count, s->cpu_runs);
+    if (s->cpu_runs < 2) s->cpu_runs++;
+  }
   um_unlock();
   if (um_trace) fprintf(stderr, "cpu: kernel %d count %u %.3f ms\n", kernel, count, elapsed * 1000.0);
+}
+
+// 空の命令を提出して、GPU が終わるまで待つ（鍵を持って）。それまでに積んだ送りもすべて終わる。
+static void um_idle_locked(void) {
+  um_submit_locked();
+  WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(um_dev, NULL);
+  WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, NULL);
+  wgpuCommandEncoderRelease(enc);
+  um_last_index = wgpuQueueSubmitForIndex(um_queue, 1, &cmd);
+  wgpuCommandBufferRelease(cmd);
+  wgpuDevicePoll(um_dev, 1, NULL);
 }
 
 static void um_dispatch(int32_t kernel, const char *src, int32_t src_len, uint32_t count, const void *block,
@@ -990,21 +1115,42 @@ static void um_dispatch(int32_t kernel, const char *src, int32_t src_len, uint32
   um_lock();
   if (!um_init_locked()) um_fail0("no GPU");
   um_pipe *p = um_pipeline_locked(kernel, src, src_len, group, table, nbufs, 0);
-  um_encode_locked(p, count, group, block, block_bytes, table, nbufs, measure);
-  if (measure || submit || !um_lazy) um_submit_locked();
-  if (measure) {
-    // 試す回: 完了まで待って実行の時間を測り、書いた Buffer を読み戻して読み戻しの時間を測る（um_note_read）。
+  if (measure && um_lazy) {
+    // 試す回: 前の仕事を終わらせ、古い Buffer を送り終えるまでを送る速さとして測り、それから実行の時間を測る。
+    um_idle_locked();
+    double t0 = um_now();
+    uint64_t sent = 0;
+    for (int32_t i = 0; i < nbufs; i++) {
+      um_region *r = um_region_at((uintptr_t)table[i * 4]);
+      if (r && !r->gpu_valid) {
+        um_upload_locked(r);
+        sent += r->used;
+      }
+    }
+    if (sent > 0) {
+      um_idle_locked();
+      if (sent >= 65536) {
+        um_blend(&um_up_rate, (um_now() - t0) / (double)sent, um_up_runs);
+        if (um_up_runs < 2) um_up_runs++;
+      }
+    }
+    double t1 = um_now();
+    um_encode_locked(p, count, group, block, block_bytes, table, nbufs, 1);
+    um_submit_locked();
     wgpuDevicePoll(um_dev, 1, NULL);
-    double elapsed = um_now() - um_gpu_start;
+    double elapsed = um_now() - t1;
     um_stat *s = &um_stats[kernel];
     um_blend(&s->gpu_per_elem, elapsed / count, s->gpu_runs);
     if (s->gpu_runs < 2) s->gpu_runs++;
+    // 書いた Buffer を読み戻して、読み戻す速さを測る（um_note_read）。
     um_forced_readback = 1;
     um_drain_eager_locked();
     um_forced_readback = 0;
-    if (um_trace) fprintf(stderr, "gpu: kernel %d count %u %.3f ms (measured)\n", kernel, count, elapsed * 1000.0);
-  } else if (!um_lazy) {
-    um_drain_eager_locked();
+    if (um_trace) fprintf(stderr, "gpu: kernel %d count %u %.3f ms (measured, sent %llu bytes)\n", kernel, count, elapsed * 1000.0, (unsigned long long)sent);
+  } else {
+    um_encode_locked(p, count, group, block, block_bytes, table, nbufs, 0);
+    if (submit || !um_lazy) um_submit_locked();
+    if (!um_lazy) um_drain_eager_locked();
   }
   um_unlock();
 }
