@@ -116,6 +116,20 @@ node src/cli.ts build app.um --target host -o app --link-input app.res
 ```
 
 `.ico` には 16×16・32×32・48×48・256×256 などの大きさを入れておくと、OS が場面に合うものを選びます。
+
+UM の実行ファイルはコンソールのプログラムなので、エクスプローラーからダブルクリックすると、窓の後ろに黒いコンソールの窓も出ます。
+窓だけのアプリにするには、リンカへの指示（Windows のサブシステムと、入口を `main` のままにする指示）だけを持つオブジェクトを
+作って、同じく `--link-input` で渡します。標準出力・標準エラー出力は、起動した側がつないだもの（パイプなど）にはそのまま出ます
+（ダブルクリックで起動したときは、どこにも出ません）。
+
+```powershell
+# gui.c の中身:
+#   #pragma comment(linker, "/SUBSYSTEM:WINDOWS")
+#   #pragma comment(linker, "/ENTRY:mainCRTStartup")
+& "C:\Program Files\LLVM\bin\clang.exe" -c gui.c -o gui.obj
+node src/cli.ts build app.um --target host -o app --link-input app.res --link-input gui.obj
+```
+
 macOS の `.app` のアイコン（`Info.plist` と `.icns`）と Linux のデスクトップのアイコン（`.desktop` ファイル）は、実行ファイルの外に置くものなので、
 `--link-input` は使いません（配布の形を作るときに置きます）。
 
