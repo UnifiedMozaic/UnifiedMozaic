@@ -45,7 +45,7 @@ UM_WGPU=1 node src/cli.ts build x.um --target host -o x
 
 | 書き方 | wgpu の経路での動き |
 | --- | --- |
-| `dispatch(k, n, ...)` | 実測で CPU と GPU の速いほうを選ぶ（下の「自動判断」） |
+| `dispatch(k, n, ...)` | 実測と Buffer の置き場所から、CPU と GPU の速いほうを選ぶ（下の「自動判断」）。`gpu.prefer(true)` のあいだは GPU を優先する |
 | `cpu.dispatch(k, n, ...)` | 常に CPU（複数のスレッド） |
 | `gpu.dispatch(k, n, ...)` | 常に GPU。GPU が使えなければ停止（`panic: the GPU is not available`） |
 | `gpu.submit(k, n, ...)` | 待たずに戻り、券を返す。`gpu.ready(t)` / `gpu.wait(t)` で完了を知る |
@@ -116,15 +116,47 @@ NVIDIA や AMD の単体の GPU は、CPU とメモリが分かれているの�
 
 ## 自動判断（`dispatch`）
 
-kernel ごとに CPU と GPU の時間を測って選びます（考え方は Metal と同じ）。
+kernel ごとに CPU と GPU の時間を見込み、速いほうを選びます。見込みには、実測した時間と、**Buffer がいまどちらにあるか**（送る量・読み戻す量）を入れます。
 
-- **最初の 2 回は CPU で実行して測ります。** CPU での 1 回が 100 マイクロ秒未満の仕事は、GPU を試しません。
-- **それより重い仕事は、GPU でも 2 回試します。** 試す回は完了まで待って「実行の時間」（送りを含む）を測り、書いた Buffer をその場で読み戻して「読み戻しの時間」を測ります。
-- **GPU の見込みは「実行の時間 + 読み戻しの時間 × CPU がその結果を読む割合」です。** 割合は、kernel が書いた結果を、次に GPU が書く前に CPU が読んだかどうかを覚えてならしたものです（はじめは 0.5）。GPU の中で続けて使われる途中の結果では 0 に近づきます。
-- **CPU の時間には、GPU にしかない入力を読み戻す時間も入ります**（CPU で実行すると、例外で読み戻すため）。
+```
+GPU の時間 = 実行 + 送る量 × 送る速さ + 書く Buffer の量 × 読み戻す速さ × CPU がその結果を読む割合
+CPU の時間 = 実行 + 読み戻す量 × 読み戻す速さ
+```
+
+- **送る量**は、渡す Buffer のうち GPU の写しが古いもの（CPU が書いたか、まだ GPU に送っていない）の大きさです。**読み戻す量**は、GPU だけが新しい Buffer の大きさです（CPU で実行すると、例外で読み戻すため）。どちらも dispatch のたびに Buffer の状態から数えます。入力も出力もすでに GPU にあれば、GPU の時間に写しは入らず、CPU の時間には読み戻しが入るので、GPU を選びます。
+- **最初の 2 回は CPU で実行して測ります。** CPU での時間が 100 マイクロ秒未満の仕事は、GPU を試しません。
+- **それより重い仕事は、GPU でも 2 回試します。** 試す回は、前の仕事を終わらせ、古い Buffer を送り終えるまでを測って送る速さとし、それから完了まで待って実行の時間を測り、書いた Buffer を読み戻して読み戻す速さを測ります。送る速さと読み戻す速さはプログラム全体で 1 つです。CPU の実行の時間からは、そのあいだの読み戻しの時間を除きます。
+- **割合**は、kernel が GPU で書いた結果を、次に GPU が書く前に、kernel の外の CPU のコード（表示など）が読んだかどうかを覚えてならしたものです（はじめは 0.5）。CPU で実行した kernel が読んだときの読み戻しは、その kernel の CPU の時間の側に入るので、割合には数えません。
 - 選ばれなかった側も、ときどき測り直します（Metal と同じ）。`UM_GPU_THRESHOLD=N` で、「要素数が N 以上なら GPU」という固定の規則になります。
 
-**限界:** 判断は kernel ごとで、続けて実行する複数の kernel の組を見ません。たとえば箱ぼかしの横と縦の 2 回は、両方を GPU に置くと速い（下の「速さ」）のに、それぞれを単独で見ると CPU が速いので、自動判断は CPU を選びます。GPU で続けて処理すると分かっている並びには、`gpu.dispatch` を書いてください。
+**「全部 CPU」から抜け出す（周期の比較）:** Buffer の置き場所だけで判断すると、どの Buffer も CPU にあるときは、どの kernel も単独では送る分だけ遅く見えて、全部を GPU で続けて実行すれば速い場合でも CPU を選び続けます。そこで、同じ kernel が繰り返し実行されるプログラム（動画の 1 コマごとの描画など）では、次の 2 つの判断を交互に試し、繰り返しの周期が短いほうを使います。
+
+| 判断 | 中身 |
+| --- | --- |
+| ふつう | 上の式のとおり |
+| GPU に寄せる | 送る費用を見込まない（GPU で続けて使えば、送るのは初めの 1 回だけだから） |
+
+- 周期は、目印の kernel（送る費用だけで CPU を選んだ最初の kernel）が実行される間隔です。切り替えた直後の数回を除き、6 回の周期を比べます（いちばん長いものを除いた平均）。
+- 試すのは、送る費用だけで CPU を選んでいる kernel があるときと、GPU に寄せているあいだのときどきです（ふつうに戻して確かめる）。GPU に寄せるのは 5%、ふつうに戻すのは 10% 以上速いときです。結果が変わらなければ、次に試すまでの間隔を延ばします。
+- `UM_GPU_TRACE=1` で比べた周期と選んだ判断を、`UM_GPU_TRACE=2` で dispatch ごとの選択と量を出します。
+
+例: [tests/wgpu/placement.um](../tests/wgpu/placement.um)（判断が GPU と CPU を行き来しても、どのフレームの結果も CPU と同じ）、[bench/gpu/chain.um](../bench/gpu/chain.um)（下の「速さ」の「動画編集ソフトの描画に近い並び」）。
+
+## GPU を優先する（`gpu.prefer`）・GPU があるか（`gpu.available`）
+
+```ts
+gpu.prefer(true);              // このあとの dispatch / dispatchGroups は、GPU が使えるかぎり GPU で実行する
+dispatch(fx, n, mut canvas, k); // GPU がなければ（GPU の経路のないビルド、UM_GPU=0、GPU なし）CPU で実行する
+gpu.prefer(false);             // 自動判断に戻す。どちらも前の値を返す
+if (gpu.available()) { ... }   // 実行時に GPU が使えるか
+```
+
+- **どのビルドでもコンパイルできます**（`gpu.dispatch` は GPU の経路のないビルドではコンパイルエラーなので、共通のコードには書けません）。GPU の経路のないビルドでは、`gpu.prefer` は印を覚えて前の値を返すだけで（dispatch はいつも CPU）、`gpu.available()` は `false` です。
+- `gpu.prefer(true)` のあいだも、GPU で実行できない kernel（64 ビットの整数・simdgroup の集計。上の「CPU で実行する kernel」）は CPU で実行します。
+- 印はプログラム全体で 1 つです（スレッドごとではありません）。Metal の経路と wasm32 の WebGPU でも同じ意味です。
+- 自動判断で足りる場合は `dispatch` のままで構いません。`gpu.prefer` は、GPU で続けて処理すると分かっている描画の並びを、初めのフレームから GPU で実行したいときに使います。
+
+例: [tests/wgpu/prefer.um](../tests/wgpu/prefer.um)（GPU の経路のないビルドと wasm32 でも同じ出力になることも確かめる）。
 
 ## 実行時に kernel を読み込む（`gpu.loadKernel` / `gpu.runKernel`）
 
@@ -203,6 +235,7 @@ struct UmParams {
 UM_WGPU=1 node src/cli.ts build bench/gpu/pixels.um --target host -o pixels && ./pixels
 UM_WGPU=1 node src/cli.ts build bench/gpu/blur.um   --target host -o blur   && ./blur
 UM_WGPU=1 node src/cli.ts build bench/gpu/small.um  --target host -o small  && ./small
+UM_WGPU=1 node src/cli.ts build bench/gpu/chain.um  --target host -o chain  && ./chain
 # Mac の Metal と比べるときは、同じものを UM_METAL=1 で作る
 ```
 
@@ -215,7 +248,7 @@ UM_WGPU=1 node src/cli.ts build bench/gpu/small.um  --target host -o small  && .
 | CPU（全コア） | 0.80 ms | 0.64 ms |
 | GPU、毎フレーム CPU が結果を読む | 4.14 ms | 4.06 ms |
 | GPU、2 つの kernel を続けて実行し、読まない | 0.56 ms（1 つあたり 0.28 ms） | 0.62 ms |
-| 自動判断、毎フレーム読む | 1.07 ms（ほぼ CPU を選ぶ） | 1.01 ms |
+| 自動判断、毎フレーム読む | 1.07 ms（ほぼ CPU を選ぶ）。Buffer の置き場所を見込む版: 1.26 ms※ | 1.01 ms |
 
 **1280x720 の箱ぼかし**（`blur.um`。半径 8、横と縦の 2 回。1 フレームあたり）
 
@@ -224,7 +257,7 @@ UM_WGPU=1 node src/cli.ts build bench/gpu/small.um  --target host -o small  && .
 | CPU（全コア） | 5.74 ms | 5.54 ms |
 | GPU、毎フレーム CPU が結果を読む | 4.34 ms | 4.30 ms |
 | GPU、読まない | 0.43 ms | 0.49 ms |
-| 自動判断、毎フレーム読む | 6.36 ms（CPU を選ぶ。上の「自動判断」の限界） | 6.75 ms |
+| 自動判断、毎フレーム読む | 6.36 ms（CPU を選ぶ）。Buffer の置き場所を見込む版: 5.72 ms※（同じときの CPU 6.14 ms、GPU で毎フレーム読む 5.11 ms） | 6.75 ms |
 
 **小さな dispatch の繰り返し**（`small.um`。4096 要素、前の結果を次の入力に。1 回あたり）
 
@@ -233,7 +266,22 @@ UM_WGPU=1 node src/cli.ts build bench/gpu/small.um  --target host -o small  && .
 | CPU（全コア） | 25.5 µs | 25.7 µs |
 | GPU、最後にだけ読む | 17.4 µs | 48.1 µs |
 | GPU、毎回 CPU が読む | 105 µs | 181 µs |
-| 自動判断、最後にだけ読む | 27.2 µs（CPU を選ぶ） | 24.6 µs |
+| 自動判断、最後にだけ読む | 27.2 µs（CPU を選ぶ）。Buffer の置き場所を見込む版: 21.7 µs※（同じときの CPU 33.1 µs） | 24.6 µs |
+
+**動画編集ソフトの描画に近い並び**（`chain.um`。毎フレーム、CPU が元の画像を書き、全画面の kernel 10 個（キャンバスを消す、元の画像を重ねる、明るさ・コントラスト・彩度、ぼかしの横と縦、周辺減光、色味、窓の画素に写す）を実行し、CPU が窓の画素の一部を描いて全体を読む。キャンバスは `vec4<f32>` の 14.7 MB。1 フレームあたり。Vulkan。2026-11-21、Buffer の置き場所を見込む版）
+
+| 実行 | 時間 |
+| --- | --- |
+| CPU（全コア、`cpu.dispatch`） | 9.02 ms |
+| GPU（`gpu.dispatch`） | 4.98 ms |
+| `gpu.prefer(true)` と `dispatch` | 5.42 ms |
+| 自動判断（600 フレーム。効果を 1 つずつ足して始める） | 6.15 ms（初めの 200 フレームを除くと 5.68 ms） |
+| 同じ、前の版の自動判断（Buffer の置き場所を見込まない） | 12.2 ms（同じく 8.25 ms） |
+
+- 前の版は、効果を 1 つずつ足していくと、どの kernel も前後が CPU のまま単独で GPU を試されて、送る時間の分だけ遅く見え、ほとんどのフレームを CPU で実行します（600 フレームで CPU の実行が 1438 回。この版は 198 回）。この版は、周期の比較で「GPU に寄せる」判断を選び、GPU で続けて実行します。
+- 自動判断が `gpu.dispatch` より遅いのは、ときどきの測り直しと周期の比較の試しの分です。初めから GPU と分かっているなら `gpu.prefer(true)` を使えます。
+
+※ の値は、ほかの仕事で機械が混んでいたときに測ったもので、表のほかの値（前の版）と同じ条件ではありません。3 回の中央の値。
 
 **読み方:**
 
@@ -258,7 +306,7 @@ UM_WGPU=1 node src/cli.ts build bench/gpu/small.um  --target host -o small  && .
 | --- | --- |
 | `UM_GPU=0` | GPU を使いません。`dispatch` はすべて CPU、`gpu.dispatch` は停止、`gpu.loadKernel` は `null` |
 | `UM_GPU_THRESHOLD=N` | 自動判断の実測をやめ、要素数が N 以上なら GPU にします |
-| `UM_GPU_TRACE=1` | 使う GPU と API、dispatch・送り・読み戻しと時間、自動判断の測定を標準エラー出力に出します |
+| `UM_GPU_TRACE=1` | 使う GPU と API、dispatch・送り・読み戻しと時間、自動判断の測定と周期の比較を標準エラー出力に出します。`2` なら dispatch ごとの選択と量も |
 | `UM_WGPU_BACKEND` | `vulkan` / `dx12` / `metal` / `gl` のどれかに限ります（既定は wgpu が選ぶ） |
 | `UM_WGPU_LAZY=0` | 比較用。Buffer を GPU に置いたままにせず、dispatch のたびに送って読み戻します |
 
@@ -270,11 +318,10 @@ UM_WGPU=1 node src/cli.ts build bench/gpu/small.um  --target host -o small  && .
 
 ## テスト
 
-`node tests/run.ts` は、wgpu-native が見つかり（`UM_WGPU_HOME` など）GPU が使えれば、`tests/metal/*.um` と `tests/wgpu/*.um` を `UM_WGPU=1` で作って GPU で実行し、`// expect:` と照合します（どれも GPU の結果を CPU の結果と比べるプログラムです）。64 ビットの整数や simdgroup の集計を `gpu.dispatch` で使う、Metal だけのテストには `// wgpu-error: コード` があり、そのコードでコンパイルが止まることを確かめます。見つからなければ、wgpu のテストは飛ばします。
+`node tests/run.ts` は、wgpu-native が見つかり（`UM_WGPU_HOME` など）GPU が使えれば、`tests/metal/*.um` と `tests/wgpu/*.um` を `UM_WGPU=1` で作って GPU で実行し、`// expect:` と照合します（どれも GPU の結果を CPU の結果と比べるプログラムです）。64 ビットの整数や simdgroup の集計を `gpu.dispatch` で使う、Metal だけのテストには `// wgpu-error: コード` があり、そのコードでコンパイルが止まることを確かめます。見つからなければ、wgpu のテストは飛ばします。`// cpu-build` のあるテスト（`tests/wgpu/prefer.um`）は、GPU の経路のないビルド（`UM_WGPU` なしのネイティブと wasm32）でも実行して、同じ出力になることを確かめます（wgpu-native がなくても実行します）。
 
 ## まだないもの・未確認
 
 - Linux と macOS での実行（コードはありますが、確かめていません）。Windows の ARM64（wgpu-native のリリースに版があります）。
 - GPU を選ぶ指定（いまは wgpu が「高性能」として選ぶ 1 つ）。
-- 続けて実行する複数の kernel をまとめて見る自動判断。
 - 読み戻しと CPU のコピーを重ねること（いまは GPU から写し終えてから CPU の領域に写します）。
