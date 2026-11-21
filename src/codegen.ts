@@ -1731,6 +1731,7 @@ class ModuleGen {
       out.push(`declare i32 @um_window_open(ptr, ${this.usz}, i32, i32, i32) #0`, 'declare void @um_window_close(i32, i32) #0');
       out.push(`declare i32 @um_window_poll(ptr, ${this.usz}, i32, i32) #0`, `declare void @um_window_present(i32, ptr, ${this.usz}, i32, i32, i32) #0`);
       out.push(`declare void @um_window_present_rect(i32, ptr, ${this.usz}, i32, i32, i32, i32, i32, i32, i32, i32) #0`);
+      out.push(`declare i32 @um_window_set_icon(i32, ptr, ${this.usz}, i32, i32, i32) #0`);
       out.push(`declare i64 @um_window_ctl(i32, i32, ptr, ${this.usz}, i32) #0`, 'declare double @um_window_ctl_f(i32, i32, i64, i32) #0');
       out.push(`declare i64 @um_window_set_text(i32, i32, i64, ptr, ${this.usz}, i32) #0`, 'declare void @um_window_get_text(i32, i32, i64, ptr, ptr, i32) #0');
       out.push(`declare i32 @um_audio_write(i32, ptr, ${this.usz}, i64, i64, i32) #0`);
@@ -3671,6 +3672,15 @@ class FnGen {
         const [data, len] = pxParts();
         this.emit(`call void @um_window_present(i32 ${id}, ptr ${data}, ${usz} ${len}, i32 ${w}, i32 ${h}, i32 ${e.pos.line})`);
         return '';
+      }
+      case 'windowSetIcon': {
+        this.m.usesWindow = true;
+        const id = this.expr(e.args[0].expr);
+        const pxParts = this.heapParts(e.args[1].expr);
+        const w = this.expr(e.args[2].expr);
+        const h = this.expr(e.args[3].expr);
+        const [data, len] = pxParts();
+        return flag(`@um_window_set_icon(i32 ${id}, ptr ${data}, ${usz} ${len}, i32 ${w}, i32 ${h}, i32 ${e.pos.line})`);
       }
       case 'windowPresentRect':
       case 'windowUpdateRect': {

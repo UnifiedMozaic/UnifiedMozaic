@@ -1,5 +1,5 @@
 // ウィンドウの組み込みの実装。SDL3 を使う。
-//   windowOpen / windowClose / windowPoll / windowPresent / windowPresentRect / windowUpdateRect
+//   windowOpen / windowClose / windowPoll / windowPresent / windowPresentRect / windowUpdateRect / windowSetIcon
 //   操作番号で呼び分ける windowCtl / windowCtlF / windowSetText / windowGetText（名前のある関数は runtime/window.um）
 // 音の出力は runtime/audio.c にあり、windowCtl の操作番号 100 番台から呼ぶ。
 // プログラムがウィンドウか音の組み込みを使ったときだけ、ドライバが native.c と一緒にリンクする（SDL3 3.2.12 以降）。
@@ -212,6 +212,19 @@ void um_window_present_rect(int32_t id, const uint32_t *pixels, size_t len, int3
     SDL_UpdateTexture(w->tex, &r, pixels + (size_t)y * (size_t)width + (size_t)x, width * 4);
   }
   if (show) show_texture(w);
+}
+
+// 窓のアイコン（題名の帯・タスクバー・Alt+Tab）。画素は windowPresent と同じ 0xAARRGGBB。
+// SDL は画素を写すので、呼び終えたら Buffer を手放してよい。失敗（ドライバが窓のアイコンを持たない、など）なら 0。
+int32_t um_window_set_icon(int32_t id, const uint32_t *pixels, size_t len, int32_t width, int32_t height, int32_t line) {
+  main_only(line);
+  um_window *w = lookup(id, line);
+  check_pixels(pixels, len, width, height, line);
+  SDL_Surface *s = SDL_CreateSurfaceFrom(width, height, SDL_PIXELFORMAT_ARGB8888, (void *)pixels, width * 4);
+  if (!s) return 0;
+  int ok = SDL_SetWindowIcon(w->win, s);
+  SDL_DestroySurface(s);
+  return ok;
 }
 
 // ---- イベントの文字列 ----

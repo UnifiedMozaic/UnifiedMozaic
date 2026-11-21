@@ -186,7 +186,7 @@ export function simdInfo(t: Ty | undefined): { elem: Ty & { k: 'int' | 'float' }
 const IO_BUILTINS = new Set(['readLine', 'inputReady', 'clock', 'stringFromBytes', 'readFile', 'writeFile', 'fileSize', 'readFileRange', 'appendFile', 'args', 'eprint',
   'readFileInto', 'fileOpen', 'fileRead', 'fileReadAt', 'fileWrite', 'fileSeek', 'fileLength', 'fileClose',
   'listDir', 'makeDir', 'isDir', 'cwd', 'exePath', 'exeDir', 'absPath',
-  'windowOpen', 'windowClose', 'windowPoll', 'windowPresent', 'windowPresentRect', 'windowUpdateRect', 'windowCtl', 'windowCtlF', 'windowSetText', 'windowGetText',
+  'windowOpen', 'windowClose', 'windowPoll', 'windowPresent', 'windowPresentRect', 'windowUpdateRect', 'windowSetIcon', 'windowCtl', 'windowCtlF', 'windowSetText', 'windowGetText',
   'audioWrite',
   'wasmCompile', 'wasmFreeModule', 'wasmExportList', 'wasmInstantiate', 'wasmFreeInstance', 'wasmInvoke', 'wasmRead', 'wasmWrite',
   'wasmMemorySize', 'wasmWat', 'wasmError',
@@ -2755,6 +2755,8 @@ class Checker {
    *       windowPresent と同じだが、変わった矩形 (x, y, w, h) だけを写す（残りは前回の表示のまま）。
    *   windowUpdateRect(window, pixels, width, height, x: i32, y: i32, w: i32, h: i32): void
    *       矩形を写すだけで表示しない（矩形が複数あるとき。最後に windowPresentRect で表示する）。
+   *   windowSetIcon(window, pixels: Buffer<u32>, width: i32, height: i32): bool
+   *       0xAARRGGBB の画素を width × height 並べたものを、窓のアイコン（題名の帯・タスクバー）にする。
    *   windowCtl(op: i32, window: i32, io: mut Buffer<i64>): i64        操作番号で呼び分ける（引数と結果は io）。
    *   windowCtlF(op: i32, window: i32, a: i64): f64                     小数を返す操作。
    *   windowSetText(op: i32, window: i32, a: i64, text: string): i64   文字列を渡す操作。
@@ -2838,6 +2840,7 @@ class Checker {
         params: [['window', I32], ['pixels', { k: 'heap', elem: PRIMS.u32, buffer: true }], ['width', I32], ['height', I32], ['x', I32], ['y', I32], ['w', I32], ['h', I32]],
         ret: VOID,
       },
+      windowSetIcon: { params: [['window', I32], ['pixels', { k: 'heap', elem: PRIMS.u32, buffer: true }], ['width', I32], ['height', I32]], ret: BOOL },
       windowUpdateRect: {
         params: [['window', I32], ['pixels', { k: 'heap', elem: PRIMS.u32, buffer: true }], ['width', I32], ['height', I32], ['x', I32], ['y', I32], ['w', I32], ['h', I32]],
         ret: VOID,
