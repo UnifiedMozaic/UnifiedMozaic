@@ -5,7 +5,7 @@ import { dirname, extname, join, relative, resolve, sep } from 'node:path';
 import { check } from './checker.ts';
 import { generate, kernelUses64 } from './codegen.ts';
 import { emitMsl } from './msl.ts';
-import { emitWgsl, WEBGPU_CONST_ARRAY } from './wgsl.ts';
+import { emitWgsl, WGSL_SIMDGROUP } from './wgsl.ts';
 import type { TargetKind } from './codegen.ts';
 import { parse } from './parser.ts';
 import type { Decl, Module } from './ast.ts';
@@ -73,6 +73,7 @@ const RUNTIME_METAL = join(import.meta.dirname, '..', 'runtime', 'metal.m');
 const RUNTIME_WINDOW = join(import.meta.dirname, '..', 'runtime', 'window.c');
 /** 音の出力（audioOpen など）。ウィンドウと同じく SDL3 を使い、window.c と一緒にリンクする。 */
 const RUNTIME_AUDIO = join(import.meta.dirname, '..', 'runtime', 'audio.c');
+const RUNTIME_WGPU = join(import.meta.dirname, '..', 'runtime', 'wgpu.c');
 
 /** SDL3 をリンクするための clang の引数と、実行ファイルの隣に置く DLL（Windows だけ）。 */
 interface Sdl3 { args: string[]; dll?: string }
@@ -122,6 +123,63 @@ function findSdl3(): Sdl3 {
     }
   }
   throw new Error(`this program opens a window, which needs SDL3, but SDL3 was not found; ${hint}`);
+}
+
+/** wgpu-native をリンクするための clang の引数と、実行ファイルの隣に置く DLL（Windows だけ）。 */
+interface Wgpu { args: string[]; dll?: string }
+
+/**
+ * GPU の経路（runtime/wgpu.c）が使う wgpu-native を探す。
+ *   1. 環境変数 UM_WGPU_HOME = wgpu-native のリリース（github.com/gfx-rs/wgpu-native/releases の
+ *      wgpu-<OS>-<CPU>-release.zip）を展開した場所（include/webgpu/webgpu.h と lib/ があるところ）。
+ *      Windows では lib/wgpu_native.dll.lib と lib/wgpu_native.dll を使う。
+ *   2. pkg-config の wgpu-native（Linux のパッケージなど）。
+ *   3. macOS の Homebrew（`brew install wgpu-native`）の決まった場所。
+ */
+function findWgpu(): Wgpu {
+  const hint = 'download wgpu-<os>-<arch>-release.zip from https://github.com/gfx-rs/wgpu-native/releases, unzip it and set UM_WGPU_HOME ' +
+    'to that folder (macOS: or `brew install wgpu-native`); see docs/wgpu.ja.md';
+  const fromPrefix = (prefix: string): Wgpu | null => {
+    if (!existsSync(join(prefix, 'include', 'webgpu', 'webgpu.h')) || !existsSync(join(prefix, 'include', 'webgpu', 'wgpu.h'))) return null;
+    const lib = join(prefix, 'lib');
+    if (process.platform === 'win32') {
+      if (!existsSync(join(lib, 'wgpu_native.dll.lib'))) return null;
+      return { args: [`-I${join(prefix, 'include')}`, join(lib, 'wgpu_native.dll.lib')], dll: join(lib, 'wgpu_native.dll') };
+    }
+    const so = process.platform === 'darwin' ? 'libwgpu_native.dylib' : 'libwgpu_native.so';
+    if (!existsSync(join(lib, so))) return null;
+    const extra = process.platform === 'darwin' ? [] : ['-ldl'];
+    return { args: [`-I${join(prefix, 'include')}`, `-L${lib}`, '-lwgpu_native', `-Wl,-rpath,${lib}`, ...extra] };
+  };
+  const env = process.env.UM_WGPU_HOME;
+  if (env) {
+    const found = fromPrefix(resolve(env));
+    if (!found) throw new Error(`wgpu-native was not found in UM_WGPU_HOME=${env}; ${hint}`);
+    return found;
+  }
+  if (process.platform !== 'win32') {
+    try {
+      const pc = (args: string[]) => execFileSync('pkg-config', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      const flags = pc(['--cflags', '--libs', 'wgpu-native']).split(/\s+/).filter((a) => a !== '');
+      const libdir = pc(['--variable=libdir', 'wgpu-native']);
+      if (libdir) flags.push(`-Wl,-rpath,${libdir}`);
+      return { args: flags };
+    } catch {
+      // pkg-config がない、または wgpu-native が登録されていない。
+    }
+    if (process.platform === 'darwin') {
+      for (const p of ['/opt/homebrew/opt/wgpu-native', '/usr/local/opt/wgpu-native']) {
+        const found = fromPrefix(p);
+        if (found) return found;
+      }
+    }
+  }
+  throw new Error(`this program runs kernels on the GPU with UM_WGPU=1, which needs wgpu-native, but it was not found; ${hint}`);
+}
+
+/** 生成した LLVM IR が wgpu の経路を使っているか（codegen は GPU を使う呼び出しがあるときだけ宣言を出す）。 */
+function usesWgpu(ll: string): boolean {
+  return ll.includes('declare ptr @um_wgpu_alloc(');
 }
 
 const RUNTIME_WASMTIME = join(import.meta.dirname, '..', 'runtime', 'wasm.c');
@@ -282,6 +340,18 @@ const WINDOW_PRELUDE = join(import.meta.dirname, '..', 'runtime', 'window.um');
  * ウィンドウと同じく、プログラムがこのファイルの名前を使うときだけ加える（使わないプログラムは wasmtime をリンクしない）。
  */
 const WASM_PRELUDE = join(import.meta.dirname, '..', 'runtime', 'wasm.um');
+/**
+ * wgpu-native（WebGPU の C API）で kernel を GPU で実行する経路を使うか。ネイティブのビルド（host）で、
+ * 環境変数 UM_WGPU=1 を付けたときだけ有効にする。Windows（Direct3D 12 / Vulkan）・Linux（Vulkan）・macOS（Metal）で動く。
+ * UM_METAL=1 と同時には指定できない。
+ */
+export function wgpuEnabled(target: TargetName): boolean {
+  if (process.env.UM_WGPU !== '1') return false;
+  if (target !== 'host') return false;
+  if (process.env.UM_METAL === '1') throw new Error('UM_METAL=1 and UM_WGPU=1 cannot be used together; choose one GPU backend (see docs/wgpu.ja.md)');
+  return true;
+}
+
 const RUNTIME_WASM_C = join(import.meta.dirname, '..', 'runtime', 'wasm_rt.c');
 
 /** ファイル番号を、宣言とその中のメソッドに付ける。 */
@@ -385,10 +455,12 @@ export function parseProgram(src: string, file?: string): Module {
 /** ソースを検査し、LLVM IR（テキスト）を返す。エラーは CompileError / CompileErrors を投げる。 */
 export function compileToLL(src: string, target: TargetName, sanitize: boolean | 'thread' = false, file?: string): string {
   const t = TARGETS[target];
-  // GPU バックエンドがあるのは wasm32（WebGPU）と、UM_METAL=1 のときの Mac のネイティブ（Metal）。
+  // GPU バックエンドがあるのは wasm32（WebGPU）と、UM_METAL=1 のときの Mac のネイティブ（Metal）と、
+  // UM_WGPU=1 のときのネイティブ（wgpu-native。どの OS でも）。
   const metal = metalEnabled(target);
+  const wgpu = wgpuEnabled(target);
   // プラグインは GPU を使わない（kernel の dispatch は CPU の1スレッドで実行する）。
-  const prog = check(parseProgram(src, file), t.ptrBits, target === 'wasm32' || metal);
+  const prog = check(parseProgram(src, file), t.ptrBits, target === 'wasm32' || metal || wgpu);
   if (t.kind === 'native') {
     // 実行ファイルには入口が要る。
     const main = prog.fns.get('main')?.decl;
@@ -402,15 +474,17 @@ export function compileToLL(src: string, target: TargetName, sanitize: boolean |
   const appleArm = process.env.UM_GENERIC_SIMD !== '1' &&
     (target === 'arm64-macos' || (target === 'host' && process.platform === 'darwin' && process.arch === 'arm64'));
   const windows = target === 'host' && process.platform === 'win32';
-  return generate(prog, t.kind, sanitize, metal, appleArm, windows, target === 'wasm32-plugin');
+  return generate(prog, t.kind, sanitize, metal, appleArm, windows, target === 'wasm32-plugin', wgpu);
 }
 
 /**
- * dispatch できる kernel それぞれの WGSL を返す（確認用。wasm には同じものが埋め込まれる）。
- * 64 ビットの整数を使う kernel は WGSL にできない（WebGPU では CPU で実行する）ので含めない。
+ * dispatch できる kernel それぞれの WGSL を返す（wasm と UM_WGPU=1 のネイティブには同じものが埋め込まれる）。
+ * gpu.loadKernel はこの WGSL をそのまま読み込める（docs/wgpu.ja.md の「束縛の並び」）。
+ * 64 ビットの整数か simdgroup の集計を使う kernel は WGSL にできない（CPU で実行する）ので含めない。
+ * ptrBits はプログラムの型検査に使うポインタの幅（ネイティブだけの組み込みを使うプログラムは 64）。
  */
-export function compileWgsl(src: string, file?: string): Map<string, string> {
-  const prog = check(parseProgram(src, file), 32, true);
+export function compileWgsl(src: string, file?: string, ptrBits: 32 | 64 = 32): Map<string, string> {
+  const prog = check(parseProgram(src, file), ptrBits, true);
   const out = new Map<string, string>();
   for (const sig of prog.fns.values()) {
     const d = sig.decl;
@@ -420,8 +494,8 @@ export function compileWgsl(src: string, file?: string): Map<string, string> {
         // group.* を使う kernel は dispatchGroups 用の形にする。
         out.set(d.name, emitWgsl(prog, d, d.usesGroup === true).source);
       } catch (e) {
-        // 定数の配列を使う kernel は WGSL にしない（wasm32 では CPU で実行する）。
-        if (e instanceof CompileError && e.code === WEBGPU_CONST_ARRAY) continue;
+        // simdgroup の集計を使う kernel は WGSL にしない（CPU で実行する）。
+        if (e instanceof CompileError && e.code === WGSL_SIMDGROUP) continue;
         throw e;
       }
     }
@@ -514,10 +588,13 @@ export function build(ll: string, target: TargetName, outPath: string, optLevel 
       if (sdl) args.push(RUNTIME_WINDOW, RUNTIME_AUDIO, ...sdl.args);
       const wt = usesWasm(ll) ? findWasmtime() : null;
       if (wt) args.push(RUNTIME_WASMTIME, ...wt.args);
+      const wgpu = wgpuEnabled(target) && usesWgpu(ll) ? findWgpu() : null;
+      if (wgpu) args.push(RUNTIME_WGPU, ...wgpu.args);
       clang(args, quiet);
-      // SDL3.dll と wasmtime.dll は実行ファイルと同じ場所にないと起動できないので、隣に写す。
+      // SDL3.dll・wasmtime.dll・wgpu_native.dll は実行ファイルと同じ場所にないと起動できないので、隣に写す。
       if (sdl?.dll && existsSync(sdl.dll)) copyFileSync(sdl.dll, join(dirname(exe), 'SDL3.dll'));
       if (wt?.dll && existsSync(wt.dll)) copyFileSync(wt.dll, join(dirname(exe), 'wasmtime.dll'));
+      if (wgpu?.dll && existsSync(wgpu.dll)) copyFileSync(wgpu.dll, join(dirname(exe), 'wgpu_native.dll'));
       return { output: exe, objectOnly: false };
     }
 
@@ -531,6 +608,7 @@ export function build(ll: string, target: TargetName, outPath: string, optLevel 
     }
     if (usesWindow(ll)) args.push(RUNTIME_WINDOW, RUNTIME_AUDIO, ...findSdl3().args);
     if (usesWasm(ll)) args.push(RUNTIME_WASMTIME, ...findWasmtime().args);
+    if (wgpuEnabled(target) && usesWgpu(ll)) args.push(RUNTIME_WGPU, ...findWgpu().args);
     clang(args, quiet);
     return { output: out, objectOnly: false };
   } finally {

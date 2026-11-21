@@ -14,7 +14,8 @@ usage:
 
 targets (T): wasm32 (default), wasm32-plugin (a wasm module with no imports, to load from a host), arm64-macos, host
   --emit-llvm   write LLVM IR text instead of a binary
-  --emit-wgsl   also write the WGSL of each kernel as <out>.<kernel>.wgsl (wasm32 only)
+  --emit-wgsl   also write the WGSL of each kernel as <out>.<kernel>.wgsl (wasm32 and UM_WGPU=1 native builds embed the same
+                WGSL; gpu.loadKernel can load it as is, see docs/wgpu.ja.md)
   --emit-msl    also write the MSL of each kernel as <out>.<kernel>.metal (UM_METAL=1 native builds compile the same MSL at run time)
   --json        print diagnostics as JSON on stdout
 `;
@@ -105,8 +106,7 @@ function main(argv: string[]): void {
   const objectOnly = target === 'arm64-macos' && process.platform !== 'darwin';
   const path = out ?? (target === 'wasm32' || target === 'wasm32-plugin' ? `${stem}.wasm` : objectOnly ? `${stem}.o` : stem);
   if (emitWgsl) {
-    if (target !== 'wasm32') fail('--emit-wgsl needs the wasm32 target');
-    for (const [name, text] of compileWgsl(src, file)) writeFileSync(`${path}.${name}.wgsl`, text);
+    for (const [name, text] of compileWgsl(src, file, TARGETS[target].ptrBits)) writeFileSync(`${path}.${name}.wgsl`, text);
   }
   if (emitMsl) {
     for (const [name, text] of compileMsl(src, file)) writeFileSync(`${path}.${name}.metal`, text);

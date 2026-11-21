@@ -310,10 +310,17 @@ void *um_alloc_zeroed(size_t count, size_t elem_size) {
 typedef void (*um_free_fn)(void *);
 _Atomic(um_free_fn) um_free_hook = NULL;
 
+// wgpu のランタイムが設定する呼び出し口。Buffer の領域は runtime/wgpu.c が自分で確保する（ページの保護で写しを追うため）ので、
+// その領域なら向こうが解放して 1 を返す。wgpu を使わないビルドでは NULL のまま。
+typedef int (*um_free_owned_fn)(void *);
+_Atomic(um_free_owned_fn) um_free_owned_hook = NULL;
+
 void um_free(void *p) {
   if (p && ((uintptr_t)p & (um_page - 1)) == 0) {
     um_free_fn hook = atomic_load_explicit(&um_free_hook, memory_order_acquire);
     if (hook) hook(p);
+    um_free_owned_fn owned = atomic_load_explicit(&um_free_owned_hook, memory_order_acquire);
+    if (owned && owned(p)) return;
   }
   free(p);
 }

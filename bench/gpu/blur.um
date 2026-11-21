@@ -1,0 +1,95 @@
+// 速さの計測: 1280x720 の箱ぼかし（半径 8、横と縦の2回。vec4<f32> の画素）。
+// CPU の全コア（cpu.dispatch）と GPU（gpu.dispatch）で、1フレームあたりの時間を測る。
+// GPU は2通り: 毎フレーム CPU が結果を読む場合（読み戻しを含む）と、読まずに続ける場合。
+// 作り方と結果は docs/wgpu.ja.md の「速さ」。
+
+const R: u32 = 8;
+
+kernel function blurX(i: u32, dst: mut Buffer<vec4<f32>>, src: Buffer<vec4<f32>>, w: u32): void {
+  const x = i % w;
+  const row = i - x;
+  let s = vec4(0.0 as f32, 0, 0, 0);
+  for (let k: u32 = 0; k <= 2 * R; k++) {
+    // 端は切り詰め（左端より左は左端の画素）。
+    let xx = x + k;
+    xx = Math.max(xx, R) - R;
+    s = s + src[row + Math.min(xx, w - 1)];
+  }
+  dst[i] = s / ((2 * R + 1) as f32);
+}
+
+kernel function blurY(i: u32, dst: mut Buffer<vec4<f32>>, src: Buffer<vec4<f32>>, w: u32, h: u32): void {
+  const x = i % w;
+  const y = i / w;
+  let s = vec4(0.0 as f32, 0, 0, 0);
+  for (let k: u32 = 0; k <= 2 * R; k++) {
+    let yy = y + k;
+    yy = Math.max(yy, R) - R;
+    s = s + src[Math.min(yy, h - 1) * w + x];
+  }
+  dst[i] = s / ((2 * R + 1) as f32);
+}
+
+function checksum(b: Buffer<vec4<f32>>): f64 {
+  let s: f64 = 0;
+  for (let i: u32 = 0; i < b.length; i += 97) {
+    s += (b[i].x + b[i].y * 2 + b[i].z * 3) as f64;
+  }
+  return s;
+}
+
+export function main(): i32 {
+  const w: u32 = 1280;
+  const h: u32 = 720;
+  const n = w * h;
+  const frames = 30;
+  const ff = frames as f64;
+  let src = new Buffer<vec4<f32>>(n);
+  for (let i: u32 = 0; i < n; i++) {
+    src[i] = vec4(((i * 2654435761) >> 24) as f32 / 255, (i % w) as f32 / 1280, (i / w) as f32 / 720, 1);
+  }
+  let tmp = new Buffer<vec4<f32>>(n);
+  let a = new Buffer<vec4<f32>>(n);
+  let b = new Buffer<vec4<f32>>(n);
+  let sink: f32 = 0;
+
+  cpu.dispatch(blurX, n, mut tmp, src, w);
+  cpu.dispatch(blurY, n, mut a, tmp, w, h);
+  gpu.dispatch(blurX, n, mut tmp, src, w);
+  gpu.dispatch(blurY, n, mut b, tmp, w, h);
+  print(checksum(a) == checksum(b));
+
+  let t0 = clock();
+  for (let f = 0; f < frames; f++) {
+    cpu.dispatch(blurX, n, mut tmp, src, w);
+    cpu.dispatch(blurY, n, mut a, tmp, w, h);
+    sink += a[(f as u32) * 1000].x;
+  }
+  print(`cpu (all cores):           ${(clock() - t0) * 1000 / ff} ms/frame`);
+
+  t0 = clock();
+  for (let f = 0; f < frames; f++) {
+    gpu.dispatch(blurX, n, mut tmp, src, w);
+    gpu.dispatch(blurY, n, mut b, tmp, w, h);
+    sink += b[(f as u32) * 1000].x;
+  }
+  print(`gpu, CPU reads each frame: ${(clock() - t0) * 1000 / ff} ms/frame`);
+
+  t0 = clock();
+  for (let f = 0; f < frames; f++) {
+    gpu.dispatch(blurX, n, mut tmp, src, w);
+    gpu.dispatch(blurY, n, mut b, tmp, w, h);
+  }
+  sink += b[0].x;
+  print(`gpu, not read:             ${(clock() - t0) * 1000 / ff} ms/frame`);
+
+  t0 = clock();
+  for (let f = 0; f < frames; f++) {
+    dispatch(blurX, n, mut tmp, src, w);
+    dispatch(blurY, n, mut b, tmp, w, h);
+    sink += b[(f as u32) * 1000].x;
+  }
+  print(`auto, CPU reads each frame:${(clock() - t0) * 1000 / ff} ms/frame`);
+  print(sink > 0);
+  return 0;
+}

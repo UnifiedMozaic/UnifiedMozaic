@@ -6,11 +6,13 @@ How to get the UnifiedMozaic compiler running on your machine. You need only **N
 
 ## Supported platforms
 
-| Platform | Native | GPU (Metal) | wasm32 |
-| --- | --- | --- | --- |
-| macOS (Apple Silicon) | yes | yes | yes (needs Homebrew's LLVM and lld) |
-| Linux (x86_64 / arm64) | yes | — | yes (needs `lld`) |
-| Windows (x86_64) | yes (needs MSVC from Visual Studio or the Build Tools) | — | yes |
+| Platform | Native | GPU (wgpu) | GPU (Metal) | wasm32 |
+| --- | --- | --- | --- | --- |
+| macOS (Apple Silicon) | yes | not yet verified | yes | yes (needs Homebrew's LLVM and lld) |
+| Linux (x86_64 / arm64) | yes | not yet verified | — | yes (needs `lld`) |
+| Windows (x86_64) | yes (needs MSVC from Visual Studio or the Build Tools) | yes | — | yes |
+
+GPU (wgpu) needs wgpu-native; see [docs/wgpu.ja.md](wgpu.ja.md) (Japanese): unzip a release from https://github.com/gfx-rs/wgpu-native/releases and set `UM_WGPU_HOME` to that folder.
 
 ## 1. Node.js (22.18 or later)
 
@@ -92,6 +94,9 @@ um build examples/structs.um --target host -o structs
 um build examples/structs.um --target host -o structs
 .structs.exe
 
+# wgpu (any OS): kernels can run on the GPU; UM_WGPU_HOME points to the unzipped wgpu-native release
+UM_WGPU=1 um build examples/gpu_submit.um --target host -o gpu_submit
+
 # Metal (Mac): kernels can run on the GPU
 UM_METAL=1 um build examples/gpu_submit.um --target host -o gpu_submit
 ./gpu_submit                # prints 30, true, 285, 3
@@ -134,5 +139,6 @@ code --install-extension unifiedmozaic-0.1.0.vsix
 | `この clang は wasm32 を出力できない` (this clang cannot target wasm32) | macOS: `brew install llvm lld`. Linux: install `lld` |
 | Windows: `unable to find a Visual Studio installation`, or `link.exe` / `kernel32.lib` not found | Install Visual Studio or the Build Tools with "Desktop development with C++" (MSVC and the Windows SDK) |
 | Windows: garbled non-ASCII text in the console | Native programs switch the console's output code page to UTF-8 while they run; if text is still garbled, check that the console font has those characters |
-| `gpu.dispatch` is a compile error | The GPU path exists only for native Mac builds with `UM_METAL=1`; otherwise use `dispatch` or `cpu.dispatch` |
+| `gpu.dispatch` is a compile error | The native GPU paths need `UM_WGPU=1` (any OS) or `UM_METAL=1` (Mac); otherwise use `dispatch` or `cpu.dispatch` |
+| `wgpu-native was not found` | Unzip a wgpu-native release and set `UM_WGPU_HOME` to that folder |
 | `panic: the GPU is not available` at run time | `gpu.dispatch` stops when there is no GPU; `dispatch` (automatic) falls back to the CPU |

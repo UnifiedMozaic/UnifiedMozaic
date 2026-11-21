@@ -85,6 +85,8 @@ int32_t um_audio_write(int32_t id, const float *samples, size_t len, int64_t sta
   if (count < 0) count = (int64_t)len - start;
   if ((uint64_t)count > (uint64_t)len - (uint64_t)start || count % a->channels != 0) um_panic(UM_PANIC_WINDOW_ARGS, line);
   if (count == 0) return 1;
+  // UM_WGPU=1 のビルドでは、GPU が書いた標本をまだ CPU に読み戻していないことがある（runtime/wgpu.c）。先に1回読んで済ませる。
+  (void)*(volatile const float *)(samples + start);
   // SDL は int のバイト数で受け取るので、大きいときは分けて書く。
   // 書き込みと数の更新を1つの錠の中で行う（ほかのスレッドの AC_PLAYED が途中の値を見ないように。錠は再帰できる）。
   const int64_t chunk = (int64_t)a->channels * 1048576;

@@ -2,6 +2,7 @@
 // GPU（Metal の simd_sum など）と CPU（cpu.dispatchGroups）の結果が一致することを確かめる。
 // グループの大きさが 32 で割り切れないとき（最後の simdgroup が短い）も確かめる。
 // f32 の和は、値を整数にして丸めが出ないようにしてある（Metal の f32 の和は足す順番が決まっていない）。
+// wgpu-error: webgpu-simdgroup
 // expect: true
 // expect: true
 // expect: true

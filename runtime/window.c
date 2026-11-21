@@ -178,14 +178,17 @@ static void show_texture(um_window *w) {
   SDL_RenderPresent(w->ren);
 }
 
-static void check_pixels(size_t len, int32_t width, int32_t height, int32_t line) {
+static void check_pixels(const uint32_t *pixels, size_t len, int32_t width, int32_t height, int32_t line) {
   if (width <= 0 || height <= 0 || (uint64_t)width * (uint64_t)height > (uint64_t)len) um_panic(UM_PANIC_WINDOW_ARGS, line);
+  // UM_WGPU=1 のビルドでは、GPU が書いた画素はまだ CPU に読み戻していないことがある（runtime/wgpu.c）。
+  // 先頭を1回読んで、読み戻しをここで済ませる（ドライバがカーネルの中で読むと、保護の例外を処理できないため）。
+  (void)*(volatile const uint32_t *)pixels;
 }
 
 void um_window_present(int32_t id, const uint32_t *pixels, size_t len, int32_t width, int32_t height, int32_t line) {
   main_only(line);
   um_window *w = lookup(id, line);
-  check_pixels(len, width, height, line);
+  check_pixels(pixels, len, width, height, line);
   if (!fit_texture(w, width, height)) return;
   SDL_UpdateTexture(w->tex, NULL, pixels, width * 4);
   w->tex_valid = 1;
@@ -198,7 +201,7 @@ void um_window_present_rect(int32_t id, const uint32_t *pixels, size_t len, int3
                             int32_t x, int32_t y, int32_t rw, int32_t rh, int32_t show, int32_t line) {
   main_only(line);
   um_window *w = lookup(id, line);
-  check_pixels(len, width, height, line);
+  check_pixels(pixels, len, width, height, line);
   if (x < 0 || y < 0 || rw < 0 || rh < 0 || (int64_t)x + rw > width || (int64_t)y + rh > height) um_panic(UM_PANIC_WINDOW_ARGS, line);
   if (!fit_texture(w, width, height)) return;
   if (!w->tex_valid) {
