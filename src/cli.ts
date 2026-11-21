@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import { CompileError, CompileErrors, formatDiagnostic } from './diag.ts';
 import type { Diagnostic } from './diag.ts';
@@ -10,13 +10,16 @@ const USAGE = `UnifiedMozaic compiler
 
 usage:
   um check <file.um> [--target T] [--json]
-  um build <file.um> [--target T] [-o <out>] [--emit-llvm] [-O<level>] [--json]
+  um build <file.um> [--target T] [-o <out>] [--emit-llvm] [-O<level>] [--link-input <file>]... [--json]
 
 targets (T): wasm32 (default), wasm32-plugin (a wasm module with no imports, to load from a host), arm64-macos, host
   --emit-llvm   write LLVM IR text instead of a binary
   --emit-wgsl   also write the WGSL of each kernel as <out>.<kernel>.wgsl (wasm32 and UM_WGPU=1 native builds embed the same
                 WGSL; gpu.loadKernel can load it as is, see docs/wgpu.ja.md)
   --emit-msl    also write the MSL of each kernel as <out>.<kernel>.metal (UM_METAL=1 native builds compile the same MSL at run time)
+  --link-input  add a file to the native link as is (repeatable): a Windows resource (.res, e.g. made by llvm-rc to embed
+                an icon in the .exe), an object file or a library. Ignored, with a note, when the target does not link
+                (wasm32, wasm32-plugin, arm64-macos on a non-Mac)
   --json        print diagnostics as JSON on stdout
 `;
 
@@ -41,6 +44,7 @@ function main(argv: string[]): void {
   let emitMsl = false;
   let json = false;
   let opt = '2';
+  const linkInputs: string[] = [];
 
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
@@ -57,6 +61,11 @@ function main(argv: string[]): void {
       emitWgsl = true;
     } else if (a === '--emit-msl') {
       emitMsl = true;
+    } else if (a === '--link-input') {
+      const p = rest[++i];
+      if (!p) fail('--link-input needs a path');
+      if (!existsSync(p)) fail(`cannot read the link input '${p}'`);
+      linkInputs.push(p);
     } else if (a === '--json') {
       json = true;
     } else if (/^-O[0-3sz]$/.test(a)) {
@@ -113,13 +122,16 @@ function main(argv: string[]): void {
   }
   let res;
   try {
-    res = build(ll, target, path, opt);
+    res = build(ll, target, path, opt, false, false, linkInputs);
   } catch {
     // clang 自身のエラー出力はすでに stderr に出ている。
     fail('error: the LLVM toolchain (clang) failed; see the messages above');
   }
+  if (res.linkInputsIgnored && !json) {
+    process.stderr.write(`note: --link-input is ignored for --target ${target}, which does not link a native executable\n`);
+  }
   if (json) {
-    process.stdout.write(JSON.stringify({ ok: true, errors: [], output: res.output, objectOnly: res.objectOnly }) + '\n');
+    process.stdout.write(JSON.stringify({ ok: true, errors: [], output: res.output, objectOnly: res.objectOnly, linkInputsIgnored: res.linkInputsIgnored === true }) + '\n');
   } else if (res.objectOnly) {
     process.stderr.write(`note: linking for macOS needs a Mac; wrote an object file: ${res.output}\n`);
   }

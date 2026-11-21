@@ -607,6 +607,8 @@ export interface BuildResult {
   output: string;
   /** リンクまで行わず、オブジェクトファイルで止めた場合 true。 */
   objectOnly: boolean;
+  /** linkInputs を渡したが、このターゲットではリンクしないので使わなかった場合 true（wasm32、Mac 以外での arm64-macos）。 */
+  linkInputsIgnored?: boolean;
 }
 
 // 外部コマンドは必ず execFile（シェルを通さない）で、引数を配列で渡す。
@@ -619,9 +621,18 @@ function clang(args: string[], quiet = false, exe = CLANG): void {
  * sanitize はテスト用（quiet は clang のエラー出力を捨てる。対応状況の確認に使う）。true なら AddressSanitizer つきでビルドし、
  * 解放後使用・二重解放・解放漏れを実行時に検出する。'thread' なら ThreadSanitizer つき（データ競合を検出する）。
  * compileToLL にも同じ指定を渡すこと。
+ * linkInputs は、ネイティブのリンクにそのまま足すファイル（Windows のリソース .res、オブジェクトファイル、ライブラリなど）。
+ * 絶対パスに直してリンカに渡す。wasm32 と、Mac 以外での arm64-macos（オブジェクトファイルまで）ではリンクしないので使わない。
  */
-export function build(ll: string, target: TargetName, outPath: string, optLevel = '2', sanitize: boolean | 'thread' = false, quiet = false): BuildResult {
+export function build(
+  ll: string, target: TargetName, outPath: string, optLevel = '2', sanitize: boolean | 'thread' = false, quiet = false, linkInputs: string[] = [],
+): BuildResult {
   if (!/^[0-3sz]$/.test(optLevel)) throw new Error(`invalid optimization level: ${optLevel}`);
+  const extra = linkInputs.map((p) => resolve(p));
+  for (const p of extra) {
+    if (!existsSync(p)) throw new Error(`link input not found: ${p}`);
+  }
+  const ignored = extra.length > 0 ? { linkInputsIgnored: true } : {};
   const out = resolve(outPath);
   const dir = mkdtempSync(join(tmpdir(), 'um-'));
   try {
@@ -652,13 +663,13 @@ export function build(ll: string, target: TargetName, outPath: string, optLevel 
             { line: 1, col: 1 }, 'plugins run without any host functions: remove print, input / output, and conversions of f64 to string (String, template strings)');
         }
       }
-      return { output: out, objectOnly: false };
+      return { output: out, objectOnly: false, ...ignored };
     }
 
     if (target === 'arm64-macos' && process.platform !== 'darwin') {
       // macOS以外ではリンクに必要なSDKがないので、オブジェクトファイルまで。
       clang(['--target=arm64-apple-macos13', opt, '-c', '-o', out, llPath]);
-      return { output: out, objectOnly: true };
+      return { output: out, objectOnly: true, ...ignored };
     }
 
     if (process.platform === 'win32') {
@@ -677,6 +688,8 @@ export function build(ll: string, target: TargetName, outPath: string, optLevel 
       if (ff) args.push(RUNTIME_MEDIA, ...ff.args);
       const wgpu = wgpuEnabled(target) && usesWgpu(ll) ? findWgpu() : null;
       if (wgpu) args.push(RUNTIME_WGPU, ...wgpu.args);
+      // リンクに足すファイル（llvm-rc で作ったリソース .res を渡すと、アイコンなどが exe に入る）。
+      args.push(...extra);
       clang(args, quiet);
       // FFmpeg の DLL（avformat-*.dll など）も、実行ファイルの隣に写す。
       for (const dll of ff?.dlls ?? []) copyFileSync(dll, join(dirname(exe), basename(dll)));
@@ -699,6 +712,7 @@ export function build(ll: string, target: TargetName, outPath: string, optLevel 
     if (usesWasm(ll)) args.push(RUNTIME_WASMTIME, ...findWasmtime().args);
     if (usesMedia(ll)) args.push(RUNTIME_MEDIA, ...findFfmpeg().args);
     if (wgpuEnabled(target) && usesWgpu(ll)) args.push(RUNTIME_WGPU, ...findWgpu().args);
+    args.push(...extra);
     clang(args, quiet);
     return { output: out, objectOnly: false };
   } finally {
