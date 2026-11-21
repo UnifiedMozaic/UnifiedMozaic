@@ -37,9 +37,9 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version-file: package.json
 
@@ -64,7 +64,7 @@ jobs:
       # --- ライブラリ ---
       - name: deps path
         run: echo "UM_DEPS=$HOME/um-deps" >> "$GITHUB_ENV"
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ~/um-deps
           key: um-deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/ci/install-deps.sh') }}
