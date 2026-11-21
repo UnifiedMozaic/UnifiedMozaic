@@ -167,6 +167,8 @@ _Noreturn void um_panic(int32_t code, int32_t line) {
     case 10: msg = "invalid group size (it must be 1 to 1024, and groups times size must fit in u32)"; break;
     case 11: msg = "window functions can only be called from the main thread"; break;
     case 12: msg = "invalid window call (unknown window, a size that is not positive, or a Buffer that is too short)"; break;
+    case 13: msg = "invalid wasm call (an unknown or freed module / instance, or a range outside the array)"; break;
+    case 14: msg = "a wasm instance was freed while another thread was using it"; break;
   }
   // 複数のスレッドが同時に停止しても、メッセージは1回だけ。2番目以降は、終わるまで寝る。
   if (atomic_exchange(&um_panicking, 1)) {

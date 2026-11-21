@@ -20,6 +20,8 @@ const PANIC_NO_GPU = 7;
 const PANIC_THREAD_IO = 9;
 const PANIC_GROUP = 10;
 // 11 = ウィンドウの関数をメインスレッド以外から呼んだ、12 = ウィンドウの関数の引数が正しくない（runtime/window.c が停止する）。
+// 13 = wasm の番号（モジュール・インスタンス）か配列の範囲が正しくない、14 = 使っている最中の wasm のインスタンスを解放した
+// （runtime/wasm.c が停止する）。
 /** グループの大きさの上限（Metal の1グループのスレッド数の上限）。 */
 const MAX_GROUP_SIZE = 1024;
 
@@ -1083,6 +1085,8 @@ class ModuleGen {
   intrinsics = new Set<string>();
   /** ウィンドウの組み込み（windowOpen など）を使ったか。使ったときだけランタイムの宣言を出す。 */
   usesWindow = false;
+  /** WebAssembly の組み込み（wasmCompile など）を使ったか。使ったときだけランタイムの宣言を出す。 */
+  usesWasm = false;
   /** GPU で実行する kernel。名前 → 番号と、WGSL を入れたグローバル定数。 */
   gpuKernels = new Map<string, { id: number; global: string; bytes: number }>();
   /** プログラムのどこかに f16 が現れるか。現れるときだけ変換の関数を出す。 */
@@ -1614,6 +1618,16 @@ class ModuleGen {
     if (this.usesWindow) {
       out.push(`declare i32 @um_window_open(ptr, ${this.usz}, i32, i32, i32) #0`, 'declare void @um_window_close(i32, i32) #0');
       out.push(`declare i32 @um_window_poll(ptr, ${this.usz}, i32, i32) #0`, `declare void @um_window_present(i32, ptr, ${this.usz}, i32, i32, i32) #0`);
+    }
+    // WebAssembly（runtime/wasm.c）。使ったときだけ宣言する。ドライバはこの宣言を見て wasm.c と wasmtime をリンクする。
+    if (this.usesWasm) {
+      const u = this.usz;
+      out.push(`declare i64 @um_wasm_compile(ptr, ${u}, i32) #0`, 'declare void @um_wasm_free_module(i64, i32) #0');
+      out.push('declare void @um_wasm_exports(i64, ptr, ptr, i32) #0', 'declare i64 @um_wasm_instantiate(i64, i64, i64, i64, i32, i32) #0');
+      out.push('declare void @um_wasm_free_instance(i64, i32) #0');
+      out.push(`declare i32 @um_wasm_invoke(i64, ptr, ${u}, ptr, ${u}, ptr, ${u}, ptr, ${u}, i32, i32) #0`);
+      out.push(`declare i32 @um_wasm_read(i64, i64, ptr, ${u}, ${u}, i64, i64, i32) #0`, `declare i32 @um_wasm_write(i64, i64, ptr, ${u}, ${u}, i64, i64, i32) #0`);
+      out.push('declare i64 @um_wasm_memory_size(i64, i32) #0', `declare i32 @um_wasm_wat(ptr, ${u}, ptr, ptr) #0`, 'declare void @um_wasm_error(ptr, ptr) #0');
     }
     // wasm では LLVM が f16 を整数のビット列として変換関数に渡すので、ランタイム（wasm_rt.c）が直接その関数を持つ。
     out.push('declare zeroext i8 @um_f8_enc(double) #0', 'declare zeroext i8 @um_f4_enc(double) #0');
@@ -3429,6 +3443,122 @@ class FnGen {
         const [data, len] = pxParts();
         this.emit(`call void @um_window_present(i32 ${id}, ptr ${data}, ${usz} ${len}, i32 ${w}, i32 ${h}, i32 ${e.pos.line})`);
         return '';
+      }
+    }
+    if (name.startsWith('wasm')) {
+      this.m.usesWasm = true;
+      return this.wasmCall(e, name, outSlots, optional, flag);
+    }
+    throw new Error(`internal: builtin ${name}`);
+  }
+
+  /**
+   * WebAssembly の組み込み（runtime/wasm.c）。番号の検査と範囲の検査はランタイムが行い、違反なら行番号つきで停止する。
+   * 失敗（読み込めない、トラップなど）は停止せず、null / false / -1 を返す（理由は wasmError）。
+   */
+  wasmCall(
+    e: Expr & { kind: 'call' }, name: string, outSlots: () => [string, string],
+    optional: (ok: string, d: string, l: string) => string, flag: (call: string) => string,
+  ): string {
+    const usz = this.m.usz;
+    const line = e.pos.line;
+    // 番号（0 は失敗）を i64 | null にする。
+    const handle = (call: string): string => {
+      const id = this.tmp();
+      this.emit(`${id} = call i64 ${call}`);
+      const t = llTy(e.ty!);
+      const some = this.tmp();
+      const a = this.tmp();
+      const b = this.tmp();
+      this.emit(`${some} = icmp ne i64 ${id}, 0`);
+      this.emit(`${a} = insertvalue ${t} undef, i1 ${some}, 0`);
+      this.emit(`${b} = insertvalue ${t} ${a}, i64 ${id}, 1`);
+      return b;
+    };
+    switch (name) {
+      case 'wasmCompile': {
+        const [data, len] = this.heapParts(e.args[0].expr)();
+        return handle(`@um_wasm_compile(ptr ${data}, ${usz} ${len}, i32 ${line})`);
+      }
+      case 'wasmFreeModule': {
+        const h = this.expr(e.args[0].expr);
+        this.emit(`call void @um_wasm_free_module(i64 ${h}, i32 ${line})`);
+        return '';
+      }
+      case 'wasmExportList': {
+        const h = this.expr(e.args[0].expr);
+        const [d, l] = outSlots();
+        this.emit(`call void @um_wasm_exports(i64 ${h}, ptr ${d}, ptr ${l}, i32 ${line})`);
+        const data = this.tmp();
+        const len = this.tmp();
+        this.emit(`${data} = load ptr, ptr ${d}`);
+        this.emit(`${len} = load ${usz}, ptr ${l}`);
+        return this.arrayValue(data, len, len);
+      }
+      case 'wasmInstantiate': {
+        const [m, fuel, timeout, mem, stub] = e.args.map((a) => this.expr(a.expr));
+        const stub32 = this.tmp();
+        this.emit(`${stub32} = zext i1 ${stub} to i32`);
+        return handle(`@um_wasm_instantiate(i64 ${m}, i64 ${fuel}, i64 ${timeout}, i64 ${mem}, i32 ${stub32}, i32 ${line})`);
+      }
+      case 'wasmFreeInstance': {
+        const h = this.expr(e.args[0].expr);
+        this.emit(`call void @um_wasm_free_instance(i64 ${h}, i32 ${line})`);
+        return '';
+      }
+      case 'wasmInvoke': {
+        // すべての引数を評価し終えてから、場所と長さを読む。
+        const h = this.expr(e.args[0].expr);
+        const nameParts = this.heapParts(e.args[1].expr);
+        const kindParts = this.heapParts(e.args[2].expr);
+        const intParts = this.heapParts(e.args[3].expr);
+        const floatParts = this.heapParts(e.args[4].expr);
+        const nargs = this.expr(e.args[5].expr);
+        const [np, nl] = nameParts();
+        const [kp, kl] = kindParts();
+        const [ip, il] = intParts();
+        const [fp, fl] = floatParts();
+        const r = this.tmp();
+        this.emit(`${r} = call i32 @um_wasm_invoke(i64 ${h}, ptr ${np}, ${usz} ${nl}, ptr ${kp}, ${usz} ${kl}, ptr ${ip}, ${usz} ${il}, ptr ${fp}, ${usz} ${fl}, i32 ${nargs}, i32 ${line})`);
+        return r;
+      }
+      case 'wasmRead':
+      case 'wasmWrite': {
+        const h = this.expr(e.args[0].expr);
+        const off = this.expr(e.args[1].expr);
+        const arrTy = e.args[2].expr.ty!;
+        const parts = this.heapParts(e.args[2].expr);
+        const start = e.args.length > 3 ? this.expr(e.args[3].expr) : '0';
+        const count = e.args.length > 3 ? this.expr(e.args[4].expr) : '-1';
+        const [data, len] = parts();
+        const size = arrTy.k === 'heap' ? this.m.sizeOf(arrTy.elem) : 1;
+        const fn = name === 'wasmRead' ? 'um_wasm_read' : 'um_wasm_write';
+        return flag(`@${fn}(i64 ${h}, i64 ${off}, ptr ${data}, ${usz} ${len}, ${usz} ${size}, i64 ${start}, i64 ${count}, i32 ${line})`);
+      }
+      case 'wasmMemorySize': {
+        const h = this.expr(e.args[0].expr);
+        const r = this.tmp();
+        this.emit(`${r} = call i64 @um_wasm_memory_size(i64 ${h}, i32 ${line})`);
+        return r;
+      }
+      case 'wasmWat': {
+        const [text, tlen] = this.heapParts(e.args[0].expr)();
+        const [d, l] = outSlots();
+        this.emit(`call i32 @um_wasm_wat(ptr ${text}, ${usz} ${tlen}, ptr ${d}, ptr ${l})`);
+        const data = this.tmp();
+        const len = this.tmp();
+        this.emit(`${data} = load ptr, ptr ${d}`);
+        this.emit(`${len} = load ${usz}, ptr ${l}`);
+        return this.arrayValue(data, len, len);
+      }
+      case 'wasmError': {
+        const [d, l] = outSlots();
+        this.emit(`call void @um_wasm_error(ptr ${d}, ptr ${l})`);
+        const data = this.tmp();
+        const len = this.tmp();
+        this.emit(`${data} = load ptr, ptr ${d}`);
+        this.emit(`${len} = load ${usz}, ptr ${l}`);
+        return this.arrayValue(data, len, len);
       }
     }
     throw new Error(`internal: builtin ${name}`);

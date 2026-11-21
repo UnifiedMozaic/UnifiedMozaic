@@ -1,0 +1,8 @@
+// error: type-mismatch
+// target: host
+// wasmWrite が写せるのは数の配列か Buffer だけ（文字列は写せない）。
+export function main(): i32 {
+  const s = "pixels";
+  print(wasmWrite(1, 0, s));
+  return 0;
+}

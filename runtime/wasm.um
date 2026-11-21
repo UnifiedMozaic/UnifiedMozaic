@@ -1,0 +1,261 @@
+// WebAssembly の標準の型と関数。組み込みの wasmCompile / wasmInstantiate / wasmInvoke（runtime/wasm.c）を、
+// Result と enum で使えるようにまとめる。プログラムがこのファイルの名前（wasmLoad、wasmCall、WasmValue など）を
+// 使うときだけ、ドライバが標準の関数として加える。
+//
+// 使い方:
+//   const m = wasmLoadFile("effect.wasm");          // Result<i64, string>（モジュールの番号）
+//   match (m) {
+//     Result.Err(why) => { eprint(why); return 1; }
+//     Result.Ok(module) => {
+//       let limits = new WasmLimits();
+//       limits.fuel = 100000000;                       // 呼び出し1回あたりの燃料（0 は上限なし）
+//       match (wasmNew(module, limits)) {              // Result<i64, string>（インスタンスの番号）
+//         Result.Ok(inst) => {
+//           wasmWrite(inst, 1024, pixels);             // UM の配列 → wasm のメモリ
+//           const r = wasmCall(inst, "apply", [WasmValue.I32(1024), WasmValue.I32(w), WasmValue.I32(h)]);
+//           wasmRead(inst, 1024, mut pixels);          // wasm のメモリ → UM の配列
+//           wasmFreeInstance(inst);
+//         }
+//         Result.Err(why) => { eprint(why); }
+//       }
+//       wasmFreeModule(module);
+//     }
+//   }
+
+// wasm の値。関数の引数と戻り値に使う。
+enum WasmValue {
+  I32(value: i32),
+  I64(value: i64),
+  F32(value: f32),
+  F64(value: f64),
+}
+
+// wasm の値の型（export の一覧に使う）。V128 と Ref の引数・戻り値を持つ関数は wasmCall で呼べない。
+enum WasmType {
+  I32,
+  I64,
+  F32,
+  F64,
+  V128,
+  Ref,
+}
+
+enum WasmExportKind {
+  Function,
+  Memory,
+  Global,
+  Table,
+  Other,
+}
+
+// export 1つ。params と results は関数のときだけ中身がある。
+struct WasmExport {
+  name: string;
+  kind: WasmExportKind;
+  params: WasmType[];
+  results: WasmType[];
+}
+
+// インスタンスの上限。0 は上限なし。燃料と時間は、呼び出し1回（とインスタンスを作るときの start 関数）ごと。
+class WasmLimits {
+  fuel: i64 = 0;          // 燃料（だいたい wasm の命令の数）。尽きると、その呼び出しはトラップで失敗する
+  timeoutMs: i64 = 0;     // 時間（ミリ秒）。過ぎると、その呼び出しはトラップで失敗する（精度は数ミリ秒）
+  memoryBytes: i64 = 0;   // 線形メモリの大きさの上限（バイト）。超える memory.grow は失敗し、超える初期の大きさなら作れない
+  stubImports: bool = false;  // true なら、import を「呼ぶとトラップする関数」で埋めてインスタンスを作る
+}
+
+// wasm のバイナリを読み込んで（コンパイルして）、モジュールの番号を返す。
+function wasmLoad(bytes: u8[]): Result<i64, string> {
+  const m = wasmCompile(bytes);
+  if (m != null) {
+    return Result.Ok(m);
+  }
+  return Result.Err(wasmError());
+}
+
+// ファイルから読み込む。
+function wasmLoadFile(path: string): Result<i64, string> {
+  const bytes = readFile(path);
+  if (bytes != null) {
+    return wasmLoad(bytes);
+  }
+  return Result.Err("cannot read " + path);
+}
+
+// テキスト形式（.wat）を wasm のバイナリにする。
+function wasmFromWat(text: string): Result<u8[], string> {
+  const bytes = wasmWat(text);
+  if (bytes.length == 0) {  // wasm のバイナリは空にならない（空は失敗）
+    return Result.Err(wasmError());
+  }
+  return Result.Ok(bytes);
+}
+
+// インスタンスを作る。インスタンスごとに、別のメモリと別の状態を持つ。
+function wasmNew(module: i64, limits: WasmLimits): Result<i64, string> {
+  const inst = wasmInstantiate(module, limits.fuel, limits.timeoutMs, limits.memoryBytes, limits.stubImports);
+  if (inst != null) {
+    return Result.Ok(inst);
+  }
+  return Result.Err(wasmError());
+}
+
+// export された関数を呼ぶ。引数の型は関数の宣言と同じでなければならない（i32 の引数に WasmValue.I64 は渡せない）。
+// トラップ・燃料切れ・時間切れは Result.Err になる（プログラムは止まらない）。
+function wasmCall(instance: i64, name: string, args: WasmValue[]): Result<WasmValue[], string> {
+  const n = args.length;
+  const room = n < 16 ? 16 : n;
+  let kinds = new Array<i32>(room);
+  let ints = new Array<i64>(room);
+  let floats = new Array<f64>(room);
+  for (let k = 0; k < n; k++) {
+    match (args[k]) {
+      WasmValue.I32(v) => {
+        kinds[k] = 0;
+        ints[k] = v as i64;
+      }
+      WasmValue.I64(v) => {
+        kinds[k] = 1;
+        ints[k] = v;
+      }
+      WasmValue.F32(v) => {
+        kinds[k] = 2;
+        floats[k] = v as f64;
+      }
+      WasmValue.F64(v) => {
+        kinds[k] = 3;
+        floats[k] = v;
+      }
+    }
+  }
+  const r = wasmInvoke(instance, name, mut kinds, mut ints, mut floats, n as i32);
+  if (r < 0) {
+    return Result.Err(wasmError());
+  }
+  let out = new Array<WasmValue>(0);
+  for (let k = 0; k < r; k++) {
+    switch (kinds[k]) {
+      case 0:
+        out.push(WasmValue.I32(ints[k] as i32));
+        break;
+      case 1:
+        out.push(WasmValue.I64(ints[k]));
+        break;
+      case 2:
+        out.push(WasmValue.F32(floats[k] as f32));
+        break;
+      default:
+        out.push(WasmValue.F64(floats[k]));
+        break;
+    }
+  }
+  return Result.Ok(out);
+}
+
+function wasmTypeOf(c: u8): WasmType {
+  switch (c) {
+    case 105: return WasmType.I32;  // 'i'
+    case 73: return WasmType.I64;   // 'I'
+    case 102: return WasmType.F32;  // 'f'
+    case 70: return WasmType.F64;   // 'F'
+    case 118: return WasmType.V128; // 'v'
+  }
+  return WasmType.Ref;
+}
+
+// モジュールの export の一覧（宣言の順）。
+function wasmExports(module: i64): WasmExport[] {
+  const raw = wasmExportList(module);
+  let out = new Array<WasmExport>(0);
+  for (const s of raw) {
+    // 形: 種類の1文字 + 引数の型 + ':' + 戻り値の型 + ':' + 名前（runtime/wasm.c の um_wasm_exports）
+    let kind = WasmExportKind.Other;
+    switch (s[0]) {
+      case 102: kind = WasmExportKind.Function; break;  // 'f'
+      case 109: kind = WasmExportKind.Memory; break;    // 'm'
+      case 103: kind = WasmExportKind.Global; break;    // 'g'
+      case 116: kind = WasmExportKind.Table; break;     // 't'
+    }
+    let params = new Array<WasmType>(0);
+    let results = new Array<WasmType>(0);
+    let name = new Array<u8>(0);
+    let part = 0;
+    for (let i = 1; i < s.length; i++) {
+      const c = s[i];
+      if (part < 2 && c == 58) {  // ':'
+        part++;
+      } else if (part == 0) {
+        params.push(wasmTypeOf(c));
+      } else if (part == 1) {
+        results.push(wasmTypeOf(c));
+      } else {
+        name.push(c);
+      }
+    }
+    out.push({ name: stringFromBytes(name), kind: kind, params: params, results: results });
+  }
+  return out;
+}
+
+// LEB128 の符号なし整数を bytes[pos] から読む。読めた値と次の位置を返す（壊れていれば next = -1）。
+struct WasmLeb {
+  value: i64;
+  next: i64;
+}
+
+function wasmReadLeb(bytes: u8[], pos: i64): WasmLeb {
+  let value: i64 = 0;
+  let shift: i64 = 0;
+  let p = pos;
+  while (p < (bytes.length as i64) && shift < 35) {
+    const b = bytes[p as usize];
+    value = value | (((b & 127) as i64) << shift);
+    p++;
+    if ((b & 128) == 0) {
+      return { value: value, next: p };
+    }
+    shift += 7;
+  }
+  return { value: 0, next: -1 };
+}
+
+// wasm のバイナリから、名前が name のカスタムセクションの中身を取り出す（最初に見つかったもの）。
+// なければ、またはバイナリが壊れていれば null。コンパイルしないので速く、プラグインの宣言を読むのに向く。
+function wasmCustomSection(bytes: u8[], name: string): u8[] | null {
+  const len = bytes.length as i64;
+  // 先頭の 8 バイト: "\0asm" と版（1）。
+  if (len < 8 || bytes[0] != 0 || bytes[1] != 97 || bytes[2] != 115 || bytes[3] != 109) {
+    return null;
+  }
+  let p: i64 = 8;
+  while (p < len) {
+    const id = bytes[p as usize];
+    const size = wasmReadLeb(bytes, p + 1);
+    if (size.next < 0 || size.value > len - size.next) {
+      return null;
+    }
+    const end = size.next + size.value;
+    if (id == 0) {
+      const nlen = wasmReadLeb(bytes, size.next);
+      if (nlen.next < 0 || nlen.value > end - nlen.next) {
+        return null;
+      }
+      let same = nlen.value == (name.length as i64);
+      for (let i: i64 = 0; same && i < nlen.value; i++) {
+        if (bytes[(nlen.next + i) as usize] != name[i as usize]) {
+          same = false;
+        }
+      }
+      if (same) {
+        const start = nlen.next + nlen.value;
+        let out = new Array<u8>((end - start) as usize);
+        for (let i: i64 = 0; i < end - start; i++) {
+          out[i as usize] = bytes[(start + i) as usize];
+        }
+        return out;
+      }
+    }
+    p = end;
+  }
+  return null;
+}

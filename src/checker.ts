@@ -183,7 +183,9 @@ export function simdInfo(t: Ty | undefined): { elem: Ty & { k: 'int' | 'float' }
  * 型検査は呼び出しの名前を `__io_名前` に書き換え、コード生成がランタイムの呼び出しにする。kernel の中では使えない。
  */
 const IO_BUILTINS = new Set(['readLine', 'inputReady', 'clock', 'stringFromBytes', 'readFile', 'writeFile', 'fileSize', 'readFileRange', 'appendFile', 'args', 'eprint',
-  'windowOpen', 'windowClose', 'windowPoll', 'windowPresent']);
+  'windowOpen', 'windowClose', 'windowPoll', 'windowPresent',
+  'wasmCompile', 'wasmFreeModule', 'wasmExportList', 'wasmInstantiate', 'wasmFreeInstance', 'wasmInvoke', 'wasmRead', 'wasmWrite',
+  'wasmMemorySize', 'wasmWat', 'wasmError']);
 
 /** 最上位の定数。値は最初に使われたとき（遅くとも宣言の収集の終わり）に求める。 */
 interface ConstInfo {
@@ -2696,6 +2698,10 @@ class Checker {
       this.kernelCalls.push({ caller: this.curFn, callee: sig.decl, pos: e.pos });
     }
     if (sig.decl.isKernel) this.kernelUses.push({ callee: sig.decl, pos: e.pos });
+    // runtime/wasm.um の関数（wasmLoad など）。wasmCustomSection はバイト列を読むだけなので wasm32 でも使える。
+    if (this.ptrBits === 32 && sig.decl.pos.file === 'wasm.um' && e.pos.file !== 'wasm.um' && sig.name !== 'wasmCustomSection') {
+      this.wasmOnly(sig.name, e.pos);
+    }
     this.checkArgs(sig, e.args, e.pos);
     return sig.ret;
   }
@@ -2721,6 +2727,21 @@ class Checker {
    *       ふつうは prelude.um の pollWindowEvent（WindowEvent の enum を返す）を使う。
    *   windowPresent(window: i32, pixels: Buffer<u32>, width: i32, height: i32): void
    *       0xAARRGGBB の画素を width × height 並べたものをウィンドウ全体に表示する。
+   * WebAssembly（ネイティブだけ。どのスレッドからも呼べる。runtime/wasm.c が wasmtime で実装する。
+   * ふつうは runtime/wasm.um の wasmLoad / wasmNew / wasmCall を使う。モジュールとインスタンスは i64 の番号）:
+   *   wasmCompile(bytes: u8[]): i64 | null           wasm のバイナリをコンパイルする。失敗なら null（理由は wasmError）。
+   *   wasmFreeModule(module: i64): void
+   *   wasmExportList(module: i64): string[]          export の一覧（形は runtime/wasm.c の um_wasm_exports）。
+   *   wasmInstantiate(module: i64, fuel: i64, timeoutMs: i64, memoryBytes: i64, stubImports: bool): i64 | null
+   *   wasmFreeInstance(instance: i64): void
+   *   wasmInvoke(instance: i64, name: string, kinds: mut i32[], ints: mut i64[], floats: mut f64[], nargs: i32): i32
+   *       export された関数を呼び、戻り値の個数を返す（失敗なら -1）。引数と戻り値は kinds / ints / floats で受け渡す。
+   *   wasmRead(instance: i64, offset: i64, dst: mut 数の配列か Buffer [, start: i64, count: i64]): bool
+   *   wasmWrite(instance: i64, offset: i64, src: 数の配列か Buffer [, start: i64, count: i64]): bool
+   *       インスタンスのメモリの offset バイト目と、配列の start 番目から count 個（省略は全体。count が負なら終わりまで）を写す。
+   *   wasmMemorySize(instance: i64): i64             メモリのバイト数（メモリがなければ -1）。
+   *   wasmWat(text: string): u8[]                    テキスト形式（.wat）をバイナリにする。失敗なら空。
+   *   wasmError(): string                            このスレッドで最後に失敗した理由。
    * 引数は借りるだけ。結果は呼び出した側が所有する新しい値。
    */
   inferIo(e: Expr & { kind: 'call' }, name: string): Ty {
@@ -2742,7 +2763,25 @@ class Checker {
       windowClose: { params: [['window', I32]], ret: VOID },
       windowPoll: { params: [['event', { k: 'heap', elem: I32, buffer: true }], ['timeoutMs', I32]], ret: BOOL, mut: [0] },
       windowPresent: { params: [['window', I32], ['pixels', { k: 'heap', elem: PRIMS.u32, buffer: true }], ['width', I32], ['height', I32]], ret: VOID },
+      wasmCompile: { params: [['bytes', bytes]], ret: this.optionalOf(I64, e.pos) },
+      wasmFreeModule: { params: [['module', I64]], ret: VOID },
+      wasmExportList: { params: [['module', I64]], ret: { k: 'heap', elem: STR } },
+      wasmInstantiate: {
+        params: [['module', I64], ['fuel', I64], ['timeoutMs', I64], ['memoryBytes', I64], ['stubImports', BOOL]], ret: this.optionalOf(I64, e.pos),
+      },
+      wasmFreeInstance: { params: [['instance', I64]], ret: VOID },
+      wasmInvoke: {
+        params: [['instance', I64], ['name', STR], ['kinds', { k: 'heap', elem: I32 }], ['ints', { k: 'heap', elem: I64 }], ['floats', { k: 'heap', elem: F64 }], ['nargs', I32]],
+        ret: I32, mut: [2, 3, 4],
+      },
+      wasmRead: { params: name === 'wasmRead' ? this.wasmCopyParams(e, name, 'dst') : [], ret: BOOL, mut: [2] },
+      wasmWrite: { params: name === 'wasmWrite' ? this.wasmCopyParams(e, name, 'src') : [], ret: BOOL },
+      wasmMemorySize: { params: [['instance', I64]], ret: I64 },
+      wasmWat: { params: [['text', STR]], ret: bytes },
+      wasmError: { params: [], ret: STR },
     };
+    // wasm.um の中の呼び出しは報告しない（wasm.um の関数を呼んだ所で報告する。下の wasmOnly）。
+    if (name.startsWith('wasm') && this.ptrBits === 32 && e.pos.file !== 'wasm.um') this.wasmOnly(name, e.pos);
     if (name.startsWith('window') && this.ptrBits === 32) {
       this.err('not-implemented', `\`${name}\` is only available in native programs`, e.pos,
         'windows need a desktop OS; build with `--target host` (the wasm32 target has no window)');
@@ -2753,6 +2792,35 @@ class Checker {
     this.checkArgs(sig, e.args, e.pos);
     e.callee = `__io_${name}`;
     return shape.ret;
+  }
+
+  /** WebAssembly を実行する関数は、wasm32 のプログラムでは使えない（wasmtime はネイティブのプログラムにリンクするため）。 */
+  wasmOnly(name: string, pos: Pos): void {
+    this.err('not-implemented', `\`${name}\` is only available in native programs`, pos,
+      'running WebAssembly modules needs wasmtime, which is linked into native programs; build with `--target host`');
+  }
+
+  /**
+   * wasmRead / wasmWrite の引数。写す配列は、数（8〜64 ビットの整数、f32、f64）の可変長配列か Buffer なら何でもよいので、
+   * 実引数の型をそのまま仮引数の型にする。配列は変数（かそのフィールド・要素）に限る（もう一度検査しても同じになるように）。
+   * 後ろの start と count は省略できる（省略は配列全体）。
+   */
+  wasmCopyParams(e: Expr & { kind: 'call' }, name: string, what: string): [string, Ty][] {
+    const head: [string, Ty][] = [['instance', I64], ['offset', I64]];
+    const tail: [string, Ty][] = e.args.length > 3 ? [['start', I64], ['count', I64]] : [];
+    const arg = e.args[2];
+    if (!arg) return [...head, [what, { k: 'heap', elem: PRIMS.u8 }], ...tail];
+    if (!isPlace(arg.expr)) {
+      this.err('type-mismatch', `the array of \`${name}\` must be a variable (or a field / element of one)`, arg.expr.pos,
+        'store the array in a variable first');
+    }
+    const t = this.checkExpr(arg.expr);
+    const okElem = (el: Ty) => (el.k === 'int' && !el.usize) || (el.k === 'float' && (el.bits === 32 || el.bits === 64));
+    if (t.k !== 'heap' || t.str || t.racy || !okElem(t.elem)) {
+      this.err('type-mismatch', `\`${name}\` copies between wasm memory and an array or Buffer of numbers, but found ${tyStr(t)}`, arg.expr.pos,
+        'use u8[], Buffer<u8>, f32[], Buffer<f32>, or another array of fixed-size integers, f32 or f64');
+    }
+    return [...head, [what, t], ...tail];
   }
 
   /**

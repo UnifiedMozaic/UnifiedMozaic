@@ -1,0 +1,11 @@
+// モジュールの番号をインスタンスとして使うと停止する（番号には種類が入っている）。
+// panic: invalid wasm call (an unknown or freed module / instance, or a range outside the array) (line 9)
+export function main(): i32 {
+  const bytes = wasmWat("(module (memory (export \"memory\") 1))");
+  const m = wasmCompile(bytes);
+  if (m == null) {
+    return 1;
+  }
+  print(wasmMemorySize(m));
+  return 0;
+}

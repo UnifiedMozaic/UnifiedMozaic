@@ -116,6 +116,75 @@ function findSdl3(): Sdl3 {
   throw new Error(`this program opens a window, which needs SDL3, but SDL3 was not found; ${hint}`);
 }
 
+const RUNTIME_WASMTIME = join(import.meta.dirname, '..', 'runtime', 'wasm.c');
+
+/** wasmtime をリンクするための clang の引数と、実行ファイルの隣に置く DLL（Windows だけ）。 */
+interface Wasmtime { args: string[]; dll?: string }
+
+/**
+ * WebAssembly の組み込み（runtime/wasm.c）が使う wasmtime の C API を探す。
+ *   1. 環境変数 UM_WASMTIME = C API を置いた場所（include/wasmtime.h があるところ）。
+ *      公式のリリースの wasmtime-v*-<arch>-<os>-c-api（.zip / .tar.xz）を展開した場所を指す。
+ *      Windows では lib/wasmtime.dll.lib でリンクし、lib/wasmtime.dll を実行ファイルの隣に写す。
+ *      macOS・Linux では lib の共有ライブラリ（libwasmtime.dylib / .so）を rpath つきでリンクする。
+ *   2. pkg-config の wasmtime（ソースから cmake でビルドして入れた場合など）。
+ *   3. macOS の Homebrew の決まった場所（brew install wasmtime は C API も入れる）。
+ */
+function findWasmtime(): Wasmtime {
+  const hint = 'download the C API from https://github.com/bytecodealliance/wasmtime/releases ' +
+    '(wasmtime-v*-x86_64-windows-c-api.zip, -aarch64-macos-c-api.tar.xz, -x86_64-linux-c-api.tar.xz, ...), unpack it and set UM_WASMTIME to that folder';
+  const fromPrefix = (prefix: string): Wasmtime | null => {
+    if (!existsSync(join(prefix, 'include', 'wasmtime.h'))) return null;
+    const lib = join(prefix, 'lib');
+    if (process.platform === 'win32') {
+      if (!existsSync(join(lib, 'wasmtime.dll.lib'))) return null;
+      return { args: [`-I${join(prefix, 'include')}`, join(lib, 'wasmtime.dll.lib')], dll: join(lib, 'wasmtime.dll') };
+    }
+    const shared = process.platform === 'darwin' ? 'libwasmtime.dylib' : 'libwasmtime.so';
+    if (!existsSync(join(lib, shared))) return null;
+    return { args: [`-I${join(prefix, 'include')}`, `-L${lib}`, '-lwasmtime', `-Wl,-rpath,${lib}`] };
+  };
+  const env = process.env.UM_WASMTIME;
+  if (env) {
+    const found = fromPrefix(resolve(env));
+    if (!found) throw new Error(`the wasmtime C API was not found in UM_WASMTIME=${env}; ${hint}`);
+    return found;
+  }
+  if (process.platform !== 'win32') {
+    try {
+      const pc = (args: string[]) => execFileSync('pkg-config', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      const flags = pc(['--cflags', '--libs', 'wasmtime']).split(/\s+/).filter((a) => a !== '');
+      const libdir = pc(['--variable=libdir', 'wasmtime']);
+      if (libdir) flags.push(`-Wl,-rpath,${libdir}`);
+      return { args: flags };
+    } catch {
+      // pkg-config がない、または wasmtime が登録されていない。
+    }
+    if (process.platform === 'darwin') {
+      for (const p of ['/opt/homebrew/opt/wasmtime', '/usr/local/opt/wasmtime']) {
+        const found = fromPrefix(p);
+        if (found) return found;
+      }
+    }
+  }
+  throw new Error(`this program runs WebAssembly modules, which needs the wasmtime C API, but it was not found; ${hint}`);
+}
+
+/** 生成した LLVM IR が WebAssembly の組み込みを使っているか（codegen は使ったときだけ宣言を出す）。 */
+function usesWasm(ll: string): boolean {
+  return ll.includes('declare i64 @um_wasm_compile(');
+}
+
+/** wasmtime が見つかるか（テストで、見つからなければ WebAssembly のテストを飛ばすのに使う）。 */
+export function wasmtimeAvailable(): boolean {
+  try {
+    findWasmtime();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** 生成した LLVM IR がウィンドウの組み込みを使っているか（codegen は使ったときだけ宣言を出す）。 */
 function usesWindow(ll: string): boolean {
   return ll.includes('declare i32 @um_window_open(');
@@ -136,6 +205,11 @@ const PRELUDE = join(import.meta.dirname, '..', 'runtime', 'prelude.um');
  * ウィンドウを使わないプログラムに SDL3 をリンクさせないため、プログラムがこのファイルの名前を使うときだけ加える。
  */
 const WINDOW_PRELUDE = join(import.meta.dirname, '..', 'runtime', 'window.um');
+/**
+ * WebAssembly の標準の型と関数（wasmLoad、wasmCall、WasmValue など）。UM で書いてある。
+ * ウィンドウと同じく、プログラムがこのファイルの名前を使うときだけ加える（使わないプログラムは wasmtime をリンクしない）。
+ */
+const WASM_PRELUDE = join(import.meta.dirname, '..', 'runtime', 'wasm.um');
 const RUNTIME_WASM_C = join(import.meta.dirname, '..', 'runtime', 'wasm_rt.c');
 
 /** ファイル番号を、宣言とその中のメソッドに付ける。 */
@@ -221,11 +295,12 @@ export function parseProgram(src: string, file?: string): Module {
   const defined = new Set(merged.decls.filter((d) => d.kind !== 'const').map((d) => d.name));
   const prelude = parse(readFileSync(PRELUDE, 'utf8'), 'prelude.um');
   const standard = [...prelude.decls];
-  const windowPrelude = parse(readFileSync(WINDOW_PRELUDE, 'utf8'), 'window.um');
-  const windowNames = windowPrelude.decls.map((d) => d.name).filter((n) => !defined.has(n));
-  if (windowNames.length > 0) {
-    const used = new RegExp(`\\b(?:${windowNames.join('|')})\\b`);
-    if (texts.some((t) => used.test(t))) standard.push(...windowPrelude.decls);
+  for (const [path, label] of [[WINDOW_PRELUDE, 'window.um'], [WASM_PRELUDE, 'wasm.um']]) {
+    const extra = parse(readFileSync(path, 'utf8'), label);
+    const names = extra.decls.map((d) => d.name).filter((n) => !defined.has(n));
+    if (names.length === 0) continue;
+    const used = new RegExp(`\\b(?:${names.join('|')})\\b`);
+    if (texts.some((t) => used.test(t))) standard.push(...extra.decls);
   }
   for (const d of standard) {
     if (defined.has(d.name)) continue;
@@ -352,9 +427,12 @@ export function build(ll: string, target: TargetName, outPath: string, optLevel 
       else if (sanitize) args.unshift('-fsanitize=address', '-g');
       const sdl = usesWindow(ll) ? findSdl3() : null;
       if (sdl) args.push(RUNTIME_WINDOW, ...sdl.args);
+      const wt = usesWasm(ll) ? findWasmtime() : null;
+      if (wt) args.push(RUNTIME_WASMTIME, ...wt.args);
       clang(args, quiet);
-      // SDL3.dll は実行ファイルと同じ場所にないと起動できないので、隣に写す。
+      // SDL3.dll と wasmtime.dll は実行ファイルと同じ場所にないと起動できないので、隣に写す。
       if (sdl?.dll && existsSync(sdl.dll)) copyFileSync(sdl.dll, join(dirname(exe), 'SDL3.dll'));
+      if (wt?.dll && existsSync(wt.dll)) copyFileSync(wt.dll, join(dirname(exe), 'wasmtime.dll'));
       return { output: exe, objectOnly: false };
     }
 
@@ -367,6 +445,7 @@ export function build(ll: string, target: TargetName, outPath: string, optLevel 
       args.push('-fobjc-arc', RUNTIME_METAL, '-framework', 'Metal', '-framework', 'Foundation');
     }
     if (usesWindow(ll)) args.push(RUNTIME_WINDOW, ...findSdl3().args);
+    if (usesWasm(ll)) args.push(RUNTIME_WASMTIME, ...findWasmtime().args);
     clang(args, quiet);
     return { output: out, objectOnly: false };
   } finally {

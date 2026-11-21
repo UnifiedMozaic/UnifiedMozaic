@@ -18,13 +18,15 @@
 //                      並べ替えてから比べる。メモリ検査つきと、ThreadSanitizer（データ競合の検出）つきでも実行する。
 //   tests/errors/*.um  `// error: コード` の診断がすべて出ることを確認。
 //   tests/panics/*.um  `// panic: メッセージ` で停止することを確認。
+//   examples/wasm/*.um WebAssembly の組み込み（wasmtime。ネイティブだけ）。`// expect:` と照合する。
+//   tests/wasm/*.um    同じく。`// expect:` か `// panic:` と照合する。wasmtime の C API が見つからなければ飛ばす。
 
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CompileError, CompileErrors } from '../src/diag.ts';
-import { build, CLANG, compileMsl, compileToLL, compileWgsl, exePath } from '../src/driver.ts';
+import { build, CLANG, compileMsl, compileToLL, compileWgsl, exePath, wasmtimeAvailable } from '../src/driver.ts';
 import { smallMagnitudes } from '../src/codegen.ts';
 // @ts-ignore 型定義のないJSモジュール
 import { instantiate, UmPanic } from '../runtime/host.mjs';
@@ -771,6 +773,30 @@ for (const f of files('tests/panics')) {
     else fail(`${f} [host]`, `expected: ${want}\nactual:   ${n.panic ?? 'no panic'}`);
   } catch (e) {
     fail(`${f} [host]`, String(e));
+  }
+}
+
+// WebAssembly の組み込み（wasmtime。ネイティブだけ）。wasmtime の C API が見つからなければ飛ばす。
+// examples/wasm/*.um は `// expect:`、tests/wasm/*.um は `// expect:` か `// panic:` と照合する。
+if (!wasmtimeAvailable()) {
+  console.log('note: wasmtime の C API が見つからないため、examples/wasm と tests/wasm は省略します（UM_WASMTIME を設定してください。docs/wasm.ja.md）');
+} else {
+  for (const f of [...files('examples/wasm'), ...files('tests/wasm')]) {
+    const src = readFileSync(join(root, f), 'utf8');
+    const want = directives(src, 'expect');
+    const panic = directives(src, 'panic')[0];
+    const tag = f.replace(/[^a-z0-9]/gi, '_');
+    try {
+      const n = runNative(src, tag);
+      if (panic !== undefined) {
+        if (n.panic === `panic: ${panic}` && same(n.out, want)) ok(`${f} [host]`);
+        else fail(`${f} [host]`, `expected: panic: ${panic}\nactual:   ${n.panic ?? 'no panic'} (output: ${n.out.join(' ')})`);
+      } else if (n.panic) fail(`${f} [host]`, n.panic);
+      else if (same(n.out, want)) ok(`${f} [host]`);
+      else fail(`${f} [host]`, `expected: ${want.join(' ')}\nactual:   ${n.out.join(' ')}`);
+    } catch (e) {
+      fail(`${f} [host]`, String(e));
+    }
   }
 }
 
