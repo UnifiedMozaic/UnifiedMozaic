@@ -175,13 +175,19 @@ async function runWasm(src: string, tag: string): Promise<{ out: string[]; panic
   return { out };
 }
 
-function runNative(src: string, tag: string, file?: string): { out: string[]; panic?: string } {
+/**
+ * ネイティブで作って実行する。panic は停止（終了コード 101）の報告。
+ * exit は、0 でも 101 でもない終わり方（シグナルなど）をしたときの、終わり方と標準エラー出力の最後（失敗の説明に添える）。
+ */
+function runNative(src: string, tag: string, file?: string): { out: string[]; panic?: string; exit?: string } {
   const exe = join(tmp, `${tag}.bin`);
   // file はソースの場所（import を解決するため。なければ import は使えない）。
   build(compileToLL(src, 'host', false, file), 'host', exe);
   const r = spawnSync(exe, [], { encoding: 'utf8', input: stdinText(src), cwd: tmp });
   const out = r.stdout.split('\n').filter((l) => l !== '');
-  return r.status === 101 ? { out, panic: r.stderr.trim() } : { out };
+  if (r.status === 101) return { out, panic: r.stderr.trim() };
+  if (r.status === 0) return { out };
+  return { out, exit: `exited with ${r.status ?? r.signal}\n${r.stderr.trim().split('\n').slice(-15).join('\n')}` };
 }
 
 type MemCheck = 'asan' | 'valgrind' | 'macos' | null;
@@ -1085,7 +1091,7 @@ if (!ffmpegAvailable()) {
         else fail(`${f} [host]`, `expected: panic: ${panic}\nactual:   ${n.panic ?? 'no panic'} (output: ${n.out.join(' ')})`);
       } else if (n.panic) fail(`${f} [host]`, n.panic);
       else if (same(n.out, want)) ok(`${f} [host]`);
-      else fail(`${f} [host]`, `expected: ${want.join(' | ')}\nactual:   ${n.out.join(' | ')}`);
+      else fail(`${f} [host]`, `expected: ${want.join(' | ')}\nactual:   ${n.out.join(' | ')}${n.exit ? `\n${n.exit}` : ''}`);
     } catch (e) {
       fail(`${f} [host]`, String(e));
     }
