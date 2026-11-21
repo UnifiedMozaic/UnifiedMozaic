@@ -33,6 +33,9 @@
 #else
 #include <pthread.h>
 #endif
+#if !defined(_WIN32) && !defined(__APPLE__)
+#include <dlfcn.h>
+#endif
 
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -496,10 +499,36 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx, const enum AVPixelF
   return AV_PIX_FMT_NONE;
 }
 
+// Linux: ハードウェアの展開に要る共有ライブラリが読めるか。FFmpeg のビルドによっては（BtbN の配布物など）、libva や
+// libvdpau を「初めて呼ぶときに dlopen する」形でリンクしてあり、ライブラリのない機械で試すと、エラーを返さずに
+// プログラムごと止まる（abort）。そこで、試す前に読めることを確かめ、読めなければその種類は使えないものとして扱う。
+// vaapi は DRM の経路（libva-drm）を先に試し、X11 の経路（libva-x11）は X のディスプレイを開けたときだけ使う。
+static int hw_libs_present(const char *name) {
+#if !defined(_WIN32) && !defined(__APPLE__)
+  const char *libs[4] = { NULL, NULL, NULL, NULL };
+  if (strcmp(name, "vaapi") == 0) {
+    libs[0] = "libva.so.2";
+    libs[1] = "libva-drm.so.2";
+    const char *display = getenv("DISPLAY");
+    if (display && display[0]) libs[2] = "libva-x11.so.2";
+  } else if (strcmp(name, "vdpau") == 0) {
+    libs[0] = "libvdpau.so.1";
+  }
+  for (int i = 0; libs[i]; i++) {
+    void *h = dlopen(libs[i], RTLD_LAZY | RTLD_LOCAL);
+    if (!h) return 0;
+    dlclose(h);
+  }
+#else
+  (void)name;
+#endif
+  return 1;
+}
+
 // 名前のハードウェアの展開を準備する。使えなければ 0。
 static int try_hw(um_reader *r, const AVCodec *codec, const char *name) {
   enum AVHWDeviceType type = av_hwdevice_find_type_by_name(name);
-  if (type == AV_HWDEVICE_TYPE_NONE) return 0;
+  if (type == AV_HWDEVICE_TYPE_NONE || !hw_libs_present(name)) return 0;
   for (int i = 0;; i++) {
     const AVCodecHWConfig *cfg = avcodec_get_hw_config(codec, i);
     if (!cfg) return 0;

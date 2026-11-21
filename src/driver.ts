@@ -710,7 +710,8 @@ export function build(
     }
     if (usesWindow(ll)) args.push(RUNTIME_WINDOW, RUNTIME_AUDIO, ...findSdl3().args);
     if (usesWasm(ll)) args.push(RUNTIME_WASMTIME, ...findWasmtime().args);
-    if (usesMedia(ll)) args.push(RUNTIME_MEDIA, ...findFfmpeg().args);
+    // Linux の media.c は dlopen を使う（ハードウェアの展開のライブラリがあるかを確かめる）。glibc 2.34 より前は libdl にある。
+    if (usesMedia(ll)) args.push(RUNTIME_MEDIA, ...findFfmpeg().args, ...(process.platform === 'linux' ? ['-ldl'] : []));
     if (wgpuEnabled(target) && usesWgpu(ll)) args.push(RUNTIME_WGPU, ...findWgpu().args);
     args.push(...extra);
     clang(args, quiet);
