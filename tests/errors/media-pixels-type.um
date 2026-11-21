@@ -1,0 +1,10 @@
+// error: type-mismatch
+// target: host
+// 画素は数の Buffer か配列で渡す（文字列や bool の配列は渡せない）。
+export function main(): i32 {
+  let flags = new Array<bool>(16);
+  const t = mediaReadVideo(1, 0.0, mut flags, 0, 2, 2, 2);
+  let s = new Buffer<u8>(16);
+  const n = mediaReadAudio(1, 0.0, mut s, 48000);
+  return 0;
+}

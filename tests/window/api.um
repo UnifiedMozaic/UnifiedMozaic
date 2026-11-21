@@ -1,0 +1,127 @@
+// ウィンドウの操作・クリップボード・イベントの文字列・windowPresentRect を、画面なしで確かめる。
+// tests/run.ts が SDL_VIDEO_DRIVER=offscreen で実行する（ドロップと IME は試験用の操作でイベントを積んで、変換の経路を確かめる）。
+// expect: ime true
+// expect: open
+// expect: title 題名を変えた
+// expect: size 300 200
+// expect: pixel ok
+// expect: density ok
+// expect: scale ok
+// expect: displays ok
+// expect: bounds ok
+// expect: clip true コピー&ペースト
+// expect: text active true
+// expect: text stopped false
+// expect: text area true
+// expect: drop begin
+// expect: drop file C:\動画\a.mp4 10 20
+// expect: drop text hello 10 20
+// expect: drop complete 10 20
+// expect: editing へんかん 1 2
+// expect: presented 3
+// expect: ticks ok
+// expect: slept ok
+// expect: state ok
+// expect: bad display null ok
+
+// 条件が成り立てば「label ok」、成り立たなければ「label bad」。
+function check(cond: bool, label: string): void {
+  if (cond) {
+    print(`${label} ok`);
+  } else {
+    print(`${label} bad`);
+  }
+}
+
+export function main(): i32 {
+  // IME の編集中の文字列をプログラムが描く（SDL を初期化する前だけ効く）。
+  print(`ime ${windowImeComposition(true)}`);
+  const opened = windowOpen("api", 320, 240);
+  if (opened == null) {
+    print(`could not open: ${windowError()}`);
+    return 1;
+  }
+  const win = opened;
+  print("open");
+  windowSetTitle(win, "題名を変えた");
+  print(`title ${windowTitle(win)}`);
+  windowSetMinimumSize(win, 100, 100);
+  windowSetSize(win, 300, 200);
+  const sz = windowSize(win);
+  print(`size ${sz.width} ${sz.height}`);
+  const px = windowPixelSize(win);
+  if (px.width >= 300 && px.height >= 200) {
+    print("pixel ok");
+  } else {
+    print(`pixel ${px.width} ${px.height}`);
+  }
+  const d = windowPixelDensity(win);
+  check(d >= 1.0, "density");
+  const s = windowDisplayScale(win);
+  check(s > 0.0, "scale");
+  const n = displayCount();
+  check(n >= 1 && windowDisplay(win) >= 0, "displays");
+  const b = displayBounds(0);
+  if (b != null) {
+    check(b.width > 0 && b.height > 0 && displayContentScale(0) > 0.0, "bounds");
+  } else {
+    print("bounds null");
+  }
+
+  const copied = clipboardSetText("コピー&ペースト");
+  print(`clip ${copied && clipboardHasText()} ${clipboardText()}`);
+
+  print(`text active ${windowTextInputActive(win)}`);
+  windowStopTextInput(win);
+  print(`text stopped ${windowTextInputActive(win)}`);
+  windowStartTextInput(win);
+  print(`text area ${windowSetTextInputArea(win, 10, 10, 200, 24, 30)}`);
+
+  // 試験用の操作（windowSetText の 90 番）でイベントを積む。
+  windowSetText(90, win, 11, "");
+  windowSetText(90, win, 12, "C:\\動画\\a.mp4");
+  windowSetText(90, win, 13, "hello");
+  windowSetText(90, win, 15, "");
+  windowSetText(90, win, 16, "へんかん");
+  let seen = 0;
+  while (seen < 5) {
+    const e = pollWindowEvent(100);
+    if (e == null) {
+      print("timed out");
+      break;
+    }
+    match (e) {
+      WindowEvent.DropBegin(w) => { print("drop begin"); seen++; }
+      WindowEvent.DropFile(w, path, x, y) => { print(`drop file ${path} ${x} ${y}`); seen++; }
+      WindowEvent.DropText(w, text, x, y) => { print(`drop text ${text} ${x} ${y}`); seen++; }
+      WindowEvent.DropComplete(w, x, y) => { print(`drop complete ${x} ${y}`); seen++; }
+      WindowEvent.TextEditing(w, text, start, length) => { print(`editing ${text} ${start} ${length}`); seen++; }
+      _ => {}
+    }
+  }
+
+  // 全体を表示してから、変わった矩形だけを表示する。
+  windowSetVSync(win, false);
+  let pixels = new Buffer<u32>(64 * 32);
+  pixels.fill(0xFF203040);
+  windowPresent(win, pixels, 64, 32);
+  pixels[5 * 64 + 7] = 0xFFFFFFFF;
+  windowPresentRect(win, pixels, 64, 32, 7, 5, 1, 1);
+  windowPresentRect(win, pixels, 64, 32, 0, 0, 0, 0);
+  print("presented 3");
+
+  const t0 = ticksNs();
+  const t1 = ticksNs();
+  check(t1 >= t0 && t0 > 0, "ticks");
+  const before = ticksNs();
+  sleepMs(20);
+  const slept = ticksNs() - before;
+  check(slept >= 19000000 && slept < 500000000, "slept");
+
+  const st = windowState(win);
+  check(!st.fullscreen && !st.minimized, "state");
+  const none = displayBounds(99);
+  check(none == null, "bad display null");
+  windowClose(win);
+  return 0;
+}

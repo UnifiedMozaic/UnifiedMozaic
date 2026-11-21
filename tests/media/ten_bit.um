@@ -1,0 +1,57 @@
+// 10 ビットの素材（ten.mov: ProRes 422 HQ、yuv422p10le、64x64、24 コマ毎秒）。
+// 情報のビット数と画素の形式、Rgba16（丸めずに受け取る）と Yuv420p10 の値、コマ単位のシークを確かめる。
+//
+// expect: prores yuv422p10le 10 bit 64x64 24/1 fps 24 frames
+// expect: frame 7: R 120 G 8 B 128 (16-bit 30840 2056 32896)
+// expect: frame 23 at 0.9583
+// expect: Yuv420p10 luma above 255: true
+
+function near(v: i32, want: i32, tol: i32): i32 {
+  if (v >= want - tol && v <= want + tol) {
+    return want;
+  }
+  return v;
+}
+
+export function main(): i32 {
+  match (mediaOpenVideo("ten.mov", "auto")) {
+    Result.Err(why) => {
+      print("cannot open: " + why);
+      return 1;
+    }
+    Result.Ok(r) => {
+      const i = mediaInfoOf(r);
+      print(`${i.videoCodec} ${i.pixelFormat} ${i.bitDepth} bit ${i.width}x${i.height} ${i.fpsNum}/${i.fpsDen} fps ${i.frameCount} frames`);
+      const c = 32 * 64 + 32;
+      let px = new Buffer<u16>(64 * 64 * 4);
+      match (mediaFrame(r, 7.0 / 24.0, mut px, MediaPixels.Rgba16, 0, 0)) {
+        MediaRead.Frame(_) => {
+          // 8 ビットの 120 は 16 ビットで 120 * 257 = 30840（ProRes の圧縮で少し揺れるので ±1.5%）。
+          const r16 = px[c * 4] as i32;
+          const g16 = px[c * 4 + 1] as i32;
+          const b16 = px[c * 4 + 2] as i32;
+          print(`frame 7: R ${near(r16 / 257, 120, 2)} G ${near(g16 / 257, 8, 2)} B ${near(b16 / 257, 128, 2)} (16-bit ${near(r16, 30840, 500)} ${near(g16, 2056, 500)} ${near(b16, 32896, 500)})`);
+        }
+        MediaRead.End => { print("end"); }
+        MediaRead.Failed(why) => { print("failed: " + why); }
+      }
+      let px8 = new Buffer<u8>(64 * 64 * 4);
+      match (mediaFrame(r, 0.99, mut px8, MediaPixels.Rgba8, 0, 0)) {
+        MediaRead.Frame(t) => {
+          const n = (px8[c * 4] as i32) / 16 + (px8[c * 4 + 1] as i32) / 16 * 16;
+          print(`frame ${n} at ${((t * 10000.0 + 0.5) as i64 as f64) / 10000.0}`);
+        }
+        MediaRead.End => { print("end"); }
+        MediaRead.Failed(why) => { print("failed: " + why); }
+      }
+      let yuv = new Buffer<u16>(64 * 64 + 2 * 32 * 32);
+      match (mediaFrame(r, 0.99, mut yuv, MediaPixels.Yuv420p10, 0, 0)) {  // 23 番目: R 120、G 24 → Y は 10 ビットで約 284
+        MediaRead.Frame(_) => { print(`Yuv420p10 luma above 255: ${yuv[c] > 255}`); }
+        MediaRead.End => { print("end"); }
+        MediaRead.Failed(why) => { print("failed: " + why); }
+      }
+      mediaClose(r);
+    }
+  }
+  return 0;
+}

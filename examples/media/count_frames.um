@@ -1,0 +1,70 @@
+// 映像を最初から順に読んで、コマの数を数える（順に読むのが速いことを見る）。
+// 使い方: count_frames [ファイル] [hwaccel]（省略すると clip.mp4 をソフトウェアで。hwaccel は auto、d3d11va、cuda など）
+//
+// expect: 100 frames, the last one at 3.96 s
+// expect: the frame numbers from the colour were all in order
+
+export function main(): i32 {
+  let path = "clip.mp4";
+  let hw = "none";
+  const a = args();
+  if (a.length > 0) {
+    path = a[0].clone();
+  }
+  if (a.length > 1) {
+    hw = a[1].clone();
+  }
+  match (mediaOpenVideo(path, hw)) {
+    Result.Err(why) => {
+      eprint("cannot open: " + why);
+      return 1;
+    }
+    Result.Ok(r) => {
+      const info = mediaInfoOf(r);
+      eprint(`${info.videoCodec} ${info.width}x${info.height} ${info.pixelFormat}, decoding with: ${info.hwaccel}`);
+      // 小さくして受け取る（プレビューの大きさ）。拡大縮小と色の変換は FFmpeg の swscale が行う。
+      const w = 160;
+      const h = 90;
+      let px = new Buffer<u8>(w * h * 4);
+      let count = 0;
+      let last = -1.0;
+      let inOrder = true;
+      const start = clock();
+      while (true) {
+        match (mediaNextFrame(r, mut px, MediaPixels.Rgba8, w, h)) {
+          MediaRead.Frame(t) => {
+            if (t <= last) {
+              inOrder = false;
+            }
+            // テストの素材は色にコマの番号を入れてある（R = (N mod 16) * 16 + 8、G = floor(N / 16) * 16 + 8）。
+            const at = ((h / 2) * w + w / 2) * 4;
+            const n = (px[at] as i32) / 16 + (px[at + 1] as i32) / 16 * 16;
+            if (path == "clip.mp4" && n != count) {
+              inOrder = false;
+            }
+            last = t;
+            count += 1;
+          }
+          MediaRead.End => {
+            break;
+          }
+          MediaRead.Failed(why) => {
+            eprint("cannot read: " + why);
+            mediaClose(r);
+            return 1;
+          }
+        }
+      }
+      const secs = clock() - start;
+      print(`${count} frames, the last one at ${last} s`);
+      if (inOrder) {
+        print("the frame numbers from the colour were all in order");
+      } else {
+        print("some frames were out of order");
+      }
+      eprint(`${secs} s (${(count as f64) / secs} frames per second)`);
+      mediaClose(r);
+    }
+  }
+  return 0;
+}

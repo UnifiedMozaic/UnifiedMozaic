@@ -1,0 +1,107 @@
+// 展開とシークの速さを測る（docs/media.ja.md の「速さ」の表はこれで測った）。
+//   bench 入力.mp4 [hwaccel]（hwaccel は none、auto、d3d11va、cuda など。省略は none）
+// 測るもの:
+//   順に読む: Yuv420p8（変換が最も少ない）、Argb32、RgbaF32 の素材の大きさ、Argb32 の 960x540（プレビュー）
+//   シーク: 飛び飛びの時刻（キーフレームから遠い場所を含む）、1 コマずつ後ろへ（mediaFrame で時刻を進める）、1 コマずつ前へ
+
+function sequential(path: string, hw: string, label: string, pixels: MediaPixels, w: i32, h: i32, count: i32): void {
+  match (mediaOpenVideo(path, hw)) {
+    Result.Err(why) => { print(why); }
+    Result.Ok(r) => {
+      const info = mediaInfoOf(r);
+      const ow = if_zero(w, info.width);
+      const oh = if_zero(h, info.height);
+      let b8 = new Buffer<u8>(ow * oh * 4);
+      let b32 = new Buffer<u32>(ow * oh);
+      let bf = new Buffer<f32>(ow * oh * 4);
+      const start = clock();
+      let n = 0;
+      while (n < count) {
+        let x = MediaRead.End;
+        match (pixels) {
+          MediaPixels.Argb32 => { x = mediaNextFrame(r, mut b32, pixels, w, h); }
+          MediaPixels.RgbaF32 => { x = mediaNextFrame(r, mut bf, pixels, w, h); }
+          _ => { x = mediaNextFrame(r, mut b8, pixels, w, h); }
+        }
+        match (x) {
+          MediaRead.Frame(_) => { n += 1; }
+          MediaRead.End => { break; }
+          MediaRead.Failed(why) => {
+            print(why);
+            break;
+          }
+        }
+      }
+      const secs = clock() - start;
+      print(`${label} [${info.hwaccel}]: ${n} frames, ${((n as f64) / secs) as i32} fps`);
+      mediaClose(r);
+    }
+  }
+}
+
+function if_zero(v: i32, d: i32): i32 {
+  if (v == 0) {
+    return d;
+  }
+  return v;
+}
+
+function seeks(path: string, hw: string): void {
+  match (mediaOpenVideo(path, hw)) {
+    Result.Err(why) => { print(why); }
+    Result.Ok(r) => {
+      const info = mediaInfoOf(r);
+      const fps = (info.fpsNum as f64) / (info.fpsDen as f64);
+      const frames = info.frameCount as i32;
+      let px = new Buffer<u32>(info.width * info.height);
+      // 飛び飛び（素数で混ぜる）。
+      let start = clock();
+      const jumps = 40;
+      for (let k = 0; k < jumps; k++) {
+        const n = (k * 97 + 13) % (frames - 1);
+        mediaFrame(r, (n as f64) / fps, mut px, MediaPixels.Argb32, 0, 0);
+      }
+      const random = (clock() - start) * 1000.0 / (jumps as f64);
+      // 1 コマずつ後ろへ（スクラブ・再生）。
+      start = clock();
+      for (let n = 100; n < 160; n++) {
+        mediaFrame(r, (n as f64) / fps, mut px, MediaPixels.Argb32, 0, 0);
+      }
+      const forward = (clock() - start) * 1000.0 / 60.0;
+      // 1 コマずつ前へ（逆再生・左矢印）。
+      start = clock();
+      for (let n = 159; n >= 140; n--) {
+        mediaFrame(r, (n as f64) / fps, mut px, MediaPixels.Argb32, 0, 0);
+      }
+      const backward = (clock() - start) * 1000.0 / 20.0;
+      print(`seek [${info.hwaccel}]: random ${random} ms, step forward ${forward} ms, step backward ${backward} ms`);
+      mediaClose(r);
+    }
+  }
+}
+
+export function main(): i32 {
+  const a = args();
+  if (a.length < 1) {
+    eprint("usage: bench input.mp4 [hwaccel]");
+    return 2;
+  }
+  let hw = "none";
+  if (a.length > 1) {
+    hw = a[1].clone();
+  }
+  const path = a[0].clone();
+  match (mediaProbe(path)) {
+    Result.Ok(i) => { print(`${i.videoCodec} ${i.videoProfile} ${i.pixelFormat} ${i.width}x${i.height} ${i.fpsNum}/${i.fpsDen} fps, ${i.frameCount} frames`); }
+    Result.Err(why) => {
+      print(why);
+      return 1;
+    }
+  }
+  sequential(path, hw, "sequential Yuv420p8", MediaPixels.Yuv420p8, 0, 0, 600);
+  sequential(path, hw, "sequential Argb32", MediaPixels.Argb32, 0, 0, 600);
+  sequential(path, hw, "sequential RgbaF32", MediaPixels.RgbaF32, 0, 0, 300);
+  sequential(path, hw, "sequential Argb32 960x540", MediaPixels.Argb32, 960, 540, 600);
+  seeks(path, hw);
+  return 0;
+}

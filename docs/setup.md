@@ -108,6 +108,7 @@ node runtime/run-node.mjs structs.wasm
 
 Programs that open a window ([docs/window.md](window.md)) also need SDL3.
 Programs that run WebAssembly modules ([docs/wasm.md](wasm.md)) also need the wasmtime C API.
+Programs that read or write video and audio ([docs/media.ja.md](media.ja.md), Japanese) also need a shared LGPL build of FFmpeg (`UM_FFMPEG_HOME`).
 
 ## 6. Tests
 

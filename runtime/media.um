@@ -1,0 +1,313 @@
+// 動画・音声の標準の型と関数。組み込みの mediaOpen / mediaReadVideo / mediaReadAudio / mediaCreate など
+// （runtime/media.c。FFmpeg を使う）を、Result と enum で使えるようにまとめる。プログラムがこのファイルの名前
+// （mediaProbe、mediaOpenVideo、mediaFrame、MediaPixels など）を使うときだけ、ドライバが標準の関数として加える。
+//
+// 使い方（読む）:
+//   match (mediaOpenVideo("clip.mp4", "auto")) {           // Result<i64, string>（読み手の番号）
+//     Result.Err(why) => { eprint(why); return 1; }
+//     Result.Ok(r) => {
+//       const info = mediaInfoOf(r);
+//       let px = new Buffer<u32>(info.width * info.height);
+//       match (mediaFrame(r, 12.5, mut px, MediaPixels.Argb32, 0, 0)) {   // 12.5 秒に表示されるコマ
+//         MediaRead.Frame(t) => { ... }
+//         MediaRead.End => { ... }
+//         MediaRead.Failed(why) => { eprint(why); }
+//       }
+//       mediaClose(r);
+//     }
+//   }
+//
+// 使い方（書く）:
+//   const w = mediaCreate("out.mp4");                      // Result<i64, string>（書き手の番号）
+//   let v = new MediaVideoSettings();                      // 符号器 "h264"（使える中で速いものを自動で選ぶ）
+//   v.width = 1920; v.height = 1080; v.fpsNum = 30;
+//   mediaAddVideoStream(w, v);  mediaAddAudioStream(w, new MediaAudioSettings());
+//   mediaWriteFrame(w, px, MediaPixels.Argb32, 1920, 1080);   // コマを順に
+//   mediaWriteSamples(w, samples, -1);                          // 音（交互の f32）を順に
+//   mediaFinish(w);
+
+// コマの画素の形式。Buffer の要素の型は形式で決まる（違えば Failed）。
+enum MediaPixels {
+  Rgba8,      // Buffer<u8>: R, G, B, A を 1 バイトずつ（幅 × 高さ × 4）
+  Argb32,     // Buffer<u32>: 0xAARRGGBB（幅 × 高さ）。windowPresent にそのまま渡せる
+  RgbaF32,    // Buffer<f32>（幅 × 高さ × 4）か Buffer<vec4<f32>>（幅 × 高さ）: 0〜1
+  Rgba16,     // Buffer<u16>: 0〜65535（幅 × 高さ × 4）。10 ビットの素材を丸めずに受け取る
+  Yuv420p8,   // Buffer<u8>: Y（幅 × 高さ）、U、V（それぞれ ((幅+1)/2) × ((高さ+1)/2)）。素材の色の行列と範囲のまま
+  Yuv420p10,  // Buffer<u16>: 同じ並びで 0〜1023
+}
+
+// 拡大縮小のフィルタ（大きさを変えないときは色の変換だけで、違いは小さい）。
+enum MediaScale {
+  Fast,      // 速い（プレビュー向け）
+  Bilinear,
+  Bicubic,   // 既定
+  Lanczos,   // きれい（書き出し向け）
+}
+
+// 読んだ結果（映像）。
+enum MediaRead {
+  Frame(time: f64),      // 書いたコマの時刻（秒。最初のコマが 0）
+  End,                   // 終わり（または、指定の時刻が最後のコマより後ろ）
+  Failed(reason: string),
+}
+
+// 読んだ結果（音）。
+enum MediaAudioRead {
+  Samples(time: f64, count: i32),  // 先頭の時刻（秒）と、書いた標本の組（L, R）の数
+  End,
+  Failed(reason: string),
+}
+
+// ファイルの情報。映像・音がなければ hasVideo / hasAudio が false で、その欄は 0 か空。
+struct MediaInfo {
+  duration: f64;          // 秒（分からなければ -1）
+  format: string;         // 入れ物（"mov,mp4,m4a,3gp,3g2,mj2"、"matroska,webm" など）
+  bitRate: f64;           // ファイル全体（ビット毎秒。分からなければ 0）
+  hasVideo: bool;
+  width: i32;
+  height: i32;
+  fpsNum: i32;            // コマの速さ = fpsNum / fpsDen（30000 / 1001 など）
+  fpsDen: i32;
+  frameCount: i64;        // コマの数（入れ物に書いてなければ、長さとコマの速さから推す。分からなければ -1）
+  videoCodec: string;     // "h264"、"hevc"、"prores" など
+  videoProfile: string;   // "High"、"Main 10" など
+  pixelFormat: string;    // "yuv420p"、"yuv420p10le" など
+  bitDepth: i32;          // 8、10 など
+  colorSpace: string;     // 色の行列（"bt709"、"bt2020nc"、"unknown" など）
+  colorPrimaries: string; // 色域（"bt709"、"bt2020" など）
+  colorTransfer: string;  // 伝達特性（"bt709"、"smpte2084"（PQ）、"arib-std-b67"（HLG） など）
+  colorRange: string;     // "tv"（限られた範囲）、"pc"（いっぱい）、"unknown"
+  rotation: i32;          // 表示するときに時計回りに回す角度（0、90、180、270。スマートフォンの縦の動画など）
+  sarNum: i32;            // 画素の縦横比 = sarNum / sarDen（ふつうは 1 / 1）
+  sarDen: i32;
+  videoDuration: f64;
+  videoBitRate: f64;
+  hasAudio: bool;
+  sampleRate: i32;
+  channels: i32;
+  audioCodec: string;
+  channelLayout: string;  // "stereo"、"5.1" など
+  sampleFormat: string;   // 素材の標本の形式（"fltp" など）
+  audioDuration: f64;
+  audioBitRate: f64;
+  hwaccel: string;        // 映像の読み手が使っているハードウェアの展開（"d3d11va"、"cuda" など。なければ "none"）
+}
+
+// 符号器の一覧の1つ。
+struct MediaEncoder {
+  name: string;         // mediaAddVideoStream などに渡す名前（"h264_nvenc"、"libopenh264"、"aac" など）
+  isVideo: bool;
+  codec: string;        // 形式（"h264"、"hevc"、"aac" など）
+  description: string;
+  hardware: bool;       // GPU などの専用回路を使う
+}
+
+// 映像のストリームの設定。
+class MediaVideoSettings {
+  encoder: string = "h264";  // 符号器の名前か形式。形式（"h264"、"hevc"、"av1"）なら、使える中から
+                             // ハードウェア（NVENC → AMF → QSV → VideoToolbox → MediaFoundation）、ソフトウェアの順に選ぶ
+  width: i32 = 1920;
+  height: i32 = 1080;
+  fpsNum: i32 = 30;
+  fpsDen: i32 = 1;
+  bitRate: i64 = 0;          // ビット毎秒。0 なら大きさとコマの速さから決める（1080p30 で約 6 Mbps）
+  options: string = "";      // 符号器の設定（"preset=p5:rc=vbr"、"pix_fmt=yuv420p10le" など。key=value を : でつなぐ）
+}
+
+// 音のストリームの設定。
+class MediaAudioSettings {
+  encoder: string = "aac";
+  sampleRate: i32 = 48000;
+  channels: i32 = 2;
+  bitRate: i64 = 0;          // 0 なら AAC / MP3 は 1 チャンネルあたり 96 kbps
+  options: string = "";
+}
+
+function mediaPixelsCode(p: MediaPixels): i32 {
+  match (p) {
+    MediaPixels.Rgba8 => { return 0; }
+    MediaPixels.Argb32 => { return 1; }
+    MediaPixels.RgbaF32 => { return 2; }
+    MediaPixels.Rgba16 => { return 3; }
+    MediaPixels.Yuv420p8 => { return 4; }
+    MediaPixels.Yuv420p10 => { return 5; }
+  }
+}
+
+function mediaScaleCode(s: MediaScale): i32 {
+  match (s) {
+    MediaScale.Fast => { return 0; }
+    MediaScale.Bilinear => { return 1; }
+    MediaScale.Bicubic => { return 2; }
+    MediaScale.Lanczos => { return 3; }
+  }
+}
+
+function mediaOpenKind(path: string, kind: i32, hwaccel: string): Result<i64, string> {
+  const r = mediaOpen(path, kind, hwaccel);
+  if (r != null) {
+    return Result.Ok(r);
+  }
+  return Result.Err(mediaError());
+}
+
+// 映像を読む読み手を開く。hwaccel は "none"（ソフトウェア）、"auto"（使えるハードウェアの展開を試す）、
+// "d3d11va"、"dxva2"、"cuda"（NVDEC）、"qsv"、"videotoolbox"、"vaapi"、"vulkan" など。
+// ハードウェアの展開が使えなければ、黙ってソフトウェアに戻る（使っているものは mediaInfoOf(r).hwaccel）。
+function mediaOpenVideo(path: string, hwaccel: string): Result<i64, string> {
+  return mediaOpenKind(path, 1, hwaccel);
+}
+
+// 音を読む読み手を開く。
+function mediaOpenAudio(path: string): Result<i64, string> {
+  return mediaOpenKind(path, 2, "none");
+}
+
+// ファイルの情報だけを読む（復号器は開かない）。
+function mediaProbe(path: string): Result<MediaInfo, string> {
+  const r = mediaOpen(path, 0, "none");
+  if (r == null) {
+    return Result.Err(mediaError());
+  }
+  const info = mediaInfoOf(r);
+  mediaClose(r);
+  return Result.Ok(info);
+}
+
+// 読み手の情報。
+function mediaInfoOf(reader: i64): MediaInfo {
+  const n = mediaInfoNumbers(reader);
+  const t = mediaInfoText(reader);
+  return {
+    duration: n[0], format: t[0].clone(), bitRate: n[1],
+    hasVideo: n[2] != 0.0, width: n[3] as i32, height: n[4] as i32, fpsNum: n[5] as i32, fpsDen: n[6] as i32,
+    frameCount: n[7] as i64, videoCodec: t[1].clone(), videoProfile: t[7].clone(), pixelFormat: t[2].clone(), bitDepth: n[8] as i32,
+    colorSpace: t[3].clone(), colorPrimaries: t[4].clone(), colorTransfer: t[5].clone(), colorRange: t[6].clone(),
+    rotation: n[9] as i32, sarNum: n[10] as i32, sarDen: n[11] as i32, videoDuration: n[12], videoBitRate: n[13],
+    hasAudio: n[14] != 0.0, sampleRate: n[15] as i32, channels: n[16] as i32, audioCodec: t[8].clone(),
+    channelLayout: t[9].clone(), sampleFormat: t[10].clone(), audioDuration: n[17], audioBitRate: n[18],
+    hwaccel: t[11].clone(),
+  };
+}
+
+function mediaNonNegative(t: f64): f64 {
+  if (t < 0.0) {
+    return 0.0;
+  }
+  return t;
+}
+
+function mediaReadResult(t: f64): MediaRead {
+  if (t >= 0.0) {
+    return MediaRead.Frame(t);
+  }
+  if (t == -1.0) {
+    return MediaRead.End;
+  }
+  return MediaRead.Failed(mediaError());
+}
+
+// time 秒に表示されるコマを out に書く（コマ単位で正確。前後のキーフレームから復号する）。
+// width / height が 0 なら素材の大きさ。違えば拡大縮小する（フィルタは Bicubic）。
+// 直前に返したコマの少し後ろなら、シークせずに読み進める（スクラブやコマ送りが速い）。
+function mediaFrame<T>(reader: i64, time: f64, out: mut Buffer<T>, pixels: MediaPixels, width: i32, height: i32): MediaRead {
+  const t = mediaReadVideo(reader, mediaNonNegative(time), mut out, mediaPixelsCode(pixels), width, height, 2);
+  return mediaReadResult(t);
+}
+
+// 次のコマを out に書く（順に読む。開いた直後は最初のコマ、mediaFrame のあとはその次のコマ）。
+function mediaNextFrame<T>(reader: i64, out: mut Buffer<T>, pixels: MediaPixels, width: i32, height: i32): MediaRead {
+  return mediaReadResult(mediaReadVideo(reader, -1.0, mut out, mediaPixelsCode(pixels), width, height, 2));
+}
+
+// mediaFrame / mediaNextFrame と同じで、拡大縮小のフィルタを選べる。time が負なら次のコマ。
+function mediaFrameScaled<T>(reader: i64, time: f64, out: mut Buffer<T>, pixels: MediaPixels, width: i32, height: i32, scale: MediaScale): MediaRead {
+  return mediaReadResult(mediaReadVideo(reader, time, mut out, mediaPixelsCode(pixels), width, height, mediaScaleCode(scale)));
+}
+
+function mediaAudioResult(reader: i64, n: i64): MediaAudioRead {
+  if (n > 0) {
+    return MediaAudioRead.Samples(mediaLastTime(reader), n as i32);
+  }
+  if (n == 0) {
+    return MediaAudioRead.End;
+  }
+  return MediaAudioRead.Failed(mediaError());
+}
+
+// time 秒からの音を、sampleRate のステレオの f32（L, R, L, R, ...）で out に書く（out の長さの半分の組まで）。
+// 素材のチャンネルが 1 つなら両方に、3 つ以上なら 2 つにまとめる。最初より前の時刻は、間を無音で埋める。
+function mediaSamples(reader: i64, time: f64, out: mut Buffer<f32>, sampleRate: i32): MediaAudioRead {
+  return mediaAudioResult(reader, mediaReadAudio(reader, mediaNonNegative(time), mut out, sampleRate));
+}
+
+// 続きの音を out に書く。
+function mediaNextSamples(reader: i64, out: mut Buffer<f32>, sampleRate: i32): MediaAudioRead {
+  return mediaAudioResult(reader, mediaReadAudio(reader, -1.0, mut out, sampleRate));
+}
+
+// 書くファイルを作る。入れ物はファイル名の拡張子で決まる（.mp4、.mov、.mkv、.webm、.wav など）。
+function mediaCreate(path: string): Result<i64, string> {
+  const w = mediaCreateWriter(path);
+  if (w != null) {
+    return Result.Ok(w);
+  }
+  return Result.Err(mediaError());
+}
+
+// 映像のストリームを足し、使う符号器の名前を返す。最初のコマを書く前に呼ぶ。
+function mediaAddVideoStream(writer: i64, s: MediaVideoSettings): Result<string, string> {
+  if (mediaAddVideo(writer, s.encoder, s.width, s.height, s.fpsNum, s.fpsDen, s.bitRate, s.options)) {
+    const names = mediaWriterText(writer);
+    return Result.Ok(names[0].clone());
+  }
+  return Result.Err(mediaError());
+}
+
+// 音のストリームを足し、使う符号器の名前を返す。
+function mediaAddAudioStream(writer: i64, s: MediaAudioSettings): Result<string, string> {
+  if (mediaAddAudio(writer, s.encoder, s.sampleRate, s.channels, s.bitRate, s.options)) {
+    const names = mediaWriterText(writer);
+    return Result.Ok(names[1].clone());
+  }
+  return Result.Err(mediaError());
+}
+
+// コマを1つ書く（時刻は 0 から 1 コマずつ進む）。大きさがストリームと違えば拡大縮小する。
+// RGB の形式は BT.709 の限られた範囲の YUV にして符号化する。成功なら null、失敗なら理由。
+function mediaWriteFrame<T>(writer: i64, pixels: Buffer<T>, format: MediaPixels, width: i32, height: i32): string | null {
+  if (mediaWriteVideo(writer, pixels, mediaPixelsCode(format), width, height)) {
+    return null;
+  }
+  return mediaError();
+}
+
+// 音を書く。samples はチャンネルを交互に並べた f32（-1〜1）。count は標本の組の数（負なら samples 全体）。
+// 成功なら null、失敗なら理由。
+function mediaWriteSamples(writer: i64, samples: Buffer<f32>, count: i64): string | null {
+  if (mediaWriteAudio(writer, samples, count)) {
+    return null;
+  }
+  return mediaError();
+}
+
+// 残りを書き出してファイルを閉じる。成功しても失敗しても、書き手は閉じる。成功なら null、失敗なら理由。
+function mediaFinish(writer: i64): string | null {
+  if (mediaFinishWriter(writer)) {
+    return null;
+  }
+  return mediaError();
+}
+
+// 使える符号器の一覧（編集ソフトの書き出しで使う形式: H.264、HEVC、AV1、VP9、ProRes、DNxHD、AAC、Opus、FLAC など）。
+// probe が真なら、実際に開けるもの（その GPU があるハードウェアの符号器）だけ。数秒かかることがある。
+function mediaEncoders(probe: bool): MediaEncoder[] {
+  const t = mediaEncoderList(probe);
+  let out: MediaEncoder[] = [];
+  let k: usize = 0;
+  while (k + 4 < t.length) {
+    out.push({ name: t[k].clone(), isVideo: t[k + 1] == "video", codec: t[k + 2].clone(), description: t[k + 3].clone(), hardware: t[k + 4] == "hw" });
+    k += 5;
+  }
+  return out;
+}

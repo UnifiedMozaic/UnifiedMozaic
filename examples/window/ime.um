@@ -1,0 +1,145 @@
+// IME の入力中の表示。日本語などを入力すると、確定前の文字列（変換中の文字列）をプログラムが描き、
+// 変換の候補の一覧は OS が入力欄のカーソルの近くに出す。
+// まだ文字を描く仕組みがないので、1文字を1つの箱で描く（確定した文字は灰色、変換中は青、選んでいる文節は明るい青）。
+// 変換中の文字列はウィンドウの題名と標準出力にも出す。Backspace で1文字消す、Esc で終わる。
+// ネイティブだけ（SDL3 が必要。docs/window.ja.md）。
+//   node src/cli.ts build examples/window/ime.um --target host -o ime && ./ime
+// 引数に test を渡すと、試験用の操作で変換中のイベントを積んで、届いたものを表示して終わる（選んでいる部分は試験用の操作が
+// いつも 1+2 にする）。
+// args: test
+// expect: editing [にほんご] select 1+2
+// expect: editing [日本語] select 1+2
+// expect: editing [] select 1+2
+
+const WIDTH: i32 = 640;
+const HEIGHT: i32 = 160;
+const BOX: i32 = 24;     // 1文字の箱の幅
+const LINE_Y: i32 = 60;  // 入力欄の上端
+
+// UTF-8 の文字列の文字の数。
+function charCount(s: string): i32 {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    if ((s[i] & 0xC0) != 0x80) {
+      n++;
+    }
+  }
+  return n;
+}
+
+// 箱を描く。committed 個の確定した文字、続いて editing 個の変換中の文字（selStart から selLen 個を強調）、最後にカーソル。
+kernel function draw(i: u32, px: mut Buffer<u32>, committed: i32, editing: i32, selStart: i32, selLen: i32, blink: u32): void {
+  const x = (i % 640) as i32;
+  const y = (i / 640) as i32;
+  let c: u32 = 0xFF181A1E;
+  if (y >= 56 && y < 92 && x >= 16 && x < 624) {
+    c = 0xFF24272D;  // 入力欄
+  }
+  if (y >= 60 && y < 88) {
+    const k = (x - 20) / 24;
+    const inner = (x - 20) % 24;
+    if (x >= 20 && inner >= 2 && inner < 22) {
+      if (k < committed) {
+        c = 0xFF8A9099;
+      } else if (k < committed + editing) {
+        const e = k - committed;
+        c = 0xFF3F6FB5;
+        if (selLen > 0 && e >= selStart && e < selStart + selLen) {
+          c = 0xFF7FB0FF;
+        }
+      }
+    }
+    // 変換中の文字列には下線
+    if (y >= 86 && x >= 20 + committed * 24 && x < 20 + (committed + editing) * 24) {
+      c = 0xFFFFFFFF;
+    }
+  }
+  // カーソル（変換中なら、その終わり）
+  const cx = 20 + (committed + editing) * 24;
+  if (blink < 30 && x >= cx && x < cx + 2 && y >= 58 && y < 90) {
+    c = 0xFFFFFFFF;
+  }
+  px[i] = c;
+}
+
+export function main(): i32 {
+  // 変換中の文字列をプログラムが描く（最初の windowOpen より前に呼ぶ）。
+  windowImeComposition(true);
+  const opened = windowOpen("IME", WIDTH, HEIGHT);
+  if (opened == null) {
+    eprint(`could not open a window: ${windowError()}`);
+    return 1;
+  }
+  const win = opened;
+  windowSetCursor(CursorShape.Text);
+  const a = args();
+  const test = a.length > 0 && a[0] == "test";
+  if (test) {
+    windowSetText(90, win, 16, "にほんご");
+    windowSetText(90, win, 16, "日本語");
+    windowSetText(90, win, 16, "");
+  }
+
+  let px = new Buffer<u32>((WIDTH * HEIGHT) as usize);
+  let committed = 0;
+  let editing = 0;
+  let selStart = 0;
+  let selLen = 0;
+  let blink: u32 = 0;
+  let running = true;
+  while (running) {
+    // 候補の一覧を出す位置（入力欄の矩形と、その中のカーソルの x）を毎フレーム知らせる。
+    windowSetTextInputArea(win, 20, LINE_Y, WIDTH - 40, 28, (committed + editing) * BOX);
+    while (true) {
+      const e = pollWindowEvent(test ? 100 : 0);
+      if (e == null) {
+        if (test) {
+          running = false;
+        }
+        break;
+      }
+      match (e) {
+        WindowEvent.Close(w) => { running = false; }
+        WindowEvent.Quit => { running = false; }
+        WindowEvent.KeyDown(w, key, mods, repeat) => {
+          match (key) {
+            Key.Escape => { running = false; }
+            Key.Backspace => {
+              if (editing == 0 && committed > 0) {
+                committed--;
+              }
+            }
+            _ => {}
+          }
+        }
+        WindowEvent.Text(w, cp) => {
+          committed++;
+          blink = 0;
+        }
+        WindowEvent.TextEditing(w, text, start, length) => {
+          // start と length の単位は文字。length が -1 なら選んでいる部分はない。
+          editing = charCount(text);
+          if (test) {
+            print(`editing [${text}] select ${start}+${length}`);
+          } else if (editing > 0) {
+            print(`editing: ${text}`);
+          }
+          selStart = start;
+          selLen = length;
+          if (editing > 0) {
+            windowSetTitle(win, `IME — ${text}`);
+          } else {
+            windowSetTitle(win, "IME");
+          }
+          blink = 0;
+        }
+        _ => {}
+      }
+    }
+    dispatch(draw, px.length as u32, mut px, committed, editing, selStart, selLen, blink);
+    windowPresent(win, px, WIDTH, HEIGHT);
+    blink = (blink + 1) % 60;
+  }
+  windowClose(win);
+  return 0;
+}

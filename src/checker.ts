@@ -184,9 +184,13 @@ export function simdInfo(t: Ty | undefined): { elem: Ty & { k: 'int' | 'float' }
  * 型検査は呼び出しの名前を `__io_名前` に書き換え、コード生成がランタイムの呼び出しにする。kernel の中では使えない。
  */
 const IO_BUILTINS = new Set(['readLine', 'inputReady', 'clock', 'stringFromBytes', 'readFile', 'writeFile', 'fileSize', 'readFileRange', 'appendFile', 'args', 'eprint',
-  'windowOpen', 'windowClose', 'windowPoll', 'windowPresent',
+  'windowOpen', 'windowClose', 'windowPoll', 'windowPresent', 'windowPresentRect', 'windowUpdateRect', 'windowCtl', 'windowCtlF', 'windowSetText', 'windowGetText',
+  'audioWrite',
   'wasmCompile', 'wasmFreeModule', 'wasmExportList', 'wasmInstantiate', 'wasmFreeInstance', 'wasmInvoke', 'wasmRead', 'wasmWrite',
-  'wasmMemorySize', 'wasmWat', 'wasmError']);
+  'wasmMemorySize', 'wasmWat', 'wasmError',
+  'mediaOpen', 'mediaClose', 'mediaInfoNumbers', 'mediaInfoText', 'mediaReadVideo', 'mediaReadAudio', 'mediaLastTime',
+  'mediaCreateWriter', 'mediaAddVideo', 'mediaAddAudio', 'mediaWriteVideo', 'mediaWriteAudio', 'mediaFinishWriter', 'mediaWriterText',
+  'mediaEncoderList', 'mediaError', 'mediaVersion']);
 
 /** 最上位の定数。値は最初に使われたとき（遅くとも宣言の収集の終わり）に求める。 */
 interface ConstInfo {
@@ -2705,6 +2709,8 @@ class Checker {
     if (this.ptrBits === 32 && sig.decl.pos.file === 'wasm.um' && e.pos.file !== 'wasm.um' && sig.name !== 'wasmCustomSection') {
       this.wasmOnly(sig.name, e.pos);
     }
+    // runtime/media.um の関数（mediaOpenVideo など）。
+    if (this.ptrBits === 32 && sig.decl.pos.file === 'media.um' && e.pos.file !== 'media.um') this.mediaOnly(sig.name, e.pos);
     this.checkArgs(sig, e.args, e.pos);
     return sig.ret;
   }
@@ -2730,6 +2736,16 @@ class Checker {
    *       ふつうは prelude.um の pollWindowEvent（WindowEvent の enum を返す）を使う。
    *   windowPresent(window: i32, pixels: Buffer<u32>, width: i32, height: i32): void
    *       0xAARRGGBB の画素を width × height 並べたものをウィンドウ全体に表示する。
+   *   windowPresentRect(window, pixels, width, height, x: i32, y: i32, w: i32, h: i32): void
+   *       windowPresent と同じだが、変わった矩形 (x, y, w, h) だけを写す（残りは前回の表示のまま）。
+   *   windowUpdateRect(window, pixels, width, height, x: i32, y: i32, w: i32, h: i32): void
+   *       矩形を写すだけで表示しない（矩形が複数あるとき。最後に windowPresentRect で表示する）。
+   *   windowCtl(op: i32, window: i32, io: mut Buffer<i64>): i64        操作番号で呼び分ける（引数と結果は io）。
+   *   windowCtlF(op: i32, window: i32, a: i64): f64                     小数を返す操作。
+   *   windowSetText(op: i32, window: i32, a: i64, text: string): i64   文字列を渡す操作。
+   *   windowGetText(op: i32, window: i32, a: i64): string               文字列を返す操作。
+   *       操作番号は runtime/window.c と runtime/audio.c。ふつうは runtime/window.um の名前のある関数を使う。
+   *   audioWrite(stream: i32, samples: Buffer<f32>, start: i64, count: i64): bool  音の標本を書き込む（runtime/audio.c）。
    * WebAssembly（ネイティブだけ。どのスレッドからも呼べる。runtime/wasm.c が wasmtime で実装する。
    * ふつうは runtime/wasm.um の wasmLoad / wasmNew / wasmCall を使う。モジュールとインスタンスは i64 の番号）:
    *   wasmCompile(bytes: u8[]): i64 | null           wasm のバイナリをコンパイルする。失敗なら null（理由は wasmError）。
@@ -2745,6 +2761,25 @@ class Checker {
    *   wasmMemorySize(instance: i64): i64             メモリのバイト数（メモリがなければ -1）。
    *   wasmWat(text: string): u8[]                    テキスト形式（.wat）をバイナリにする。失敗なら空。
    *   wasmError(): string                            このスレッドで最後に失敗した理由。
+   * 動画・音声（ネイティブだけ。どのスレッドからも呼べる。runtime/media.c が FFmpeg で実装する。
+   * ふつうは runtime/media.um の mediaOpenVideo / mediaFrame / mediaCreate などを使う。読み手と書き手は i64 の番号）:
+   *   mediaOpen(path: string, kind: i32, hwaccel: string): i64 | null   kind は 0 情報だけ、1 映像、2 音。失敗なら null（理由は mediaError）。
+   *   mediaClose(reader: i64): void
+   *   mediaInfoNumbers(reader: i64): f64[] / mediaInfoText(reader: i64): string[]   情報（並びは runtime/media.c）。
+   *   mediaReadVideo(reader: i64, time: f64, out: mut 画素の Buffer か配列, format: i32, width: i32, height: i32, filter: i32): f64
+   *       time が負なら次のコマ。コマの時刻を返す（終わりなら -1、失敗なら -2）。
+   *   mediaReadAudio(reader: i64, time: f64, out: mut f32 の Buffer か配列, sampleRate: i32): i64   標本の組の数（終わり 0、失敗 -1）。
+   *   mediaLastTime(reader: i64): f64                最後に読んだコマ・音の先頭の時刻。
+   *   mediaCreateWriter(path: string): i64 | null
+   *   mediaAddVideo(writer: i64, encoder: string, width: i32, height: i32, fpsNum: i32, fpsDen: i32, bitRate: i64, options: string): bool
+   *   mediaAddAudio(writer: i64, encoder: string, sampleRate: i32, channels: i32, bitRate: i64, options: string): bool
+   *   mediaWriteVideo(writer: i64, pixels: 画素の Buffer か配列, format: i32, width: i32, height: i32): bool
+   *   mediaWriteAudio(writer: i64, samples: f32 の Buffer か配列, count: i64): bool
+   *   mediaFinishWriter(writer: i64): bool           書き手は閉じる。
+   *   mediaWriterText(writer: i64): string[]         [映像の符号器, 音の符号器]
+   *   mediaEncoderList(probe: bool): string[]        5 つずつ: 名前, "video" / "audio", 形式, 説明, "hw" / "sw"。
+   *   mediaError(): string                           このスレッドで最後に失敗した理由。
+   *   mediaVersion(): string                         FFmpeg のライブラリの版とライセンス。
    * 引数は借りるだけ。結果は呼び出した側が所有する新しい値。
    */
   inferIo(e: Expr & { kind: 'call' }, name: string): Ty {
@@ -2766,6 +2801,19 @@ class Checker {
       windowClose: { params: [['window', I32]], ret: VOID },
       windowPoll: { params: [['event', { k: 'heap', elem: I32, buffer: true }], ['timeoutMs', I32]], ret: BOOL, mut: [0] },
       windowPresent: { params: [['window', I32], ['pixels', { k: 'heap', elem: PRIMS.u32, buffer: true }], ['width', I32], ['height', I32]], ret: VOID },
+      windowPresentRect: {
+        params: [['window', I32], ['pixels', { k: 'heap', elem: PRIMS.u32, buffer: true }], ['width', I32], ['height', I32], ['x', I32], ['y', I32], ['w', I32], ['h', I32]],
+        ret: VOID,
+      },
+      windowUpdateRect: {
+        params: [['window', I32], ['pixels', { k: 'heap', elem: PRIMS.u32, buffer: true }], ['width', I32], ['height', I32], ['x', I32], ['y', I32], ['w', I32], ['h', I32]],
+        ret: VOID,
+      },
+      windowCtl: { params: [['op', I32], ['window', I32], ['io', { k: 'heap', elem: I64, buffer: true }]], ret: I64, mut: [2] },
+      windowCtlF: { params: [['op', I32], ['window', I32], ['a', I64]], ret: F64 },
+      windowSetText: { params: [['op', I32], ['window', I32], ['a', I64], ['text', STR]], ret: I64 },
+      windowGetText: { params: [['op', I32], ['window', I32], ['a', I64]], ret: STR },
+      audioWrite: { params: [['stream', I32], ['samples', { k: 'heap', elem: PRIMS.f32, buffer: true }], ['start', I64], ['count', I64]], ret: BOOL },
       wasmCompile: { params: [['bytes', bytes]], ret: this.optionalOf(I64, e.pos) },
       wasmFreeModule: { params: [['module', I64]], ret: VOID },
       wasmExportList: { params: [['module', I64]], ret: { k: 'heap', elem: STR } },
@@ -2782,12 +2830,42 @@ class Checker {
       wasmMemorySize: { params: [['instance', I64]], ret: I64 },
       wasmWat: { params: [['text', STR]], ret: bytes },
       wasmError: { params: [], ret: STR },
+      mediaOpen: { params: [['path', STR], ['kind', I32], ['hwaccel', STR]], ret: this.optionalOf(I64, e.pos) },
+      mediaClose: { params: [['reader', I64]], ret: VOID },
+      mediaInfoNumbers: { params: [['reader', I64]], ret: { k: 'heap', elem: F64 } },
+      mediaInfoText: { params: [['reader', I64]], ret: { k: 'heap', elem: STR } },
+      mediaReadVideo: {
+        params: name === 'mediaReadVideo'
+          ? [['reader', I64], ['time', F64], this.mediaArrayParam(e, 2, name, 'out', false), ['format', I32], ['width', I32], ['height', I32], ['filter', I32]] : [],
+        ret: F64, mut: [2],
+      },
+      mediaReadAudio: {
+        params: name === 'mediaReadAudio' ? [['reader', I64], ['time', F64], this.mediaArrayParam(e, 2, name, 'out', true), ['sampleRate', I32]] : [],
+        ret: I64, mut: [2],
+      },
+      mediaLastTime: { params: [['reader', I64]], ret: F64 },
+      mediaCreateWriter: { params: [['path', STR]], ret: this.optionalOf(I64, e.pos) },
+      mediaAddVideo: {
+        params: [['writer', I64], ['encoder', STR], ['width', I32], ['height', I32], ['fpsNum', I32], ['fpsDen', I32], ['bitRate', I64], ['options', STR]], ret: BOOL,
+      },
+      mediaAddAudio: { params: [['writer', I64], ['encoder', STR], ['sampleRate', I32], ['channels', I32], ['bitRate', I64], ['options', STR]], ret: BOOL },
+      mediaWriteVideo: {
+        params: name === 'mediaWriteVideo' ? [['writer', I64], this.mediaArrayParam(e, 1, name, 'pixels', false), ['format', I32], ['width', I32], ['height', I32]] : [],
+        ret: BOOL,
+      },
+      mediaWriteAudio: { params: name === 'mediaWriteAudio' ? [['writer', I64], this.mediaArrayParam(e, 1, name, 'samples', true), ['count', I64]] : [], ret: BOOL },
+      mediaFinishWriter: { params: [['writer', I64]], ret: BOOL },
+      mediaWriterText: { params: [['writer', I64]], ret: { k: 'heap', elem: STR } },
+      mediaEncoderList: { params: [['probe', BOOL]], ret: { k: 'heap', elem: STR } },
+      mediaError: { params: [], ret: STR },
+      mediaVersion: { params: [], ret: STR },
     };
     // wasm.um の中の呼び出しは報告しない（wasm.um の関数を呼んだ所で報告する。下の wasmOnly）。
     if (name.startsWith('wasm') && this.ptrBits === 32 && e.pos.file !== 'wasm.um') this.wasmOnly(name, e.pos);
-    if (name.startsWith('window') && this.ptrBits === 32) {
+    if (name.startsWith('media') && this.ptrBits === 32 && e.pos.file !== 'media.um') this.mediaOnly(name, e.pos);
+    if ((name.startsWith('window') || name.startsWith('audio')) && this.ptrBits === 32) {
       this.err('not-implemented', `\`${name}\` is only available in native programs`, e.pos,
-        'windows need a desktop OS; build with `--target host` (the wasm32 target has no window)');
+        'windows and audio need a desktop OS; build with `--target host` (the wasm32 target has no window)');
     }
     const shape = shapes[name];
     const decl: FnDecl = { kind: 'fn', name, exported: false, params: [], body: [], pos: e.pos };
@@ -2801,6 +2879,43 @@ class Checker {
   wasmOnly(name: string, pos: Pos): void {
     this.err('not-implemented', `\`${name}\` is only available in native programs`, pos,
       'running WebAssembly modules needs wasmtime, which is linked into native programs; build with `--target host`');
+  }
+
+  /** 動画・音声の関数は、wasm32 のプログラムでは使えない（FFmpeg はネイティブのプログラムにリンクするため）。 */
+  mediaOnly(name: string, pos: Pos): void {
+    this.err('not-implemented', `\`${name}\` is only available in native programs`, pos,
+      'reading and writing video and audio needs FFmpeg, which is linked into native programs; build with `--target host`');
+  }
+
+  /**
+   * mediaReadVideo / mediaWriteVideo / mediaReadAudio / mediaWriteAudio の画素・標本の引数。数（8〜64 ビットの整数、f32、f64）か
+   * vec4<f32> の可変長配列か Buffer なら何でもよいので、実引数の型をそのまま仮引数の型にする（形式と合うかはランタイムが確かめる）。
+   * 音（samplesOnly）は f32 だけ。要素の型の印（整数ならバイト数、浮動小数点なら 0x100 | バイト数）を呼び出しの式に覚えておく。
+   */
+  mediaArrayParam(e: Expr & { kind: 'call' }, index: number, name: string, what: string, samplesOnly: boolean): [string, Ty] {
+    const arg = e.args[index];
+    if (!arg) return [what, { k: 'heap', elem: PRIMS.u8, buffer: true }];
+    if (!isPlace(arg.expr)) {
+      this.err('type-mismatch', `the ${what} of \`${name}\` must be a variable (or a field / element of one)`, arg.expr.pos, 'store it in a variable first');
+    }
+    const t = this.checkExpr(arg.expr);
+    let scalar = 0;
+    if (t.k === 'heap' && !t.str && !t.racy) {
+      const el = t.elem;
+      const vec = this.vecInfo(el);
+      if (el.k === 'int' && !el.usize) scalar = el.bits / 8;
+      else if (el.k === 'float' && (el.bits === 32 || el.bits === 64)) scalar = 0x100 | (el.bits / 8);
+      else if (vec && vec.n === 4 && vec.elem.k === 'float' && vec.elem.bits === 32) scalar = 0x104;
+    }
+    if (samplesOnly && (scalar !== 0x104 || (t.k === 'heap' && t.elem.k !== 'float'))) {
+      this.err('type-mismatch', `\`${name}\` needs samples in a Buffer<f32> or f32[], but found ${tyStr(t)}`, arg.expr.pos,
+        'audio is read and written as interleaved f32 samples');
+    } else if (scalar === 0) {
+      this.err('type-mismatch', `\`${name}\` needs pixels in a Buffer or array of numbers, but found ${tyStr(t)}`, arg.expr.pos,
+        'use Buffer<u8> (Rgba8, Yuv420p8), Buffer<u32> (Argb32), Buffer<f32> or Buffer<vec4<f32>> (RgbaF32), or Buffer<u16> (Rgba16, Yuv420p10)');
+    }
+    e.elemScalar = scalar;
+    return [what, t];
   }
 
   /**
