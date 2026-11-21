@@ -110,7 +110,9 @@ NVIDIA や AMD の単体の GPU は、CPU とメモリが分かれているの�
 - **OS の関数に Buffer の領域を直接渡すと、読み戻しの前の中身が渡ることはありませんが、関数が失敗することがあります**（OS の中では保護の例外を処理できないため）。UM の組み込みでは、Buffer を受け取る `windowPresent` が先に領域を読んで読み戻しを済ませます。ほかの組み込みは Buffer を OS に直接渡しません。
 - **Buffer は 1 つにつき 1 ページ以上を使います**（Windows では、アドレスの範囲を 64 KiB 単位で確保します）。小さい Buffer をとても多く作るプログラムでは、メモリの使い方が増えます。GPU に渡した Buffer は、GPU 側にも同じ大きさの写しを持ちます。
 
-例: [tests/wgpu/transfers.um](../tests/wgpu/transfers.um)（CPU と GPU を行き来する並びと、複数のスレッドの読み書き）。
+- **WebAssembly の組み込み（`wasmLoad` など。[docs/wasm.ja.md](wasm.ja.md)）と同じプログラムで使えます。** `wasmWrite` が GPU の書いた Buffer を読むと読み戻し、`wasmRead` が書いた Buffer は次に GPU に渡すとき送り直します。wasmtime も保護の例外を使いますが、どちらも自分の領域で起きた例外だけを扱うので、並んで動きます。
+
+例: [tests/wgpu/transfers.um](../tests/wgpu/transfers.um)（CPU と GPU を行き来する並びと、複数のスレッドの読み書き）、[tests/wgpu/with_wasm.um](../tests/wgpu/with_wasm.um)（GPU の結果を wasm のプラグインに渡して戻す）。
 
 ## 自動判断（`dispatch`）
 
