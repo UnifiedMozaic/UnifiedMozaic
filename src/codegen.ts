@@ -1721,6 +1721,8 @@ class ModuleGen {
     out.push(`declare i32 @um_read_file_into(ptr, ${this.usz}, i64, ptr, ${this.usz}, i64, i64, ptr, i32) #0`, `declare i32 @um_file_open(ptr, ${this.usz}, ptr, ${this.usz}, i32) #0`);
     out.push(`declare i32 @um_file_read(i32, i32, i64, ptr, ${this.usz}, i64, i64, ptr, i32) #0`, `declare i32 @um_file_write(i32, ptr, ${this.usz}, i64, i64, i32) #0`);
     out.push('declare i32 @um_file_seek(i32, i64, i32) #0', 'declare i32 @um_file_length(i32, ptr, i32) #0', 'declare void @um_file_close(i32, i32) #0');
+    out.push(`declare i32 @um_list_dir(ptr, ${this.usz}, ptr, ptr) #0`, `declare i32 @um_make_dir(ptr, ${this.usz}) #0`, `declare i32 @um_is_dir(ptr, ${this.usz}) #0`);
+    out.push(`declare void @um_path_query(i32, ptr, ${this.usz}, ptr, ptr) #0`);
     if (this.target === 'native') out.push('declare void @um_set_args(i32, ptr) #0');
     // ウィンドウ（runtime/window.c）。使ったときだけ宣言する。ドライバはこの宣言を見て window.c と SDL3 をリンクする。
     if (this.usesWindow) {
@@ -3599,6 +3601,33 @@ class FnGen {
         const h = this.expr(e.args[0].expr);
         this.emit(`call void @um_file_close(i32 ${h}, i32 ${e.pos.line})`);
         return '';
+      }
+      // フォルダとパス。
+      case 'listDir': {
+        const [path, plen] = this.heapParts(e.args[0].expr)();
+        const [d, l] = outSlots();
+        const ok = this.tmp();
+        this.emit(`${ok} = call i32 @um_list_dir(ptr ${path}, ${usz} ${plen}, ptr ${d}, ptr ${l})`);
+        return optional(ok, d, l);
+      }
+      case 'makeDir':
+      case 'isDir': {
+        const [path, plen] = this.heapParts(e.args[0].expr)();
+        return flag(`@um_${name === 'makeDir' ? 'make_dir' : 'is_dir'}(ptr ${path}, ${usz} ${plen})`);
+      }
+      case 'cwd':
+      case 'exePath':
+      case 'exeDir':
+      case 'absPath': {
+        const kind = ['cwd', 'exePath', 'exeDir', 'absPath'].indexOf(name);
+        const [path, plen] = name === 'absPath' ? this.heapParts(e.args[0].expr)() : ['null', '0'];
+        const [d, l] = outSlots();
+        this.emit(`call void @um_path_query(i32 ${kind}, ptr ${path}, ${usz} ${plen}, ptr ${d}, ptr ${l})`);
+        const data = this.tmp();
+        const len = this.tmp();
+        this.emit(`${data} = load ptr, ptr ${d}`);
+        this.emit(`${len} = load ${usz}, ptr ${l}`);
+        return this.arrayValue(data, len, len);
       }
       // ウィンドウ（runtime/window.c）。メインスレッドの確認と引数の検査はランタイムが行い、違反なら行番号つきで停止する。
       case 'windowOpen': {

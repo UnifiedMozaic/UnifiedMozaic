@@ -185,6 +185,7 @@ export function simdInfo(t: Ty | undefined): { elem: Ty & { k: 'int' | 'float' }
  */
 const IO_BUILTINS = new Set(['readLine', 'inputReady', 'clock', 'stringFromBytes', 'readFile', 'writeFile', 'fileSize', 'readFileRange', 'appendFile', 'args', 'eprint',
   'readFileInto', 'fileOpen', 'fileRead', 'fileReadAt', 'fileWrite', 'fileSeek', 'fileLength', 'fileClose',
+  'listDir', 'makeDir', 'isDir', 'cwd', 'exePath', 'exeDir', 'absPath',
   'windowOpen', 'windowClose', 'windowPoll', 'windowPresent', 'windowPresentRect', 'windowUpdateRect', 'windowCtl', 'windowCtlF', 'windowSetText', 'windowGetText',
   'audioWrite',
   'wasmCompile', 'wasmFreeModule', 'wasmExportList', 'wasmInstantiate', 'wasmFreeInstance', 'wasmInvoke', 'wasmRead', 'wasmWrite',
@@ -2737,6 +2738,11 @@ class Checker {
    *   fileReadAt(file: i32, offset: i64, buf: mut ... [, start, count]): i64 | null  offset から読む（位置は動かさない）。
    *   fileWrite(file: i32, data: u8 の配列か Buffer か文字列 [, start, count]): bool
    *   fileSeek(file: i32, offset: i64): bool / fileLength(file: i32): i64 | null / fileClose(file: i32): void
+   * フォルダとパス:
+   *   listDir(path: string): string[] | null  名前の一覧（"." と ".." を除き、バイト順に並べる）。
+   *   makeDir(path: string): bool              途中のフォルダも作る。すでにあれば true。
+   *   isDir(path: string): bool
+   *   cwd(): string / exePath(): string / exeDir(): string / absPath(path: string): string（作れなければ空）
    * ウィンドウ（ネイティブだけ。メインスレッドから呼ぶ。runtime/window.c が SDL3 で実装する）:
    *   windowOpen(title: string, width: i32, height: i32): i32 | null  ウィンドウを開き、その番号を返す。
    *   windowClose(window: i32): void       ウィンドウを閉じる。
@@ -2817,6 +2823,13 @@ class Checker {
       fileSeek: { params: [['file', I32], ['offset', I64]], ret: BOOL },
       fileLength: { params: [['file', I32]], ret: this.optionalOf(I64, e.pos) },
       fileClose: { params: [['file', I32]], ret: VOID },
+      listDir: { params: [['path', STR]], ret: this.optionalOf({ k: 'heap', elem: STR }, e.pos) },
+      makeDir: { params: [['path', STR]], ret: BOOL },
+      isDir: { params: [['path', STR]], ret: BOOL },
+      cwd: { params: [], ret: STR },
+      exePath: { params: [], ret: STR },
+      exeDir: { params: [], ret: STR },
+      absPath: { params: [['path', STR]], ret: STR },
       windowOpen: { params: [['title', STR], ['width', I32], ['height', I32]], ret: this.optionalOf(I32, e.pos) },
       windowClose: { params: [['window', I32]], ret: VOID },
       windowPoll: { params: [['event', { k: 'heap', elem: I32, buffer: true }], ['timeoutMs', I32]], ret: BOOL, mut: [0] },

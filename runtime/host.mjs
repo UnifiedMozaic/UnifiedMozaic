@@ -31,6 +31,33 @@ const WORKGROUP_SIZE = 64;
 // WebGPU が既定で保証する、1次元あたりのワークグループ数の上限。
 const MAX_GROUPS = 65535;
 
+function compareBytes(a, b) {
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) if (a[i] !== b[i]) return a[i] - b[i];
+  return a.length - b.length;
+}
+
+// パスのフォルダの部分（最後の区切りより前。根は残す）。
+function dirOf(p) {
+  const i = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+  if (i < 0) return '';
+  if (i === 0) return p.slice(0, 1);
+  if (i === 2 && p[1] === ':') return p.slice(0, 3);
+  return p.slice(0, i);
+}
+
+// base とつないで、"." と ".." と重なった "/" を名前だけで取り除く（"/" から始まる形）。
+function resolvePath(base, p) {
+  const all = (p.startsWith('/') ? p : base + '/' + p).split('/');
+  const out = [];
+  for (const part of all) {
+    if (part === '' || part === '.') continue;
+    if (part === '..') out.pop();
+    else out.push(part);
+  }
+  return '/' + out.join('/');
+}
+
 export class UmPanic extends Error {
   constructor(code, line) {
     super(`panic: ${PANIC_MESSAGES[code] ?? 'unknown'} (line ${line})`);
@@ -213,6 +240,12 @@ class GpuRunner {
  *   fileSeek?: (file: unknown, offset: number) => boolean,
  *   fileLength?: (file: unknown) => number | bigint | null,
  *   fileClose?: (file: unknown) => void,
+ *   listDir?: (path: string) => string[] | null,
+ *   makeDir?: (path: string) => boolean,
+ *   isDir?: (path: string) => boolean,
+ *   cwd?: string | (() => string),
+ *   exePath?: string,
+ *   absPath?: (path: string) => string,
  * }} [options] print の出力先（関数を直接渡してもよい）と GPU の設定、入出力の口。
  *   gpu: false で GPU を使わない。gpuThreshold: 自動判断で GPU に回す最小の要素数（既定 4096）。
  *   readLine: プログラムの readLine() に渡す次の1行（改行を除く）を返す。もうなければ null。同期的に返すこと。
@@ -231,6 +264,9 @@ class GpuRunner {
  *     ほかの口に渡す（プログラムに見せる番号は、ここで別に作る）。fileRead の offset が null なら今の位置から読み、
  *     数なら offset から読んで位置は動かさない。fileOpen の口がなければ、readFile / writeFile / appendFile の口で代わりに行う
  *     （"r" と "r+" は開くときに全体を読む。"w" と "a" は書くたびに書き足す。"w" / "a" の fileSeek は false）。
+ *   listDir / makeDir / isDir: プログラムの listDir() / makeDir() / isDir()。渡さなければ null / false / false。
+ *   cwd / exePath: プログラムの cwd() / exePath() が返す文字列。渡さなければ "/" と ""。exeDir() は exePath の最後の区切りより前。
+ *   absPath: プログラムの absPath()。渡さなければ cwd とつないで "." と ".." を取り除く（"/" で区切る）。
  * @returns {Promise<WebAssembly.Exports & { um_gpu?: { available: boolean, dispatches: () => number } }>}
  */
 export async function instantiate(bytes, options = {}) {
@@ -281,9 +317,11 @@ export async function instantiate(bytes, options = {}) {
       return false;
     }
   };
-  // 開いたままのファイル（プログラムに見せる番号 → 口の値か、代わりに行うときの状態）。
+  // 開いたままのファイル（プログラムに見せる番号 → 口の値か、代わりに行うときの状態）と、直前の listDir の結果。
   const files = new Map();
   let nextFile = 1;
+  let listing = null;
+  const utf8 = new TextEncoder();
 
   const env = {
     um_print_i64: (v) => print(BigInt.asIntN(64, v).toString()),
@@ -506,6 +544,55 @@ export async function instantiate(bytes, options = {}) {
         // 閉じられなくても、番号はもう使えない。
       }
       return 0;
+    },
+    // フォルダとパス。
+    um_host_list_dir: (ptr, len) => {
+      const path = pathOf(ptr, len);
+      listing = null;
+      if (path === null || !options.listDir) return -1;
+      try {
+        const names = options.listDir(path);
+        if (!Array.isArray(names)) return -1;
+        // ネイティブと同じく、UTF-8 のバイト順に並べる。
+        listing = names.map((n) => utf8.encode(String(n))).sort(compareBytes);
+        return listing.length;
+      } catch {
+        return -1;
+      }
+    },
+    um_host_list_entry: (i) => prepare(listing[i]),
+    um_host_make_dir: (ptr, len) => {
+      const path = pathOf(ptr, len);
+      if (path === null || !options.makeDir) return 0;
+      try {
+        return options.makeDir(path) ? 1 : 0;
+      } catch {
+        return 0;
+      }
+    },
+    um_host_is_dir: (ptr, len) => {
+      const path = pathOf(ptr, len);
+      if (path === null || !options.isDir) return 0;
+      try {
+        return options.isDir(path) ? 1 : 0;
+      } catch {
+        return 0;
+      }
+    },
+    um_host_path: (kind, ptr, len) => {
+      try {
+        const cwd = String((typeof options.cwd === 'function' ? options.cwd() : options.cwd) ?? '/');
+        const exe = String(options.exePath ?? '');
+        if (kind === 0) return prepare(cwd);
+        if (kind === 1) return prepare(exe);
+        if (kind === 2) return prepare(dirOf(exe));
+        // 空の名前と、0 のバイトを含む名前は空（ネイティブと同じ）。
+        const path = pathOf(ptr, len);
+        if (path === null) return -1;
+        return prepare(options.absPath ? String(options.absPath(path)) : resolvePath(cwd, path));
+      } catch {
+        return -1;
+      }
     },
     um_gpu_available: () => (runner ? 1 : 0),
     // 自動判断: いまは「GPU があり、要素数がしきい値以上」なら GPU。実測による補正は今後入れる。

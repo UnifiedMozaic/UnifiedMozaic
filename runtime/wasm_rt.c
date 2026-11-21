@@ -315,6 +315,14 @@ int um_host_file_write(int id, const unsigned char *data, size_t len) __attribut
 int um_host_file_seek(int id, long long offset) __attribute__((import_module("env"), import_name("um_host_file_seek")));
 long long um_host_file_length(int id) __attribute__((import_module("env"), import_name("um_host_file_length")));
 int um_host_file_close(int id) __attribute__((import_module("env"), import_name("um_host_file_close")));
+// 名前の一覧を用意して個数を返す（読めなければ -1）。i 番目の名前を用意してそのバイト数を返す。
+int um_host_list_dir(const char *path, size_t plen) __attribute__((import_module("env"), import_name("um_host_list_dir")));
+int um_host_list_entry(int i) __attribute__((import_module("env"), import_name("um_host_list_entry")));
+int um_host_make_dir(const char *path, size_t plen) __attribute__((import_module("env"), import_name("um_host_make_dir")));
+int um_host_is_dir(const char *path, size_t plen) __attribute__((import_module("env"), import_name("um_host_is_dir")));
+// kind: 0 = cwd、1 = exePath、2 = exeDir、3 = absPath。結果を用意してそのバイト数を返す（なければ -1）。
+int um_host_path(int kind, const char *path, size_t plen) __attribute__((import_module("env"), import_name("um_host_path")));
+
 static size_t file_range(size_t blen, long long start, long long count, int line) {
   if (start < 0 || (unsigned long long)start > blen) um_panic(16, line);
   size_t rest = blen - (size_t)start;
@@ -394,6 +402,34 @@ int um_file_length(int id, long long *out, int line) {
 
 void um_file_close(int id, int line) {
   if (um_host_file_close(id) == -2) um_panic(16, line);
+}
+
+int um_list_dir(const char *path, size_t plen, um_bytes **out, size_t *len) {
+  *out = 0;
+  *len = 0;
+  int n = um_host_list_dir(path, plen);
+  if (n < 0) return 0;
+  if (n == 0) return 1;
+  um_bytes *a = um_alloc((size_t)n, sizeof(um_bytes));
+  for (int i = 0; i < n; i++) {
+    unsigned char *p;
+    size_t l;
+    take_pending(um_host_list_entry(i), &p, &l);
+    a[i].data = p;
+    a[i].len = l;
+    a[i].cap = l;
+  }
+  *out = a;
+  *len = (size_t)n;
+  return 1;
+}
+
+int um_make_dir(const char *path, size_t plen) { return um_host_make_dir(path, plen) > 0; }
+
+int um_is_dir(const char *path, size_t plen) { return um_host_is_dir(path, plen) > 0; }
+
+void um_path_query(int kind, const char *path, size_t plen, unsigned char **out, size_t *len) {
+  take_pending(um_host_path(kind, path, plen), out, len);
 }
 
 // ---- スレッド ----

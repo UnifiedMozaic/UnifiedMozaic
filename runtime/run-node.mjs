@@ -3,10 +3,11 @@
 // `--` のあとの引数は、プログラムの args() に渡す。
 // 標準入力の行は readLine() に、ファイルの読み書きは readFile() / writeFile() にそのままつなぐ
 // （ネイティブのバイナリと同じく、プログラムが指定したファイルを読み書きできる）。
-// 開いたままのファイルもつなぐ。
+// 開いたままのファイル・フォルダ・cwd / exePath（exePath は .wasm の場所）・absPath もつなぐ。
 import {
-  appendFileSync, closeSync, fstatSync, openSync, readFileSync, readSync, statSync, writeFileSync, writeSync,
+  appendFileSync, closeSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync, writeFileSync, writeSync,
 } from 'node:fs';
+import { resolve } from 'node:path';
 import { instantiate, UmPanic } from './host.mjs';
 
 const argv = process.argv.slice(2);
@@ -160,6 +161,35 @@ const exports = await instantiate(readFileSync(file), {
     return st.isFile() ? st.size : null;
   },
   fileClose: (f) => closeSync(f.fd),
+  listDir: (path) => {
+    try {
+      return readdirSync(path);
+    } catch {
+      return null;
+    }
+  },
+  makeDir: (path) => {
+    try {
+      mkdirSync(path, { recursive: true });
+    } catch {
+      // すでにあるときも含め、下で確かめる。
+    }
+    try {
+      return statSync(path).isDirectory();
+    } catch {
+      return false;
+    }
+  },
+  isDir: (path) => {
+    try {
+      return statSync(path).isDirectory();
+    } catch {
+      return false;
+    }
+  },
+  cwd: () => process.cwd(),
+  exePath: resolve(file),
+  absPath: (path) => resolve(path),
   args: programArgs,
   eprint: (line) => process.stderr.write(line + '\n'),
 });

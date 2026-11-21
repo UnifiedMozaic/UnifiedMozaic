@@ -27,8 +27,12 @@
 #include <poll.h>
 #include <pthread.h>
 #include <sched.h>
+#include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 #endif
 
 #include "f16.h"
@@ -1531,4 +1535,316 @@ void um_file_close(int32_t id, int32_t line) {
   pthread_mutex_lock(&um_files_lock);
   if (f->refs == 0) f->state = UM_FILE_FREE;
   pthread_mutex_unlock(&um_files_lock);
+}
+
+// ---- フォルダとパス（listDir / makeDir / isDir / cwd / exePath / exeDir / absPath） ----
+
+static int um_name_cmp(const void *a, const void *b) {
+  const um_bytes *x = a, *y = b;
+  size_t n = x->len < y->len ? x->len : y->len;
+  int c = n ? memcmp(x->data, y->data, n) : 0;
+  return c ? c : (x->len > y->len) - (x->len < y->len);
+}
+
+// 名前の並びに1つ足す。
+static void um_names_push(um_bytes **a, size_t *n, size_t *cap, const char *name, size_t len) {
+  if (*n == *cap) {
+    size_t next = *cap ? *cap * 2 : 16;
+    um_bytes *p = realloc(*a, next * sizeof **a);
+    if (!p) um_panic(5, 0);
+    *a = p;
+    *cap = next;
+  }
+  unsigned char *d = um_alloc(len, 1);
+  if (len) memcpy(d, name, len);
+  (*a)[*n].data = d;
+  (*a)[*n].len = len;
+  (*a)[*n].cap = len;
+  (*n)++;
+}
+
+#ifdef _WIN32
+// UTF-16（0 で終わる）を UTF-8 の新しい領域にする。
+static unsigned char *os_narrow(const WCHAR *w, size_t *len) {
+  *len = 0;
+  int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
+  if (n <= 1) return NULL;
+  unsigned char *p = um_alloc((size_t)n, 1);
+  WideCharToMultiByte(CP_UTF8, 0, w, -1, (char *)p, n, NULL, NULL);
+  *len = (size_t)n - 1;
+  return p;
+}
+#endif
+
+int32_t um_list_dir(const char *path, size_t plen, um_bytes **out, size_t *len) {
+  *out = NULL;
+  *len = 0;
+  char *z = path_copy(path, plen);
+  if (!z) return 0;
+  um_bytes *a = NULL;
+  size_t n = 0, cap = 0;
+#ifdef _WIN32
+  WCHAR *w = os_wide(z);
+  free(z);
+  if (!w) return 0;
+  size_t wl = wcslen(w);
+  WCHAR *pat = malloc((wl + 3) * sizeof(WCHAR));
+  if (!pat) um_panic(5, 0);
+  memcpy(pat, w, wl * sizeof(WCHAR));
+  size_t k = wl;
+  if (k > 0 && pat[k - 1] != L'\\' && pat[k - 1] != L'/') pat[k++] = L'\\';
+  pat[k++] = L'*';
+  pat[k] = 0;
+  free(w);
+  WIN32_FIND_DATAW fd;
+  HANDLE h = FindFirstFileExW(pat, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0);
+  free(pat);
+  // フォルダには "." があるので、何も見つからないのはフォルダでないとき。
+  if (h == INVALID_HANDLE_VALUE) return 0;
+  do {
+    if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+    size_t l;
+    unsigned char *s = os_narrow(fd.cFileName, &l);
+    if (!s) continue;
+    um_names_push(&a, &n, &cap, (const char *)s, l);
+    free(s);
+  } while (FindNextFileW(h, &fd));
+  FindClose(h);
+#else
+  DIR *d = opendir(z);
+  free(z);
+  if (!d) return 0;
+  struct dirent *e;
+  while ((e = readdir(d)) != NULL) {
+    if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+    um_names_push(&a, &n, &cap, e->d_name, strlen(e->d_name));
+  }
+  closedir(d);
+#endif
+  if (n > 1) qsort(a, n, sizeof *a, um_name_cmp);
+  if (n == 0) {
+    free(a);
+    return 1;
+  }
+  // 配列の容量は長さと同じとして扱われるので、ちょうどの大きさにする。
+  um_bytes *fit = um_alloc(n, sizeof *fit);
+  memcpy(fit, a, n * sizeof *fit);
+  free(a);
+  *out = fit;
+  *len = n;
+  return 1;
+}
+
+static int um_is_sep(char c) {
+#ifdef _WIN32
+  return c == '/' || c == '\\';
+#else
+  return c == '/';
+#endif
+}
+
+static int os_mkdir(const char *z) {
+#ifdef _WIN32
+  WCHAR *w = os_wide(z);
+  if (!w) return -1;
+  int ok = CreateDirectoryW(w, NULL);
+  free(w);
+  return ok ? 0 : -1;
+#else
+  return mkdir(z, 0755);
+#endif
+}
+
+int32_t um_is_dir(const char *path, size_t plen) {
+  char *z = path_copy(path, plen);
+  if (!z) return 0;
+  int64_t size = 0;
+  int r = os_stat(z, &size) == OS_DIR;
+  free(z);
+  return r;
+}
+
+// 途中のフォルダも作る。すでにフォルダがあれば成功。
+int32_t um_make_dir(const char *path, size_t plen) {
+  char *z = path_copy(path, plen);
+  if (!z) return 0;
+  int64_t size = 0;
+  for (size_t i = 1; i < plen; i++) {
+    if (!um_is_sep(z[i]) || um_is_sep(z[i - 1])) continue;
+#ifdef _WIN32
+    if (i == 2 && z[1] == ':') continue;  // "C:\" の区切り
+#endif
+    z[i] = 0;
+    if (os_stat(z, &size) != OS_DIR) os_mkdir(z);
+    z[i] = path[i];
+  }
+  if (os_stat(z, &size) != OS_DIR) os_mkdir(z);
+  int ok = os_stat(z, &size) == OS_DIR;
+  free(z);
+  return ok;
+}
+
+#ifndef _WIN32
+// 今いるフォルダ（malloc した 0 で終わる文字列）。
+static char *os_getcwd(void) {
+  for (size_t cap = 256;; cap *= 2) {
+    char *b = malloc(cap);
+    if (!b) um_panic(5, 0);
+    if (getcwd(b, cap)) return b;
+    free(b);
+    if (errno != ERANGE) return NULL;
+  }
+}
+
+// 名前だけで "." と ".." と重なった "/" を取り除き、"/" から始まる形にする（リンクはたどらない）。
+static unsigned char *os_normalize(const char *s, size_t *outlen) {
+  size_t n = strlen(s);
+  unsigned char *o = um_alloc(n + 2, 1);
+  size_t k = 0, i = 0;
+  while (i < n) {
+    while (i < n && s[i] == '/') i++;
+    size_t b = i;
+    while (i < n && s[i] != '/') i++;
+    size_t l = i - b;
+    if (l == 0 || (l == 1 && s[b] == '.')) continue;
+    if (l == 2 && s[b] == '.' && s[b + 1] == '.') {
+      while (k > 0 && o[k - 1] != '/') k--;
+      if (k > 0) k--;
+      continue;
+    }
+    o[k++] = '/';
+    memcpy(o + k, s + b, l);
+    k += l;
+  }
+  if (k == 0) o[k++] = '/';
+  *outlen = k;
+  return o;
+}
+
+// base（なければ今いるフォルダ）と rel をつないで正規化する。rel が "/" で始まれば rel だけ。
+static unsigned char *os_resolve(const char *rel, size_t *len) {
+  *len = 0;
+  char *cwd = rel[0] == '/' ? NULL : os_getcwd();
+  if (rel[0] != '/' && !cwd) return NULL;
+  size_t cl = cwd ? strlen(cwd) : 0, rl = strlen(rel);
+  char *j = malloc(cl + rl + 2);
+  if (!j) um_panic(5, 0);
+  if (cwd) memcpy(j, cwd, cl);
+  j[cl] = '/';
+  memcpy(j + cl + 1, rel, rl + 1);
+  unsigned char *p = os_normalize(j, len);
+  free(j);
+  free(cwd);
+  return p;
+}
+#endif
+
+// 実行ファイルの絶対パス（新しい領域）。分からなければ NULL。
+static unsigned char *um_exe_path(size_t *len) {
+  *len = 0;
+#ifdef _WIN32
+  for (DWORD cap = 260; cap <= 65536; cap *= 2) {
+    WCHAR *w = malloc(cap * sizeof(WCHAR));
+    if (!w) um_panic(5, 0);
+    DWORD n = GetModuleFileNameW(NULL, w, cap);
+    if (n > 0 && n < cap) {
+      unsigned char *p = os_narrow(w, len);
+      free(w);
+      return p;
+    }
+    free(w);
+    if (n == 0) break;
+  }
+  return NULL;
+#elif defined(__APPLE__)
+  uint32_t cap = 0;
+  _NSGetExecutablePath(NULL, &cap);
+  char *b = malloc((size_t)cap + 1);
+  if (!b) um_panic(5, 0);
+  if (_NSGetExecutablePath(b, &cap) != 0) {
+    free(b);
+    return NULL;
+  }
+  char *real = realpath(b, NULL);
+  unsigned char *p = os_resolve(real ? real : b, len);
+  free(real);
+  free(b);
+  return p;
+#else
+  for (size_t cap = 256; cap <= 65536; cap *= 2) {
+    char *b = malloc(cap);
+    if (!b) um_panic(5, 0);
+    ssize_t n = readlink("/proc/self/exe", b, cap);
+    if (n > 0 && (size_t)n < cap) {
+      b[n] = 0;
+      unsigned char *p = os_resolve(b, len);
+      free(b);
+      return p;
+    }
+    free(b);
+    if (n <= 0) break;
+  }
+  // /proc がなければ、起動したときの名前から作る。
+  if (um_argc > 0 && um_argv && um_argv[0] && strchr(um_argv[0], '/')) return os_resolve(um_argv[0], len);
+  return NULL;
+#endif
+}
+
+// kind: 0 = cwd、1 = exePath、2 = exeDir、3 = absPath(path)。結果は新しい文字列（作れなければ空）。
+void um_path_query(int32_t kind, const char *path, size_t plen, unsigned char **out, size_t *len) {
+  *out = NULL;
+  *len = 0;
+  if (kind == 1 || kind == 2) {
+    size_t n;
+    unsigned char *p = um_exe_path(&n);
+    if (!p) return;
+    if (kind == 2) {
+      size_t k = n;
+      while (k > 0 && !um_is_sep((char)p[k - 1])) k--;
+      // 区切りを除く。ただし根（"/" や "C:\"）は残す。
+      if (k > 1 && !(k == 3 && p[1] == ':')) k--;
+      n = k;
+    }
+    *out = p;
+    *len = n;
+    return;
+  }
+  char *z = NULL;
+  if (kind == 3) {
+    z = path_copy(path, plen);
+    if (!z) return;
+  }
+#ifdef _WIN32
+  WCHAR *w = NULL;
+  if (z) {
+    w = os_wide(z);
+    free(z);
+    if (!w) return;
+  }
+  for (DWORD cap = 260; cap <= 65536; cap *= 2) {
+    WCHAR *b = malloc(cap * sizeof(WCHAR));
+    if (!b) um_panic(5, 0);
+    DWORD n = w ? GetFullPathNameW(w, cap, b, NULL) : GetCurrentDirectoryW(cap, b);
+    if (n > 0 && n < cap) {
+      *out = os_narrow(b, len);
+      free(b);
+      break;
+    }
+    free(b);
+    if (n == 0) break;
+  }
+  free(w);
+#else
+  if (z) {
+    *out = os_resolve(z, len);
+    free(z);
+    return;
+  }
+  char *c = os_getcwd();
+  if (!c) return;
+  *len = strlen(c);
+  *out = um_alloc(*len, 1);
+  memcpy(*out, c, *len);
+  free(c);
+#endif
 }
