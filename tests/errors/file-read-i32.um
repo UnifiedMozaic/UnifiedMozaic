@@ -1,0 +1,10 @@
+// error: type-mismatch
+// fileRead が読み込めるのは u8[] か Buffer<u8> だけ。
+export function main(): i32 {
+  const f = fileOpen("data.bin", "r");
+  if (f != null) {
+    let xs: i32[] = [0, 0];
+    const n = fileRead(f, mut xs);
+  }
+  return 0;
+}

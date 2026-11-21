@@ -1,0 +1,11 @@
+// panic: invalid file call (an unknown or closed file, an unknown open mode, or a range outside the array) (line 9)
+// 閉じたファイルの番号は使えない（停止する）。
+export function main(): i32 {
+  const f = fileOpen("um_panic_closed.txt", "w");
+  if (f == null) {
+    return 1;
+  }
+  fileClose(f);
+  fileWrite(f, "late");
+  return 0;
+}

@@ -1,0 +1,127 @@
+// 開いたままのファイル（fileOpen / fileWrite / fileRead / fileReadAt / fileSeek / fileLength / fileClose）と、
+// Buffer に直接読む readFileInto。動画のコマのように、大きなバイト列を毎回確保し直さずに読み書きする。
+// expect: true
+// expect: 4100
+// expect: 4100
+// expect: 4096 4096
+// expect: 7 255 0
+// expect: 4 72 105
+// expect: 0
+// expect: 16 19
+// expect: 100 101 102
+// expect: 4100
+// expect: true
+// expect: true
+// expect: 11
+// expect: 2
+// expect: 102 120
+// expect: true
+// expect: hello, file
+// expect: true
+
+export function main(): i32 {
+  // 1コマ 4096 バイトの「画素」を Buffer に作り、開いたままのファイルに書き足していく。
+  let frame = new Buffer<u8>(4096);
+  for (let i: u32 = 0; i < frame.length; i++) {
+    frame[i] = (i % 256) as u8;
+  }
+  const out = fileOpen("um_example_frames.bin", "w");
+  if (out == null) {
+    return 1;
+  }
+  // 見出し（文字列はそのまま書ける）と、コマ。
+  print(fileWrite(out, "Hi") && fileWrite(out, frame) && fileWrite(out, "Hi"));
+  fileClose(out);
+  const size = fileSize("um_example_frames.bin");
+  if (size != null) {
+    print(size);
+  }
+
+  // 読む側も開いたまま。fileLength は開いたファイルの大きさ。
+  const f = fileOpen("um_example_frames.bin", "r");
+  if (f == null) {
+    return 1;
+  }
+  const len = fileLength(f);
+  if (len != null) {
+    print(len);
+  }
+  // 見出しを飛ばして、1コマを Buffer に直接読む（2回目は fileReadAt で、位置を指定して読む）。
+  let back = new Buffer<u8>(4096);
+  fileSeek(f, 2);
+  const got = fileRead(f, mut back);
+  const again = fileReadAt(f, 2, mut back);
+  if (got != null) {
+    if (again != null) {
+      print(String(got) + " " + String(again));
+    }
+  }
+  print(String(back[7]) + " " + String(back[255]) + " " + String(back[4095] - 255));
+  // fileRead は今の位置（コマの後ろ）から続ける。配列の一部（start と count）だけにも読める。
+  let tail: u8[] = [0, 0, 0, 0];
+  const t = fileRead(f, mut tail, 1, 3);
+  if (t != null) {
+    print(String(t + 2) + " " + String(tail[1]) + " " + String(tail[2]));
+  }
+  // 終わりでは 0（null ではない）。
+  const end = fileRead(f, mut tail);
+  if (end != null) {
+    print(end);
+  }
+  fileClose(f);
+
+  // readFileInto: 開かずに、ファイルの一部を Buffer の途中へ直接読む。
+  let dst = new Buffer<u8>(32);
+  const n = readFileInto("um_example_frames.bin", 2 + 16, mut dst, 8, 16);
+  if (n != null) {
+    print(String(n) + " " + String(dst[8 + 3]));
+  }
+  // u8[] の一部へも読める。
+  let small: u8[] = [0, 0, 0];
+  const m = readFileInto("um_example_frames.bin", 2 + 100, mut small, 0, 3);
+  if (m != null) {
+    print(String(small[0]) + " " + String(small[1]) + " " + String(small[2]));
+  }
+  // 終わりを越えて頼むと、あるだけ。
+  let whole = new Buffer<u8>(8192);
+  const all = readFileInto("um_example_frames.bin", 0, mut whole, 0, 8192);
+  if (all != null) {
+    print(all);
+  }
+  print(readFileInto("um_example_no_such_file.bin", 0, mut whole, 0, 10) == null);
+  print(fileOpen("um_example_no_such_file.bin", "r") == null);
+
+  // "a" は書き足す、"r+" は読み書き（上書き）。
+  const a = fileOpen("um_example_open.txt", "w");
+  if (a != null) {
+    fileWrite(a, "hello, ");
+    fileClose(a);
+  }
+  const b = fileOpen("um_example_open.txt", "a");
+  if (b != null) {
+    fileWrite(b, "fxle");
+    fileClose(b);
+  }
+  const c = fileOpen("um_example_open.txt", "r+");
+  if (c != null) {
+    const total = fileLength(c);
+    if (total != null) {
+      print(total);
+    }
+    let two: u8[] = [0, 0];
+    const r = fileReadAt(c, 7, mut two);
+    if (r != null) {
+      print(r);
+    }
+    print(String(two[0]) + " " + String(two[1]));
+    fileSeek(c, 8);
+    print(fileWrite(c, "i"));
+    fileClose(c);
+  }
+  const text = readFile("um_example_open.txt");
+  if (text != null) {
+    print(stringFromBytes(text));
+  }
+  print(fileOpen("um_example\0hidden.txt", "w") == null);
+  return 0;
+}

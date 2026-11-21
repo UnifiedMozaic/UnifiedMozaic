@@ -1,0 +1,7 @@
+// panic: invalid file call (an unknown or closed file, an unknown open mode, or a range outside the array) (line 5)
+// 配列の外へは読めない（停止する）。
+export function main(): i32 {
+  let buf = new Buffer<u8>(8);
+  const n = readFileInto("um_panic_range.bin", 0, mut buf, 4, 8);
+  return 0;
+}

@@ -1,0 +1,6 @@
+// panic: invalid file call (an unknown or closed file, an unknown open mode, or a range outside the array) (line 4)
+// 開き方は "r" / "w" / "a" / "r+" だけ。
+export function main(): i32 {
+  const f = fileOpen("um_panic_mode.txt", "rw");
+  return 0;
+}

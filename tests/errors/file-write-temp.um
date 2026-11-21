@@ -1,0 +1,13 @@
+// error: type-mismatch
+// fileWrite に変数でない式を渡すと、文字列として検査する。配列は一度変数に入れる。
+function header(): u8[] {
+  return [1, 2, 3];
+}
+
+export function main(): i32 {
+  const f = fileOpen("data.bin", "w");
+  if (f != null) {
+    fileWrite(f, header());
+  }
+  return 0;
+}

@@ -1,0 +1,67 @@
+// 8 スレッドが同時に、それぞれのファイルを開いて書き、共有の番号から fileReadAt で読む。
+// sorted
+// expect: 0 true 0
+// expect: 1 true 1
+// expect: 2 true 2
+// expect: 3 true 3
+// expect: 4 true 4
+// expect: 5 true 5
+// expect: 6 true 6
+// expect: 7 true 7
+// expect: shared closed
+
+function work(k: u32, shared: i32): u32 {
+  const name = "um_thread_file_" + String(k) + ".bin";
+  let frame = new Buffer<u8>(4096);
+  for (let i: u32 = 0; i < frame.length; i++) {
+    frame[i] = k as u8;
+  }
+  const f = fileOpen(name, "w");
+  if (f == null) {
+    print(`${k} open failed`);
+    return k;
+  }
+  let ok = true;
+  for (let n = 0; n < 50; n++) {
+    ok = ok && fileWrite(f, frame);
+  }
+  fileClose(f);
+  // 書いたものを読み戻して確かめる。
+  let back = new Buffer<u8>(4096);
+  for (let n: i64 = 0; n < 50; n += 1) {
+    const got = readFileInto(name, n * 4096, mut back, 0, 4096);
+    if (got == null) {
+      ok = false;
+    } else {
+      ok = ok && got == 4096 && back[0] == (k as u8) && back[4095] == (k as u8);
+    }
+  }
+  // 共有の番号: 位置を指定して読むので、ほかのスレッドの読み込みと混ざらない。
+  let one: u8[] = [0];
+  let seen: u32 = 99;
+  for (let n = 0; n < 100; n++) {
+    const r = fileReadAt(shared, k as i64, mut one);
+    if (r != null) {
+      seen = one[0] as u32;
+    }
+  }
+  print(`${k} ${ok} ${seen}`);
+  return k;
+}
+
+export function main(): i32 {
+  const table: u8[] = [0, 1, 2, 3, 4, 5, 6, 7];
+  if (!writeFile("um_thread_shared.bin", table)) {
+    return 1;
+  }
+  const shared = fileOpen("um_thread_shared.bin", "r");
+  if (shared == null) {
+    return 1;
+  }
+  let ks: u32[] = [0, 1, 2, 3, 4, 5, 6, 7];
+  const g = thread.spawnEach(work, own ks, shared);
+  thread.join(g);
+  fileClose(shared);
+  print("shared closed");
+  return 0;
+}
