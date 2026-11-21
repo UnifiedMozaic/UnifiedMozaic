@@ -1,2 +1,5 @@
 # GitHub の表示: .um は TypeScript として色分けする（文法が近いため。Linguist に UnifiedMozaic はまだない）。
 *.um linguist-language=TypeScript
+
+# シェルスクリプトは Windows で取り出しても LF のまま（CRLF だと bash が読めない）。
+*.sh text eol=lf
