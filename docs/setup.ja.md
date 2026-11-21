@@ -108,6 +108,7 @@ node runtime/run-node.mjs structs.wasm
 
 ウィンドウを開くプログラム（[docs/window.ja.md](window.ja.md)）には、ほかに SDL3 が要ります。
 WebAssembly のモジュールを実行するプログラム（[docs/wasm.ja.md](wasm.ja.md)）には、ほかに wasmtime の C API が要ります。
+動画・音声を読み書きするプログラム（[docs/media.ja.md](media.ja.md)）には、ほかに FFmpeg の LGPL の共有ライブラリが要ります（`UM_FFMPEG_HOME`）。
 
 ## 6. テスト
 

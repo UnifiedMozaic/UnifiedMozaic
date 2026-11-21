@@ -339,18 +339,10 @@ static int sws_flags_of(int filter) {
   }
 }
 
-// FFmpeg の色の行列 → swscale の係数の番号。指定がなければ大きさで推す（HD 以上は BT.709、それ未満は BT.601）。
-static int sws_cs_of(enum AVColorSpace cs, int height) {
-  switch (cs) {
-    case AVCOL_SPC_BT709: return SWS_CS_ITU709;
-    case AVCOL_SPC_FCC: return SWS_CS_FCC;
-    case AVCOL_SPC_BT470BG:
-    case AVCOL_SPC_SMPTE170M: return SWS_CS_ITU601;
-    case AVCOL_SPC_SMPTE240M: return SWS_CS_SMPTE240M;
-    case AVCOL_SPC_BT2020_NCL:
-    case AVCOL_SPC_BT2020_CL: return SWS_CS_BT2020;
-    default: return height >= 720 ? SWS_CS_ITU709 : SWS_CS_ITU601;
-  }
+// FFmpeg の色の行列。指定がなければ大きさで推す（HD 以上は BT.709、それ未満は BT.601）。
+static enum AVColorSpace guess_colorspace(enum AVColorSpace cs, int height) {
+  if (cs != AVCOL_SPC_UNSPECIFIED && cs != AVCOL_SPC_RESERVED) return cs;
+  return height >= 720 ? AVCOL_SPC_BT709 : AVCOL_SPC_SMPTE170M;
 }
 
 static int is_yuv(enum AVPixelFormat f) {
@@ -358,36 +350,45 @@ static int is_yuv(enum AVPixelFormat f) {
   return d && !(d->flags & AV_PIX_FMT_FLAG_RGB) && d->nb_components >= 3;
 }
 
-// YUV の値の範囲が full（0〜255）か。指定がなければ、yuvj の形式だけ full とみなす。
-static int is_full_range(enum AVColorRange r, enum AVPixelFormat f) {
-  if (r == AVCOL_RANGE_JPEG) return 1;
-  if (r == AVCOL_RANGE_MPEG) return 0;
-  return f == AV_PIX_FMT_YUVJ420P || f == AV_PIX_FMT_YUVJ422P || f == AV_PIX_FMT_YUVJ444P || f == AV_PIX_FMT_YUVJ440P;
+// YUV の値の範囲。指定がなければ、yuvj の形式だけ full（0〜255）、ほかは限られた範囲とみなす。
+static enum AVColorRange guess_range(enum AVColorRange r, enum AVPixelFormat f) {
+  if (r == AVCOL_RANGE_JPEG || r == AVCOL_RANGE_MPEG) return r;
+  int full = f == AV_PIX_FMT_YUVJ420P || f == AV_PIX_FMT_YUVJ422P || f == AV_PIX_FMT_YUVJ444P || f == AV_PIX_FMT_YUVJ440P;
+  return full ? AVCOL_RANGE_JPEG : AVCOL_RANGE_MPEG;
 }
 
-// swscale の変換の状態。条件が変わったときだけ作り直す。
-typedef struct {
-  struct SwsContext *ctx;
-  int sw, sh, sfmt, dw, dh, dfmt, flags, cs, full_in, full_out;
-} um_scaler;
-
-static struct SwsContext *scaler_get(um_scaler *s, int sw, int sh, enum AVPixelFormat sfmt, int dw, int dh, enum AVPixelFormat dfmt,
-                                     int flags, int cs, int full_in, int full_out) {
-  if (s->ctx && s->sw == sw && s->sh == sh && s->sfmt == sfmt && s->dw == dw && s->dh == dh && s->dfmt == dfmt &&
-      s->flags == flags && s->cs == cs && s->full_in == full_in && s->full_out == full_out) {
-    return s->ctx;
+// 画素の変換（拡大縮小と色の変換）。libswscale の新しい API（sws_scale_frame）を使う: 色の行列と範囲はフレームの
+// 情報から決まり、1 枚を複数のスレッドで分けて変換する。src と dst の色域・伝達特性は同じにする（色の管理はしない）。
+// dst の画素は呼ぶ側の領域（data / lines）に書く。成功なら 1。
+static int scale_into(SwsContext **ctx, int flags, const AVFrame *src, enum AVPixelFormat dfmt, int dw, int dh,
+                      uint8_t *data[4], int lines[4], enum AVColorSpace dcs, enum AVColorRange drange) {
+  if (!*ctx) {
+    *ctx = sws_alloc_context();
+    if (!*ctx) um_panic(5, 0);
+    (*ctx)->threads = 0;  // CPU の数に合わせる
   }
-  sws_freeContext(s->ctx);
-  s->ctx = sws_getContext(sw, sh, sfmt, dw, dh, dfmt, flags, NULL, NULL, NULL);
-  if (!s->ctx) {
-    set_error("cannot convert %s %dx%d to %s %dx%d", av_get_pix_fmt_name(sfmt), sw, sh, av_get_pix_fmt_name(dfmt), dw, dh);
-    return NULL;
+  (*ctx)->flags = (unsigned)flags;
+  AVFrame *dst = av_frame_alloc();
+  if (!dst) um_panic(5, 0);
+  dst->width = dw;
+  dst->height = dh;
+  dst->format = dfmt;
+  for (int i = 0; i < 4; i++) {
+    dst->data[i] = data[i];
+    dst->linesize[i] = lines[i];
   }
-  const int *coef = sws_getCoefficients(cs);
-  sws_setColorspaceDetails(s->ctx, coef, full_in, coef, full_out, 0, 1 << 16, 1 << 16);
-  s->sw = sw; s->sh = sh; s->sfmt = sfmt; s->dw = dw; s->dh = dh; s->dfmt = dfmt;
-  s->flags = flags; s->cs = cs; s->full_in = full_in; s->full_out = full_out;
-  return s->ctx;
+  dst->colorspace = dcs;
+  dst->color_range = drange;
+  dst->color_primaries = src->color_primaries;
+  dst->color_trc = src->color_trc;
+  dst->chroma_location = AVCHROMA_LOC_LEFT;
+  int err = sws_scale_frame(*ctx, dst, src);
+  av_frame_free(&dst);  // data は呼ぶ側の領域（buf を持たないので解放されない）
+  if (err < 0) {
+    set_error_av("cannot convert the pixels", err);
+    return 0;
+  }
+  return 1;
 }
 
 // 16 ビットの RGBA → 0〜1 の f32。
@@ -431,7 +432,7 @@ typedef struct {
   int64_t frame_dur; // 1 コマの長さの既定（ストリームの時間の単位）
   int errors;        // 続けて起きた復号の失敗
   double last_time;
-  um_scaler scaler;
+  SwsContext *sws;
   uint16_t *tmp16;
   size_t tmp16_cap;
   // 音
@@ -461,7 +462,7 @@ static void free_reader(um_reader *r) {
   av_frame_free(&r->sw);
   av_frame_free(&r->cur);
   av_frame_free(&r->ahead);
-  sws_freeContext(r->scaler.ctx);
+  sws_free_context(&r->sws);
   free(r->tmp16);
   swr_free(&r->swr);
   av_channel_layout_uninit(&r->swr_in_layout);
@@ -900,12 +901,11 @@ static int convert_video(um_reader *r, uint8_t *out, size_t out_bytes, int32_t s
   if (!need) return 0;
   enum AVPixelFormat sfmt = (enum AVPixelFormat)f->format;
   enum AVPixelFormat dfmt = px_av(fmt);
-  int cs = sws_cs_of(f->colorspace, f->height);
-  int full_in = is_yuv(sfmt) ? is_full_range(f->color_range, sfmt) : 1;
-  // RGB にするときは 0〜255 いっぱいに、YUV のまま取り出すときは素材の範囲のまま。
-  int full_out = px_is_rgb(fmt) ? 1 : full_in;
-  struct SwsContext *ctx = scaler_get(&r->scaler, f->width, f->height, sfmt, w, h, dfmt, sws_flags_of(filter), cs, full_in, full_out);
-  if (!ctx) return 0;
+  // 書いていない色の行列と範囲は推した値にする（RGB の素材ならそのまま）。
+  if (is_yuv(sfmt)) {
+    f->colorspace = guess_colorspace(f->colorspace, f->height);
+    f->color_range = guess_range(f->color_range, sfmt);
+  }
   uint8_t *base = out;
   if (fmt == PX_RGBAF32) {
     size_t n = (size_t)w * h * 4;
@@ -920,7 +920,10 @@ static int convert_video(um_reader *r, uint8_t *out, size_t out_bytes, int32_t s
   uint8_t *data[4];
   int lines[4];
   px_planes(fmt, base, w, h, data, lines);
-  sws_scale(ctx, (const uint8_t *const *)f->data, f->linesize, 0, f->height, data, lines);
+  // RGB にするときは 0〜255 いっぱいに、YUV のまま取り出すときは素材の行列と範囲のまま。
+  enum AVColorSpace dcs = px_is_rgb(fmt) ? AVCOL_SPC_RGB : f->colorspace;
+  enum AVColorRange drange = px_is_rgb(fmt) ? AVCOL_RANGE_JPEG : f->color_range;
+  if (!scale_into(&r->sws, sws_flags_of(filter), f, dfmt, w, h, data, lines, dcs, drange)) return 0;
   if (fmt == PX_RGBAF32) rgba16_to_f32(r->tmp16, (float *)out, (size_t)w * h * 4);
   return 1;
 }
@@ -1180,7 +1183,8 @@ typedef struct {
   AVPacket *pkt;
   AVFrame *vframe;
   int64_t vpts;
-  um_scaler scaler;
+  SwsContext *sws;
+  AVFrame *src;  // 受け取った画素を包むフレーム（変換の入力）
   uint16_t *tmp16;
   size_t tmp16_cap;
   AVFrame *aframe;
@@ -1201,7 +1205,8 @@ static void free_writer(um_writer *w) {
   av_packet_free(&w->pkt);
   av_frame_free(&w->vframe);
   av_frame_free(&w->aframe);
-  sws_freeContext(w->scaler.ctx);
+  sws_free_context(&w->sws);
+  av_frame_free(&w->src);
   free(w->tmp16);
   if (w->afifo) av_audio_fifo_free(w->afifo);
   swr_free(&w->aswr);
@@ -1606,15 +1611,29 @@ int32_t um_media_write_video(int64_t h, const uint8_t *px, size_t len, size_t es
   uint8_t *sdata[4];
   int slines[4];
   px_planes(fmt, (uint8_t *)src, width, height, sdata, slines);
-  enum AVPixelFormat dfmt = w->venc->pix_fmt;
   // RGB は 0〜255 いっぱいとして読み、BT.709 の限られた範囲の YUV にする（符号器にもそう印を付けてある）。
   // YUV の入力は BT.709 の限られた範囲とみなす。
-  int full_in = px_is_rgb(fmt) ? 1 : 0;
-  struct SwsContext *ctx = scaler_get(&w->scaler, width, height, px_av(fmt), w->venc->width, w->venc->height, dfmt,
-                                      SWS_BICUBIC | SWS_FULL_CHR_H_INP | SWS_ACCURATE_RND, SWS_CS_ITU709, full_in, 0);
-  if (!ctx) goto done;
+  if (!w->src) {
+    w->src = av_frame_alloc();
+    if (!w->src) um_panic(5, 0);
+  }
+  AVFrame *in = w->src;
+  in->width = width;
+  in->height = height;
+  in->format = px_av(fmt);
+  for (int i = 0; i < 4; i++) {
+    in->data[i] = sdata[i];
+    in->linesize[i] = slines[i];
+  }
+  in->colorspace = px_is_rgb(fmt) ? AVCOL_SPC_RGB : AVCOL_SPC_BT709;
+  in->color_range = px_is_rgb(fmt) ? AVCOL_RANGE_JPEG : AVCOL_RANGE_MPEG;
+  in->color_primaries = AVCOL_PRI_BT709;
+  in->color_trc = AVCOL_TRC_BT709;
   if (av_frame_make_writable(w->vframe) < 0) um_panic(5, 0);
-  sws_scale(ctx, (const uint8_t *const *)sdata, slines, 0, height, w->vframe->data, w->vframe->linesize);
+  if (!scale_into(&w->sws, SWS_BICUBIC | SWS_FULL_CHR_H_INP | SWS_ACCURATE_RND, in, w->venc->pix_fmt, w->venc->width, w->venc->height,
+                  w->vframe->data, w->vframe->linesize, AVCOL_SPC_BT709, AVCOL_RANGE_MPEG)) {
+    goto done;
+  }
   w->vframe->pts = w->vpts++;
   ok = encode(w, w->venc, w->vst, w->vframe);
 done:

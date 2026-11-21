@@ -926,8 +926,7 @@ function makeMediaClips(ffmpeg: string): void {
   run(['-f', 'lavfi', '-i', coded('160x120', 25), '-t', '3', '-c:v', 'mpeg4', '-bf', '2', '-g', '12', '-q:v', '2', '-pix_fmt', 'yuv420p', 'bframes.mp4']);
   run(['-f', 'lavfi', '-i', coded('64x64', 24), '-t', '1', '-c:v', 'prores_ks', '-profile:v', '2', '-pix_fmt', 'yuv422p10le', 'ten.mov']);
   writeFileSync(join(tmp, 'broken.mp4'), readFileSync(join(tmp, 'clip.mp4')).subarray(0, 3000));
-  writeFileSync(join(tmp, 'garbage.mp4'), Buffer.from('this is not a video file
-'.repeat(200)));
+  writeFileSync(join(tmp, 'garbage.mp4'), Buffer.from('this is not a video file\n'.repeat(200)));
 }
 
 // 動画・音声の組み込み（FFmpeg。ネイティブだけ）。

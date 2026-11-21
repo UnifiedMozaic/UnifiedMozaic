@@ -1,0 +1,121 @@
+// FFmpeg で展開したコマを GPU の kernel で色補正し、FFmpeg で MP4 に書く（編集ソフトの書き出しの流れ）。
+//   展開（ハードウェアの展開が使えれば GPU）→ Buffer<vec4<f32>>（RgbaF32、0〜1）→ kernel（露出・彩度・周辺減光）
+//   → Buffer<u32>（0xAARRGGBB）→ 符号化（H.264。使える中から自動で選ぶ）
+//
+// ビルド（wgpu の GPU 経路。docs/wgpu.ja.md）:
+//   UM_WGPU=1 node src/cli.ts build examples/media/gpu/grade.um --target host -o grade
+//   ./grade 入力.mp4 出力.mp4 [hwaccel]
+// UM_WGPU=1 を付けなければ、同じ kernel を CPU（複数のスレッド）で実行する（結果は同じ）。
+
+// 1 画素の色補正。露出（2 の exposure 乗）、彩度（輝度との混ぜ具合）、周辺減光（中心からの距離で暗くする）。
+kernel function grade(i: u32, src: Buffer<vec4<f32>>, out: mut Buffer<u32>, w: u32, h: u32, exposure: f32, saturation: f32, vignette: f32): void {
+  const p = src[i];
+  const gain = exposure;
+  let r = p.x * gain;
+  let g = p.y * gain;
+  let b = p.z * gain;
+  const y = 0.2126 * r + 0.7152 * g + 0.0722 * b;  // BT.709 の輝度
+  r = y + (r - y) * saturation;
+  g = y + (g - y) * saturation;
+  b = y + (b - y) * saturation;
+  const x = ((i % w) as f32) / (w as f32) - 0.5;
+  const yy = ((i / w) as f32) / (h as f32) - 0.5;
+  const d = (x * x + yy * yy) * 2.0;
+  const v = 1.0 - vignette * d;
+  r = Math.min(Math.max(r * v, 0.0), 1.0);
+  g = Math.min(Math.max(g * v, 0.0), 1.0);
+  b = Math.min(Math.max(b * v, 0.0), 1.0);
+  const ri = (r * 255.0 + 0.5) as u32;
+  const gi = (g * 255.0 + 0.5) as u32;
+  const bi = (b * 255.0 + 0.5) as u32;
+  out[i] = 0xFF000000 | (ri << 16) | (gi << 8) | bi;
+}
+
+export function main(): i32 {
+  const a = args();
+  if (a.length < 2) {
+    eprint("usage: grade input.mp4 output.mp4 [hwaccel]");
+    return 2;
+  }
+  let hw = "auto";
+  if (a.length > 2) {
+    hw = a[2].clone();
+  }
+  let reader: i64 = 0;
+  match (mediaOpenVideo(a[0], hw)) {
+    Result.Ok(r) => { reader = r; }
+    Result.Err(why) => {
+      eprint("cannot open: " + why);
+      return 1;
+    }
+  }
+  const info = mediaInfoOf(reader);
+  const w = info.width;
+  const h = info.height;
+  eprint(`${info.videoCodec} ${w}x${h} ${info.fpsNum}/${info.fpsDen} fps, decoding with ${info.hwaccel}`);
+
+  let writer: i64 = 0;
+  match (mediaCreate(a[1])) {
+    Result.Ok(x) => { writer = x; }
+    Result.Err(why) => {
+      eprint("cannot create: " + why);
+      mediaClose(reader);
+      return 1;
+    }
+  }
+  let v = new MediaVideoSettings();
+  v.width = w;
+  v.height = h;
+  v.fpsNum = info.fpsNum;
+  v.fpsDen = info.fpsDen;
+  match (mediaAddVideoStream(writer, v)) {
+    Result.Ok(name) => { eprint("encoding with " + name); }
+    Result.Err(why) => {
+      eprint("cannot add the video stream: " + why);
+      mediaFinish(writer);
+      mediaClose(reader);
+      return 1;
+    }
+  }
+
+  let src = new Buffer<vec4<f32>>(w * h);
+  let out = new Buffer<u32>(w * h);
+  let frames = 0;
+  let decode = 0.0;
+  let gpuTime = 0.0;
+  let encode = 0.0;
+  const start = clock();
+  while (true) {
+    const t0 = clock();
+    match (mediaNextFrame(reader, mut src, MediaPixels.RgbaF32, 0, 0)) {
+      MediaRead.Frame(_) => {}
+      MediaRead.End => { break; }
+      MediaRead.Failed(why) => {
+        eprint("cannot read: " + why);
+        break;
+      }
+    }
+    const t1 = clock();
+    dispatch(grade, (w * h) as u32, src, mut out, w as u32, h as u32, 1.3, 1.25, 0.6);
+    const t2 = clock();
+    const err = mediaWriteFrame(writer, out, MediaPixels.Argb32, w, h);  // out を読むので、ここで GPU の結果を待つ
+    if (err != null) {
+      eprint("cannot write: " + err);
+      break;
+    }
+    const t3 = clock();
+    decode += t1 - t0;
+    gpuTime += t2 - t1;
+    encode += t3 - t2;
+    frames += 1;
+  }
+  const done = mediaFinish(writer);
+  if (done != null) {
+    eprint("cannot finish: " + done);
+  }
+  mediaClose(reader);
+  const secs = clock() - start;
+  print(`${frames} frames in ${secs} s (${(frames as f64) / secs} fps)`);
+  print(`decode ${decode * 1000.0 / (frames as f64)} ms, grade ${gpuTime * 1000.0 / (frames as f64)} ms, encode ${encode * 1000.0 / (frames as f64)} ms per frame`);
+  return 0;
+}
