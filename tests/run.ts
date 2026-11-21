@@ -27,13 +27,17 @@
 //   tests/panics/*.um  `// panic: メッセージ` で停止することを確認。
 //   examples/wasm/*.um WebAssembly の組み込み（wasmtime。ネイティブだけ）。`// expect:` と照合する。
 //   tests/wasm/*.um    同じく。`// expect:` か `// panic:` と照合する。wasmtime の C API が見つからなければ飛ばす。
+//   tests/window/*.um と examples/window/*.um
+//                      ウィンドウと音の組み込み（SDL3。ネイティブだけ）。SDL_VIDEO_DRIVER=offscreen と SDL_AUDIO_DRIVER=dummy で
+//                      画面と音のデバイスなしに実行し、`// expect:` か `// panic:` と照合する（`// args:` はコマンドライン引数）。
+//                      `// expect:` のない例はビルドだけ確かめる。SDL3 が見つからなければ飛ばす。
 
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { CompileError, CompileErrors } from '../src/diag.ts';
-import { build, CLANG, compileMsl, compileToLL, compileWgsl, exePath, wasmtimeAvailable } from '../src/driver.ts';
+import { build, CLANG, compileMsl, compileToLL, compileWgsl, exePath, wasmtimeAvailable, sdl3Available } from '../src/driver.ts';
 import { smallMagnitudes } from '../src/codegen.ts';
 // @ts-ignore 型定義のないJSモジュール
 import { instantiate, UmPanic } from '../runtime/host.mjs';
@@ -884,6 +888,38 @@ if (!wasmtimeAvailable()) {
       } else if (n.panic) fail(`${f} [host]`, n.panic);
       else if (same(n.out, want)) ok(`${f} [host]`);
       else fail(`${f} [host]`, `expected: ${want.join(' ')}\nactual:   ${n.out.join(' ')}`);
+    } catch (e) {
+      fail(`${f} [host]`, String(e));
+    }
+  }
+}
+
+// ウィンドウと音の組み込み（SDL3。ネイティブだけ）。画面と音のデバイスがなくても動くように、SDL の offscreen と dummy を使う。
+if (!sdl3Available()) {
+  console.log('note: SDL3 が見つからないため、examples/window と tests/window は省略します（UM_SDL3 を設定してください。docs/window.ja.md）');
+} else {
+  const env = { ...process.env, SDL_VIDEO_DRIVER: 'offscreen', SDL_AUDIO_DRIVER: 'dummy' };
+  for (const f of [...files('examples/window'), ...files('tests/window')]) {
+    const src = readFileSync(join(root, f), 'utf8');
+    const want = directives(src, 'expect');
+    const panic = directives(src, 'panic')[0];
+    const argv = (directives(src, 'args')[0] ?? '').split(' ').filter((a) => a !== '');
+    const exe = join(tmp, `${f.replace(/[^a-z0-9]/gi, '_')}.bin`);
+    try {
+      build(compileToLL(src, 'host', false, join(root, f)), 'host', exe);
+      if (want.length === 0 && panic === undefined) {
+        ok(`${f} [host, build]`);
+        continue;
+      }
+      const r = spawnSync(exePath(exe), argv, { encoding: 'utf8', cwd: tmp, env, timeout: 60000 });
+      const out = r.stdout.split('\n').map((l) => l.replace(/\r$/, '')).filter((l) => l !== '');
+      const got = r.status === 101 ? r.stderr.trim().split('\n').map((l) => l.trim()).filter((l) => l.startsWith('panic:'))[0] : undefined;
+      if (panic !== undefined) {
+        if (got === `panic: ${panic}` && same(out, want)) ok(`${f} [host]`);
+        else fail(`${f} [host]`, `expected: panic: ${panic}\nactual:   ${got ?? 'no panic'} (output: ${out.join(' | ')})`);
+      } else if (r.status !== 0) fail(`${f} [host]`, `exit ${r.status ?? r.signal}\n${r.stderr.trim()}\noutput: ${out.join(' | ')}`);
+      else if (same(out, want)) ok(`${f} [host]`);
+      else fail(`${f} [host]`, `expected: ${want.join(' | ')}\nactual:   ${out.join(' | ')}`);
     } catch (e) {
       fail(`${f} [host]`, String(e));
     }

@@ -70,3 +70,32 @@ other character keys are `Char(codepoint)` (lower case) and the rest are `Other(
 The built-ins live in `runtime/window.c` (C and SDL3). `WindowEvent`, `Key`, `Mods` and `pollWindowEvent` are written in UM in
 `runtime/window.um` and are added to a program only when it uses one of those names, so programs without a window never link SDL3.
 The lower-level `windowPoll(event: mut Buffer<i32>, timeoutMs: i32): bool` writes `[kind, window, a, b, c, d]` into `event`.
+
+## More: audio, dialogs, drop, clipboard, cursors, IME, window control, HiDPI, time
+
+The Japanese page ([window.ja.md](window.ja.md)) has the full reference; this is a summary. All of these are written in UM in
+`runtime/window.um` on top of a few numbered low-level built-ins (`windowCtl`, `windowCtlF`, `windowSetText`, `windowGetText`, `audioWrite`).
+
+- **Partial present**: `windowPresentRect(window, pixels, width, height, x, y, w, h)` uploads only the changed rectangle and presents;
+  `windowUpdateRect(...)` uploads without presenting (for several rectangles). 1920×1080, D3D11: full present ≈ 2.1 ms, two small rects ≈ 0.4 ms.
+  `windowSetVSync(window, on)`.
+- **Audio** (`runtime/audio.c`): `audioOpen(rate, channels): i32 | null` (opens paused; `null` when there is no device),
+  `audioWrite(stream, samples: Buffer<f32>, start, count)` (interleaved f32), `audioQueued`, `audioPause`, `audioResume`, `audioPaused`,
+  `audioClear`, `audioPlayed` (frames handed to the device — use it as the A/V clock), `audioWritten`, `audioLatency`, `audioSetGain`, `audioClose`.
+  Writes and queries may come from any thread.
+- **File dialogs** (asynchronous): `windowOpenFileDialog(window, title, location, filters: DialogFilter[], many)`, `windowSaveFileDialog`,
+  `windowOpenFolderDialog` return a request number; the result arrives as `WindowEvent.Dialog(request, paths, filter)` (empty `paths` = cancelled)
+  or `DialogFailed(request)`.
+- **Drop**: `DropBegin`, `DropPosition(x, y)`, `DropFile(path, x, y)`, `DropText(text, x, y)`, `DropComplete`.
+- **Clipboard**: `clipboardText()`, `clipboardSetText(text)`, `clipboardHasText()`.
+- **Cursors**: `windowSetCursor(CursorShape.Pointer)` etc., `windowShowCursor(show)`.
+- **IME**: call `windowImeComposition(true)` before the first `windowOpen` to receive `TextEditing(window, text, start, length)` and draw the
+  composition yourself; `windowSetTextInputArea(window, x, y, w, h, cursor)` places the OS candidate list; `windowStartTextInput` / `windowStopTextInput`.
+- **Window control**: `windowSetTitle`, `windowTitle`, `windowSetSize`, `windowSize`, `windowSetPosition`, `windowPosition`, `windowSetMinimumSize`,
+  `windowMaximize`, `windowMinimize`, `windowRestore`, `windowSetFullscreen`, `windowState`, `windowSetResizable`, `windowRaise`.
+- **HiDPI and displays**: `windowPixelSize`, `windowPixelDensity`, `windowDisplayScale`, `windowDisplay`, `displayCount`, `displayBounds`,
+  `displayUsableBounds`, `displayName`, `displayContentScale`, `displayRefreshRate`; events `PixelSizeChanged`, `ScaleChanged`, `DisplaysChanged`.
+- **Other events**: `Focus`, `MouseEnter`, `MouseLeave`, `Moved`, `StateChanged`, `Exposed` (redraw needed).
+- **Time**: `ticksNs()`, `sleepNs(ns)`, `sleepMs(ms)` (any thread).
+
+Examples: `examples/window/tone.um`, `open_dialog.um`, `drop.um`, `ime.um`, `present_bench.um`.
