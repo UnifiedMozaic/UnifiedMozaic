@@ -188,7 +188,6 @@ static inline int clock_gettime(int clk, struct timespec *t) {
 
 #define flockfile _lock_file
 #define funlockfile _unlock_file
-#define putchar_unlocked(c) _putc_nolock((c), stdout)
 
 // 停止の2番目以降のスレッドが、終わるまで寝るのに使う。
 static inline int pause(void) {

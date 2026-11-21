@@ -122,10 +122,12 @@ void um_print_f64(double v) {
 
 // print 1回の出力（1行）は、ほかのスレッドの出力と混ざらないようにする（文字列は2回の stdio 呼び出しなので囲む）。
 // ほかの print は1回の stdio 呼び出しで、stdio が呼び出しごとに鍵を取る。
+// 改行は putchar_unlocked で書かない: glibc ではマクロとして FILE の中身を直接書き、ThreadSanitizer には
+// flockfile の鍵が見えないので、データ競合と報告される（um_eprint と同じく fputc を使う。鍵は取り直せる）。
 void um_print_str(const char *data, size_t len) {
   flockfile(stdout);
   if (len > 0) fwrite(data, 1, len, stdout);
-  putchar_unlocked('\n');
+  fputc('\n', stdout);
   funlockfile(stdout);
 }
 
