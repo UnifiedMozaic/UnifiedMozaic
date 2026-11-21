@@ -165,6 +165,8 @@ _Noreturn void um_panic(int32_t code, int32_t line) {
     case 8: msg = "could not start a thread"; break;
     case 9: msg = "readLine and inputReady can only be called from the main thread"; break;
     case 10: msg = "invalid group size (it must be 1 to 1024, and groups times size must fit in u32)"; break;
+    case 11: msg = "window functions can only be called from the main thread"; break;
+    case 12: msg = "invalid window call (unknown window, a size that is not positive, or a Buffer that is too short)"; break;
   }
   // 複数のスレッドが同時に停止しても、メッセージは1回だけ。2番目以降は、終わるまで寝る。
   if (atomic_exchange(&um_panicking, 1)) {

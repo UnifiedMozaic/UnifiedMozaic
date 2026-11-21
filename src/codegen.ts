@@ -19,6 +19,7 @@ const PANIC_NO_GPU = 7;
 // 8 = スレッドを起こせなかった（ランタイムが um_thread_start の中で停止する）。
 const PANIC_THREAD_IO = 9;
 const PANIC_GROUP = 10;
+// 11 = ウィンドウの関数をメインスレッド以外から呼んだ、12 = ウィンドウの関数の引数が正しくない（runtime/window.c が停止する）。
 /** グループの大きさの上限（Metal の1グループのスレッド数の上限）。 */
 const MAX_GROUP_SIZE = 1024;
 
@@ -1080,6 +1081,8 @@ class ModuleGen {
   target: TargetKind;
   /** 使った組み込み関数の宣言（重複なし）。 */
   intrinsics = new Set<string>();
+  /** ウィンドウの組み込み（windowOpen など）を使ったか。使ったときだけランタイムの宣言を出す。 */
+  usesWindow = false;
   /** GPU で実行する kernel。名前 → 番号と、WGSL を入れたグローバル定数。 */
   gpuKernels = new Map<string, { id: number; global: string; bytes: number }>();
   /** プログラムのどこかに f16 が現れるか。現れるときだけ変換の関数を出す。 */
@@ -1607,6 +1610,11 @@ class ModuleGen {
     out.push(`declare i32 @um_file_size(ptr, ${this.usz}, ptr) #0`, `declare i32 @um_read_file_range(ptr, ${this.usz}, i64, i64, ptr, ptr) #0`);
     out.push(`declare i32 @um_append_file(ptr, ${this.usz}, ptr, ${this.usz}) #0`, 'declare void @um_args(ptr, ptr) #0', `declare void @um_eprint(ptr, ${this.usz}) #0`);
     if (this.target === 'native') out.push('declare void @um_set_args(i32, ptr) #0');
+    // ウィンドウ（runtime/window.c）。使ったときだけ宣言する。ドライバはこの宣言を見て window.c と SDL3 をリンクする。
+    if (this.usesWindow) {
+      out.push(`declare i32 @um_window_open(ptr, ${this.usz}, i32, i32, i32) #0`, 'declare void @um_window_close(i32, i32) #0');
+      out.push(`declare i32 @um_window_poll(ptr, ${this.usz}, i32, i32) #0`, `declare void @um_window_present(i32, ptr, ${this.usz}, i32, i32, i32) #0`);
+    }
     // wasm では LLVM が f16 を整数のビット列として変換関数に渡すので、ランタイム（wasm_rt.c）が直接その関数を持つ。
     out.push('declare zeroext i8 @um_f8_enc(double) #0', 'declare zeroext i8 @um_f4_enc(double) #0');
     if (this.usesF16()) out.push(...(this.target === 'native' ? F16_SHIMS : ['declare i16 @um_d2h(i64) #0']));
@@ -3379,6 +3387,47 @@ class FnGen {
       case 'eprint': {
         const [data, len] = this.heapParts(e.args[0].expr)();
         this.emit(`call void @um_eprint(ptr ${data}, ${usz} ${len})`);
+        return '';
+      }
+      // ウィンドウ（runtime/window.c）。メインスレッドの確認と引数の検査はランタイムが行い、違反なら行番号つきで停止する。
+      case 'windowOpen': {
+        this.m.usesWindow = true;
+        const titleParts = this.heapParts(e.args[0].expr);
+        const w = this.expr(e.args[1].expr);
+        const h = this.expr(e.args[2].expr);
+        const [title, tlen] = titleParts();
+        const id = this.tmp();
+        this.emit(`${id} = call i32 @um_window_open(ptr ${title}, ${usz} ${tlen}, i32 ${w}, i32 ${h}, i32 ${e.pos.line})`);
+        const t = llTy(e.ty!);
+        const some = this.tmp();
+        const a = this.tmp();
+        const b = this.tmp();
+        this.emit(`${some} = icmp ne i32 ${id}, 0`);
+        this.emit(`${a} = insertvalue ${t} undef, i1 ${some}, 0`);
+        this.emit(`${b} = insertvalue ${t} ${a}, i32 ${id}, 1`);
+        return b;
+      }
+      case 'windowClose': {
+        this.m.usesWindow = true;
+        const id = this.expr(e.args[0].expr);
+        this.emit(`call void @um_window_close(i32 ${id}, i32 ${e.pos.line})`);
+        return '';
+      }
+      case 'windowPoll': {
+        this.m.usesWindow = true;
+        const evParts = this.heapParts(e.args[0].expr);
+        const timeout = this.expr(e.args[1].expr);
+        const [data, len] = evParts();
+        return flag(`@um_window_poll(ptr ${data}, ${usz} ${len}, i32 ${timeout}, i32 ${e.pos.line})`);
+      }
+      case 'windowPresent': {
+        this.m.usesWindow = true;
+        const id = this.expr(e.args[0].expr);
+        const pxParts = this.heapParts(e.args[1].expr);
+        const w = this.expr(e.args[2].expr);
+        const h = this.expr(e.args[3].expr);
+        const [data, len] = pxParts();
+        this.emit(`call void @um_window_present(i32 ${id}, ptr ${data}, ${usz} ${len}, i32 ${w}, i32 ${h}, i32 ${e.pos.line})`);
         return '';
       }
     }

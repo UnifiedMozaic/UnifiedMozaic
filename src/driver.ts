@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, extname, join, relative, resolve, sep } from 'node:path';
 import { check } from './checker.ts';
@@ -64,6 +64,62 @@ export function exePath(path: string): string {
   return process.platform === 'win32' && extname(path) === '' ? `${path}.exe` : path;
 }
 const RUNTIME_METAL = join(import.meta.dirname, '..', 'runtime', 'metal.m');
+const RUNTIME_WINDOW = join(import.meta.dirname, '..', 'runtime', 'window.c');
+
+/** SDL3 をリンクするための clang の引数と、実行ファイルの隣に置く DLL（Windows だけ）。 */
+interface Sdl3 { args: string[]; dll?: string }
+
+/**
+ * ウィンドウの組み込み（runtime/window.c）が使う SDL3 を探す。
+ *   1. 環境変数 UM_SDL3 = SDL3 を置いた場所（include/SDL3/SDL.h があるところ）。
+ *      Windows では公式の SDL3-devel-*-VC.zip を展開した場所を指す（lib/x64 か lib/arm64 の SDL3.lib と SDL3.dll を使う）。
+ *   2. pkg-config の sdl3（macOS の Homebrew、Linux のパッケージ）。
+ *   3. macOS の Homebrew の決まった場所。
+ */
+function findSdl3(): Sdl3 {
+  const hint = 'install SDL3 3.2.12 or later (macOS: `brew install sdl3`; Windows: unzip SDL3-devel-*-VC.zip from ' +
+    'https://github.com/libsdl-org/SDL/releases and set UM_SDL3 to that folder; Linux: libsdl3-dev), or set UM_SDL3';
+  const fromPrefix = (prefix: string): Sdl3 | null => {
+    if (!existsSync(join(prefix, 'include', 'SDL3', 'SDL.h'))) return null;
+    if (process.platform === 'win32') {
+      const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
+      const lib = join(prefix, 'lib', arch);
+      if (!existsSync(join(lib, 'SDL3.lib'))) return null;
+      return { args: [`-I${join(prefix, 'include')}`, join(lib, 'SDL3.lib')], dll: join(lib, 'SDL3.dll') };
+    }
+    const lib = join(prefix, 'lib');
+    return { args: [`-I${join(prefix, 'include')}`, `-L${lib}`, '-lSDL3', `-Wl,-rpath,${lib}`] };
+  };
+  const env = process.env.UM_SDL3;
+  if (env) {
+    const found = fromPrefix(resolve(env));
+    if (!found) throw new Error(`SDL3 was not found in UM_SDL3=${env}; ${hint}`);
+    return found;
+  }
+  if (process.platform !== 'win32') {
+    try {
+      const pc = (args: string[]) => execFileSync('pkg-config', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      const flags = pc(['--cflags', '--libs', 'sdl3']).split(/\s+/).filter((a) => a !== '');
+      const libdir = pc(['--variable=libdir', 'sdl3']);
+      if (libdir) flags.push(`-Wl,-rpath,${libdir}`);
+      return { args: flags };
+    } catch {
+      // pkg-config がない、または sdl3 が登録されていない。
+    }
+    if (process.platform === 'darwin') {
+      for (const p of ['/opt/homebrew/opt/sdl3', '/usr/local/opt/sdl3']) {
+        const found = fromPrefix(p);
+        if (found) return found;
+      }
+    }
+  }
+  throw new Error(`this program opens a window, which needs SDL3, but SDL3 was not found; ${hint}`);
+}
+
+/** 生成した LLVM IR がウィンドウの組み込みを使っているか（codegen は使ったときだけ宣言を出す）。 */
+function usesWindow(ll: string): boolean {
+  return ll.includes('declare i32 @um_window_open(');
+}
 
 /**
  * Metal（macOS の GPU）で kernel を実行する経路を使うか。
@@ -75,6 +131,11 @@ export function metalEnabled(target: TargetName): boolean {
 }
 
 const PRELUDE = join(import.meta.dirname, '..', 'runtime', 'prelude.um');
+/**
+ * ウィンドウの標準の型と関数（WindowEvent、pollWindowEvent など）。UM で書いてある。
+ * ウィンドウを使わないプログラムに SDL3 をリンクさせないため、プログラムがこのファイルの名前を使うときだけ加える。
+ */
+const WINDOW_PRELUDE = join(import.meta.dirname, '..', 'runtime', 'window.um');
 const RUNTIME_WASM_C = join(import.meta.dirname, '..', 'runtime', 'wasm_rt.c');
 
 /** ファイル番号を、宣言とその中のメソッドに付ける。 */
@@ -101,6 +162,7 @@ export function parseProgram(src: string, file?: string): Module {
   const root = file ? dirname(realpathSync(resolve(file))) : undefined;
   const loaded = new Map<string, { id: number; mod: Module }>();
   if (file) loaded.set(realpathSync(resolve(file)), { id: 0, mod: entry });
+  const texts = [src];
 
   const load = (mod: Module, id: number, dir: string | undefined): void => {
     for (const d of mod.decls) {
@@ -133,6 +195,7 @@ export function parseProgram(src: string, file?: string): Module {
         let text: string;
         try {
           text = readFileSync(abs, 'utf8');
+          texts.push(text);
         } catch {
           throw new CompileError('import-path', `cannot read '${imp.path}'`, imp.pos);
         }
@@ -157,7 +220,14 @@ export function parseProgram(src: string, file?: string): Module {
   // 標準の関数・型と同じ名前の定数は、標準のものを黙って消さずに `duplicate` にする（型検査が報告する）。
   const defined = new Set(merged.decls.filter((d) => d.kind !== 'const').map((d) => d.name));
   const prelude = parse(readFileSync(PRELUDE, 'utf8'), 'prelude.um');
-  for (const d of prelude.decls) {
+  const standard = [...prelude.decls];
+  const windowPrelude = parse(readFileSync(WINDOW_PRELUDE, 'utf8'), 'window.um');
+  const windowNames = windowPrelude.decls.map((d) => d.name).filter((n) => !defined.has(n));
+  if (windowNames.length > 0) {
+    const used = new RegExp(`\\b(?:${windowNames.join('|')})\\b`);
+    if (texts.some((t) => used.test(t))) standard.push(...windowPrelude.decls);
+  }
+  for (const d of standard) {
     if (defined.has(d.name)) continue;
     tag(d, -1);
     merged.decls.push(d);
@@ -280,7 +350,11 @@ export function build(ll: string, target: TargetName, outPath: string, optLevel 
       const args = [opt, '-fstack-protector-strong', '-o', exe, llPath, RUNTIME_C, '-Wl,/STACK:8388608'];
       if (sanitize === 'thread') args.unshift('-fsanitize=thread', '-g');
       else if (sanitize) args.unshift('-fsanitize=address', '-g');
+      const sdl = usesWindow(ll) ? findSdl3() : null;
+      if (sdl) args.push(RUNTIME_WINDOW, ...sdl.args);
       clang(args, quiet);
+      // SDL3.dll は実行ファイルと同じ場所にないと起動できないので、隣に写す。
+      if (sdl?.dll && existsSync(sdl.dll)) copyFileSync(sdl.dll, join(dirname(exe), 'SDL3.dll'));
       return { output: exe, objectOnly: false };
     }
 
@@ -292,6 +366,7 @@ export function build(ll: string, target: TargetName, outPath: string, optLevel 
     if (metalEnabled(target) && process.platform === 'darwin') {
       args.push('-fobjc-arc', RUNTIME_METAL, '-framework', 'Metal', '-framework', 'Foundation');
     }
+    if (usesWindow(ll)) args.push(RUNTIME_WINDOW, ...findSdl3().args);
     clang(args, quiet);
     return { output: out, objectOnly: false };
   } finally {

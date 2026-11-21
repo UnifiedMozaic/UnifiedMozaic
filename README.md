@@ -86,6 +86,7 @@ node src/cli.ts build examples/kernels.um --target host --emit-msl -o kernels   
 
 - [Setup](docs/setup.md) — installing Node.js and clang, the `um` command, running the tests
 - [Language guide (Japanese)](docs/guide.ja.md) — syntax, ownership, kernels and buffers, GPU execution, threads, safety guarantees
+- [Windows and input](docs/window.md) — opening a window, showing pixels, mouse and keyboard events (native, SDL3)
 - [examples/](examples) — runnable programs; each one doubles as a test (`// expect:` lines)
 - [vscode-extension](https://github.com/UnifiedMozaic/vscode-extension) — VS Code extension (syntax highlighting, type checking on save, build and run)
 - [SECURITY.md](SECURITY.md) — security policy and how to report a vulnerability

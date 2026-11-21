@@ -101,6 +101,8 @@ um build examples/structs.um -o structs.wasm
 node runtime/run-node.mjs structs.wasm
 ```
 
+Programs that open a window ([docs/window.md](window.md)) also need SDL3.
+
 ## 6. Tests
 
 ```sh

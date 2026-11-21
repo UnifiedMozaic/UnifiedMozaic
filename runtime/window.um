@@ -1,0 +1,115 @@
+// ウィンドウの標準の型と関数。組み込みの windowPoll（runtime/window.c）が Buffer<i32> に書いたイベントを、
+// UM の enum にして返す。プログラムがこのファイルの名前（WindowEvent、pollWindowEvent など）を使うときだけ、
+// ドライバが標準の関数として加える。
+//
+// 使い方:
+//   const win = windowOpen("editor", 1280, 720);
+//   if (win == null) { ... }
+//   let running = true;
+//   while (running) {
+//     while (true) {
+//       const e = pollWindowEvent(0);
+//       if (e == null) { break; }
+//       match (e) {
+//         WindowEvent.Close(w) => { running = false; }
+//         ...
+//       }
+//     }
+//     windowPresent(win, pixels, 1280, 720);
+//   }
+
+// 修飾キー。
+struct Mods {
+  shift: bool;
+  ctrl: bool;
+  alt: bool;
+  meta: bool;  // macOS の Command、Windows のキー
+}
+
+// キー。名前のあるキーのほかは、Char（文字のキー。英字は小文字）か Other（SDL のキーコード）。
+enum Key {
+  Enter,
+  Escape,
+  Backspace,
+  Tab,
+  Space,
+  Delete,
+  Left,
+  Right,
+  Up,
+  Down,
+  Home,
+  End,
+  PageUp,
+  PageDown,
+  F(n: i32),              // F1 〜 F12
+  Char(codepoint: u32),   // 'a' のキーなら 97（Shift を押していても小文字。入力された文字は Text で受け取る）
+  Other(code: i32),
+}
+
+// ウィンドウのイベント。window は windowOpen が返した番号。座標はウィンドウの左上が (0, 0)。
+enum WindowEvent {
+  Close(window: i32),                                     // 閉じるボタン（閉じるかどうかはプログラムが決める）
+  Resize(window: i32, width: i32, height: i32),
+  MouseMove(window: i32, x: i32, y: i32),
+  MouseDown(window: i32, x: i32, y: i32, button: i32),    // button: 1 左、2 中、3 右
+  MouseUp(window: i32, x: i32, y: i32, button: i32),
+  Wheel(window: i32, dx: i32, dy: i32),                   // 上・右が正
+  KeyDown(window: i32, key: Key, mods: Mods, repeat: bool),
+  KeyUp(window: i32, key: Key, mods: Mods),
+  Text(window: i32, codepoint: u32),                      // 入力された文字（IME の確定も含む）
+  Quit,                                                   // アプリの終了の要求
+}
+
+// SDL のキーコードを Key にする。
+function keyOf(code: i32): Key {
+  switch (code) {
+    case 13: return Key.Enter;
+    case 27: return Key.Escape;
+    case 8: return Key.Backspace;
+    case 9: return Key.Tab;
+    case 32: return Key.Space;
+    case 127: return Key.Delete;
+    case 1073741904: return Key.Left;      // 0x40000050
+    case 1073741903: return Key.Right;     // 0x4000004F
+    case 1073741906: return Key.Up;        // 0x40000052
+    case 1073741905: return Key.Down;      // 0x40000051
+    case 1073741898: return Key.Home;      // 0x4000004A
+    case 1073741901: return Key.End;       // 0x4000004D
+    case 1073741899: return Key.PageUp;    // 0x4000004B
+    case 1073741902: return Key.PageDown;  // 0x4000004E
+  }
+  if (code >= 1073741882 && code <= 1073741893) {  // F1（0x4000003A）〜 F12（0x40000045）
+    return Key.F(code - 1073741881);
+  }
+  if (code > 32 && code < 1073741824) {  // 文字のキー（0x40000000 未満はコードポイント）
+    return Key.Char(code as u32);
+  }
+  return Key.Other(code);
+}
+
+function modsOf(bits: i32): Mods {
+  return { shift: (bits & 1) != 0, ctrl: (bits & 2) != 0, alt: (bits & 4) != 0, meta: (bits & 8) != 0 };
+}
+
+// イベントを1つ取り出す。なければ timeoutMs ミリ秒まで待ち（0 は待たない、負は来るまで待つ）、来なければ null。
+// 毎フレーム描き直すなら 0、入力があるまで寝ていてよいなら -1 か待ち時間を渡す。
+function pollWindowEvent(timeoutMs: i32): WindowEvent | null {
+  let ev = new Buffer<i32>(6);
+  if (!windowPoll(mut ev, timeoutMs)) {
+    return null;
+  }
+  const w = ev[1];
+  switch (ev[0]) {
+    case 1: return WindowEvent.Close(w);
+    case 2: return WindowEvent.Resize(w, ev[2], ev[3]);
+    case 3: return WindowEvent.MouseMove(w, ev[2], ev[3]);
+    case 4: return WindowEvent.MouseDown(w, ev[2], ev[3], ev[4]);
+    case 5: return WindowEvent.MouseUp(w, ev[2], ev[3], ev[4]);
+    case 6: return WindowEvent.Wheel(w, ev[2], ev[3]);
+    case 7: return WindowEvent.KeyDown(w, keyOf(ev[2]), modsOf(ev[3]), ev[4] != 0);
+    case 8: return WindowEvent.KeyUp(w, keyOf(ev[2]), modsOf(ev[3]));
+    case 9: return WindowEvent.Text(w, ev[2] as u32);
+  }
+  return WindowEvent.Quit;
+}
