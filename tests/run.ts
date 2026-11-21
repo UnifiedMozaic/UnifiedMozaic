@@ -36,6 +36,9 @@
 //   examples/media/*.um 動画・音声の組み込み（FFmpeg。ネイティブだけ）。`// expect:` と照合する。
 //   tests/media/*.um   同じく。`// expect:` か `// panic:` と照合する。素材は ffmpeg のコマンドで一時フォルダに作る
 //                      （makeMediaClips）。FFmpeg のライブラリか ffmpeg のコマンドが見つからなければ飛ばす。
+//
+// UM_TEST_KNOWN_FAILURES=一覧のファイル を付けると、そこに理由つきで挙げた試験の失敗を「known」として表示し、
+// 失敗には数えない（CI の特定の環境でだけ起きる、UM のせいではない失敗のため。.github/ci/known-failures-*.txt）。
 
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -72,9 +75,29 @@ function asanEnv(options: string): NodeJS.ProcessEnv {
 let passed = 0;
 const failures: string[] = [];
 
+/**
+ * 既知の失敗（環境変数 UM_TEST_KNOWN_FAILURES = 一覧のファイル）。CI の特定の環境でだけ、UM のせいではない理由で
+ * 通らない試験を、理由つきで並べる（1 行に「試験の名前 | 理由」。# で始まる行と空行は読まない）。
+ * 一覧にある試験が落ちたら `known` と理由を表示して、失敗には数えない（黙って飛ばさない）。通ったらそのことを表示する。
+ * 名前のパスの区切りは / で書く（Windows の \ も / として比べる）。
+ */
+const knownFailures = new Map<string, string>();
+if (process.env.UM_TEST_KNOWN_FAILURES) {
+  for (const line of readFileSync(process.env.UM_TEST_KNOWN_FAILURES, 'utf8').split('\n')) {
+    const t = line.trim();
+    if (t === '' || t.startsWith('#')) continue;
+    const bar = t.indexOf(' | ');
+    if (bar < 0) throw new Error(`UM_TEST_KNOWN_FAILURES: expected "test name | reason": ${t}`);
+    knownFailures.set(t.slice(0, bar).trim(), t.slice(bar + 3).trim());
+  }
+}
+let knownFailed = 0;
+const knownReason = (name: string): string | undefined => knownFailures.get(name.replace(/\\/g, '/'));
+
 function ok(name: string): void {
   passed++;
   console.log(`ok   ${name}`);
+  if (knownReason(name) !== undefined) console.log(`note: 既知の失敗として挙げた試験が通りました（一覧から外せます）: ${name}`);
 }
 
 /** この環境の clang が wasm32 を出力できるか。できなければ wasm32 のテストは飛ばす。 */
@@ -84,6 +107,12 @@ let skippedWasm = 0;
 function fail(name: string, detail: string): void {
   if (!hasWasm && name.includes('wasm32')) {
     skippedWasm++;
+    return;
+  }
+  const reason = knownReason(name);
+  if (reason !== undefined) {
+    knownFailed++;
+    console.log(`known ${name}\n     ${detail.replace(/\n/g, '\n     ')}\n     既知の失敗: ${reason}`);
     return;
   }
   failures.push(name);
@@ -1100,5 +1129,5 @@ if (!ffmpegAvailable()) {
 
 rmSync(tmp, { recursive: true, force: true });
 if (skippedWasm > 0) console.log(`\nwasm32 のテスト ${skippedWasm} 件は飛ばしました（この clang は wasm32 を出力できません）`);
-console.log(`\n${passed} passed, ${failures.length} failed`);
+console.log(`\n${passed} passed, ${failures.length} failed${knownFailed > 0 ? `, ${knownFailed} known failures (UM_TEST_KNOWN_FAILURES)` : ''}`);
 process.exit(failures.length === 0 ? 0 : 1);
