@@ -1,0 +1,18 @@
+// 写す範囲（start と count）が配列の外なら停止する（wasm のメモリの外は失敗を返すだけ）。
+// expect: false
+// panic: invalid wasm call (an unknown or freed module / instance, or a range outside the array) (line 16)
+export function main(): i32 {
+  const bytes = wasmWat("(module (memory (export \"memory\") 1))");
+  const m = wasmCompile(bytes);
+  if (m == null) {
+    return 1;
+  }
+  const inst = wasmInstantiate(m, 0, 0, 0, false);
+  if (inst == null) {
+    return 1;
+  }
+  let px = new Buffer<u8>(4);
+  print(wasmWrite(inst, 70000, px));
+  wasmWrite(inst, 0, px, 2, 3);
+  return 0;
+}

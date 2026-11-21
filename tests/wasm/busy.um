@@ -1,0 +1,56 @@
+// 同じインスタンスを2つのスレッドが同時に使おうとしたら、後から来たほうは失敗する（停止しない）。
+// 先のスレッドが終われば、また使える。
+// expect: the instance is being used by another thread (use one instance per thread)
+// expect: trap in 'spin': timeout (the call ran longer than timeoutMs)
+// expect: 7
+
+function spin(inst: i64): string {
+  match (wasmCall(inst, "spin", [])) {
+    Result.Err(why) => return why + "",  // match の値は借りているので、写して返す
+    Result.Ok(_) => return "finished?",
+  }
+}
+
+export function main(): i32 {
+  const text = "(module (func (export \"spin\") (loop $l (br $l))) (func (export \"seven\") (result i32) i32.const 7))";
+  match (wasmFromWat(text)) {
+    Result.Err(why) => print(why),
+    Result.Ok(bytes) => {
+      match (wasmLoad(bytes)) {
+        Result.Err(why) => print(why),
+        Result.Ok(m) => {
+          let limits = new WasmLimits();
+          limits.timeoutMs = 800;
+          match (wasmNew(m, limits)) {
+            Result.Err(why) => print(why),
+            Result.Ok(inst) => {
+              const t = thread.spawn(spin, inst);
+              // 相手が spin に入るまで待ってから呼ぶ。
+              const start = clock();
+              while (clock() - start < 0.2) {
+                thread.yield();
+              }
+              match (wasmCall(inst, "seven", [])) {
+                Result.Err(why) => print(why),
+                Result.Ok(_) => print("not busy?"),
+              }
+              print(thread.join(t));
+              match (wasmCall(inst, "seven", [])) {
+                Result.Err(why) => print(why),
+                Result.Ok(values) => {
+                  match (values[0]) {
+                    WasmValue.I32(x) => print(x),
+                    _ => {}
+                  }
+                }
+              }
+              wasmFreeInstance(inst);
+            }
+          }
+          wasmFreeModule(m);
+        }
+      }
+    }
+  }
+  return 0;
+}

@@ -1,0 +1,35 @@
+// UM で書いた画像の効果。`--target wasm32-plugin` で wasm にして、ホストのプログラムから wasmtime で読み込む
+// （examples/wasm/um_plugin.um）。同じソースを import すれば、ネイティブのプログラムの中で直接も実行できる。
+//
+//   node src/cli.ts build examples/wasm/plugin/brighten.um --target wasm32-plugin -o brighten.wasm
+//
+// export した関数は、Buffer を (要素の位置, 要素の数) で受け取る。画素はホストが umAlloc で確保した wasm のメモリに置く。
+
+// 1 画素ごと（RGBA の 4 バイト）に、RGB へ amount を足して 255 で切る。A はそのまま。
+kernel function brightenPixel(i: u32, dst: mut Buffer<u8>, src: Buffer<u8>, amount: i32): void {
+  if ((i & 3) == 3) {
+    dst[i] = src[i];
+  } else {
+    const v = (src[i] as i32) + amount;
+    dst[i] = (v > 255 ? 255 : (v < 0 ? 0 : v)) as u8;
+  }
+}
+
+// src の画素を明るくして dst に書く。dst と src は同じ長さ。
+export function brighten(dst: mut Buffer<u8>, src: Buffer<u8>, amount: i32): void {
+  dispatch(brightenPixel, dst.length, mut dst, src, amount);
+}
+
+// 画素の和（確かめ用）。
+export function checksum(px: Buffer<u8>): u32 {
+  let sum: u32 = 0;
+  for (const v of px) {
+    sum += v as u32;
+  }
+  return sum;
+}
+
+// px[i]（確かめ用）。範囲外なら停止する。プラグインの停止はトラップになり、ホストは umPanicCode で原因を読める。
+export function pixelAt(px: Buffer<u8>, i: u32): u32 {
+  return px[i] as u32;
+}

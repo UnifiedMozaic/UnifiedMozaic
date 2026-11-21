@@ -1,0 +1,94 @@
+// wasm のモジュールを読み込み、export された関数を呼ぶ。モジュールはテキスト形式（.wat）から作る。
+// expect: 5
+// expect: 10000000000
+// expect: 3.5
+// expect: add: i32 i32 -> i32
+// expect: memory
+// expect: error: argument 1 of 'add' must be i32, but i64 was given
+// expect: error: the module has no export named 'sub'
+
+const WAT: string =
+  "(module" +
+  "  (func (export \"add\") (param i32 i32) (result i32) local.get 0 local.get 1 i32.add)" +
+  "  (func (export \"mul64\") (param i64 i64) (result i64) local.get 0 local.get 1 i64.mul)" +
+  "  (func (export \"half\") (param f64) (result f64) local.get 0 f64.const 0.5 f64.mul)" +
+  "  (memory (export \"memory\") 1))";
+
+function typeName(t: WasmType): string {
+  match (t) {
+    WasmType.I32 => return "i32",
+    WasmType.I64 => return "i64",
+    WasmType.F32 => return "f32",
+    WasmType.F64 => return "f64",
+    WasmType.V128 => return "v128",
+    WasmType.Ref => return "ref",
+  }
+}
+
+function show(r: Result<WasmValue[], string>): void {
+  match (r) {
+    Result.Err(why) => print("error: " + why),
+    Result.Ok(values) => {
+      for (const v of values) {
+        match (v) {
+          WasmValue.I32(x) => print(x),
+          WasmValue.I64(x) => print(x),
+          WasmValue.F32(x) => print(x),
+          WasmValue.F64(x) => print(x),
+        }
+      }
+    }
+  }
+}
+
+export function main(): i32 {
+  const bin = wasmFromWat(WAT);
+  match (bin) {
+    Result.Err(why) => {
+      print(why);
+      return 1;
+    }
+    Result.Ok(bytes) => {
+      match (wasmLoad(bytes)) {
+        Result.Err(why) => {
+          print(why);
+          return 1;
+        }
+        Result.Ok(m) => {
+          match (wasmNew(m, new WasmLimits())) {
+            Result.Err(why) => print(why),
+            Result.Ok(inst) => {
+              show(wasmCall(inst, "add", [WasmValue.I32(2), WasmValue.I32(3)]));
+              show(wasmCall(inst, "mul64", [WasmValue.I64(100000), WasmValue.I64(100000)]));
+              show(wasmCall(inst, "half", [WasmValue.F64(7)]));
+              for (const e of wasmExports(m)) {
+                match (e.kind) {
+                  WasmExportKind.Function => {
+                    let sig = e.name + ":";
+                    for (const t of e.params) {
+                      sig = sig + " " + typeName(t);
+                    }
+                    sig = sig + " ->";
+                    for (const t of e.results) {
+                      sig = sig + " " + typeName(t);
+                    }
+                    if (e.name == "add") {
+                      print(sig);
+                    }
+                  }
+                  WasmExportKind.Memory => print(e.name),
+                  _ => {}
+                }
+              }
+              show(wasmCall(inst, "add", [WasmValue.I64(2), WasmValue.I32(3)]));
+              show(wasmCall(inst, "sub", [WasmValue.I32(2), WasmValue.I32(3)]));
+              wasmFreeInstance(inst);
+            }
+          }
+          wasmFreeModule(m);
+        }
+      }
+    }
+  }
+  return 0;
+}

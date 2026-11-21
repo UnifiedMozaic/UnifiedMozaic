@@ -1,0 +1,143 @@
+// wasm の効果（effect.c を wasm32 にコンパイルしたもの）の速さを測る。docs/wasm.ja.md の「速さ」を参照。
+//   node src/cli.ts build examples/wasm/bench/bench.um --target host -o bench
+//   ./bench effect.wasm [threads]
+// 1280x720 の RGBA を、(1) 1つのインスタンスで、(2) 帯に分けてスレッドごとのインスタンスで処理する。
+// 時間には、画素を wasm のメモリへ写して戻す時間も含む。
+
+const W: i32 = 1280;
+const H: i32 = 720;
+const FRAMES: i32 = 200;
+const BASE: i32 = 1048576;  // wasm のメモリの中の画素の置き場所（1 MiB 目から）
+
+function frame(inst: i64, name: string, px: mut Buffer<u8>, start: i64, count: i64): void {
+  const pixels = (count / 4) as i32;
+  wasmWrite(inst, BASE as i64, px, start, count);
+  let args: WasmValue[] = [WasmValue.I32(BASE), WasmValue.I32(pixels)];
+  if (name == "saturate") {
+    args.push(WasmValue.F32(1.2));
+  }
+  match (wasmCall(inst, name, args)) {
+    Result.Err(why) => eprint(why),
+    Result.Ok(_) => {}
+  }
+  wasmRead(inst, BASE as i64, mut px, start, count);
+}
+
+// 帯 [y0, y1) を FRAMES 回処理して、かかった秒数を返す（帯ごとに自分の画素の写しを持つ）。
+function band(module: i64, name: string, y0: i32, y1: i32): f64 {
+  match (wasmNew(module, new WasmLimits())) {
+    Result.Err(why) => {
+      eprint(why);
+      return 0;
+    }
+    Result.Ok(inst) => {
+      const n = ((y1 - y0) * W * 4) as usize;
+      let px = new Buffer<u8>(n);
+      for (let i: usize = 0; i < n; i++) {
+        px[i] = (i * 7) as u8;
+      }
+      const t0 = clock();
+      for (let f = 0; f < FRAMES; f++) {
+        frame(inst, name, mut px, 0, n as i64);
+      }
+      const t = clock() - t0;
+      wasmFreeInstance(inst);
+      return t;
+    }
+  }
+}
+
+// 同じ効果を UM で書いたもの（ネイティブ。比べるため）。
+function umInvert(px: mut Buffer<u8>): void {
+  for (let i: u32 = 0; i + 3 < px.length; i += 4) {
+    px[i] = 255 - px[i];
+    px[i + 1] = 255 - px[i + 1];
+    px[i + 2] = 255 - px[i + 2];
+  }
+}
+
+function clamp8(v: f32): u8 {
+  const c = Math.min(Math.max(v, 0.0 as f32), 255.0 as f32);
+  return (c + 0.5) as u8;
+}
+
+function umSaturate(px: mut Buffer<u8>, s: f32): void {
+  for (let i: u32 = 0; i + 3 < px.length; i += 4) {
+    const r = px[i] as f32;
+    const g = px[i + 1] as f32;
+    const b = px[i + 2] as f32;
+    const l = 0.299 * r + 0.587 * g + 0.114 * b;
+    px[i] = clamp8(l + (r - l) * s);
+    px[i + 1] = clamp8(l + (g - l) * s);
+    px[i + 2] = clamp8(l + (b - l) * s);
+  }
+}
+
+function umBench(): void {
+  const n = (W * H * 4) as usize;
+  let px = new Buffer<u8>(n);
+  for (let i: usize = 0; i < n; i++) {
+    px[i] = (i * 7) as u8;
+  }
+  const t0 = clock();
+  for (let f = 0; f < FRAMES; f++) {
+    umInvert(mut px);
+  }
+  const t1 = clock();
+  for (let f = 0; f < FRAMES; f++) {
+    umSaturate(mut px, 1.2);
+  }
+  const t2 = clock();
+  print(`UM native invert: ${(t1 - t0) * 1000 / (FRAMES as f64)} ms/frame`);
+  print(`UM native saturate: ${(t2 - t1) * 1000 / (FRAMES as f64)} ms/frame`);
+}
+
+export function main(): i32 {
+  const a = args();
+  if (a.length < 1) {
+    eprint("usage: bench effect.wasm [threads]");
+    return 2;
+  }
+  let threads = 8;
+  if (a.length > 1) {
+    threads = 0;
+    for (const c of a[1]) {
+      threads = threads * 10 + ((c - 48) as i32);
+    }
+  }
+  const t0 = clock();
+  match (wasmLoadFile(a[0])) {
+    Result.Err(why) => {
+      eprint(why);
+      return 1;
+    }
+    Result.Ok(m) => {
+      print(`load (compile or cache): ${(clock() - t0) * 1000} ms`);
+      const names: string[] = ["invert", "saturate"];
+      for (const name of names) {
+        const one = band(m, name, 0, H);
+        print(`wasm ${name}, 1 instance: ${one * 1000 / (FRAMES as f64)} ms/frame`);
+        // 帯ごとに1スレッド。全体の時間は最も遅い帯の時間。
+        const rows = H / threads;
+        let hs = new Array<i32>(0);
+        for (let k = 0; k < threads; k++) {
+          hs.push(k);
+        }
+        const start = clock();
+        {
+          const g = thread.spawnEach(bandOf, own hs, m, name, rows);
+          thread.join(g);
+        }
+        print(`wasm ${name}, ${threads} threads: ${(clock() - start) * 1000 / (FRAMES as f64)} ms/frame`);
+      }
+      wasmFreeModule(m);
+    }
+  }
+  umBench();
+  return 0;
+}
+
+function bandOf(k: i32, module: i64, name: string, rows: i32): f64 {
+  const y1 = (k + 1) * rows;
+  return band(module, name, k * rows, y1 > H ? H : y1);
+}

@@ -1,0 +1,93 @@
+// 画像の効果を想定した例: 画素を wasm のメモリへ写し、wasm の関数で書き換えて、写し戻す。
+// u8[]・Buffer<u8>・Buffer<f32> と、配列の一部（start と count）を写す。
+// expect: 255 254 253 7
+// expect: 245 235 225 40
+// expect: 1.5 3 4.5
+// expect: 0 0 8 6
+// expect: false
+// expect: out of bounds: 16 bytes at offset 65530, but the memory has 65536 bytes
+// expect: 65536
+
+// invert(p, n): p から n バイトの RGBA の、RGB を反転する（A はそのまま）。
+// scale(p, n, k): p から n 個の f32 に k を掛ける。
+const WAT: string =
+  "(module (memory (export \"memory\") 1)" +
+  "  (func (export \"invert\") (param $p i32) (param $n i32) (local $i i32)" +
+  "    (block $done (loop $next" +
+  "      (br_if $done (i32.ge_u (local.get $i) (local.get $n)))" +
+  "      (i32.store (i32.add (local.get $p) (local.get $i))" +
+  "        (i32.xor (i32.load (i32.add (local.get $p) (local.get $i))) (i32.const 0x00ffffff)))" +
+  "      (local.set $i (i32.add (local.get $i) (i32.const 4)))" +
+  "      (br $next))))" +
+  "  (func (export \"scale\") (param $p i32) (param $n i32) (param $k f32) (local $i i32)" +
+  "    (block $done (loop $next" +
+  "      (br_if $done (i32.ge_u (local.get $i) (local.get $n)))" +
+  "      (f32.store (i32.add (local.get $p) (i32.shl (local.get $i) (i32.const 2)))" +
+  "        (f32.mul (f32.load (i32.add (local.get $p) (i32.shl (local.get $i) (i32.const 2)))) (local.get $k)))" +
+  "      (local.set $i (i32.add (local.get $i) (i32.const 1)))" +
+  "      (br $next)))))";
+
+function check(r: Result<WasmValue[], string>): void {
+  match (r) {
+    Result.Err(why) => print("error: " + why),
+    Result.Ok(_) => {}
+  }
+}
+
+function run(inst: i64): void {
+  // u8[]: 2 画素を 256 バイト目に置いて反転する。
+  let px: u8[] = [0, 1, 2, 7, 10, 20, 30, 40];
+  wasmWrite(inst, 256, px);
+  check(wasmCall(inst, "invert", [WasmValue.I32(256), WasmValue.I32(8)]));
+  wasmRead(inst, 256, mut px);
+  print(`${px[0]} ${px[1]} ${px[2]} ${px[3]}`);
+  print(`${px[4]} ${px[5]} ${px[6]} ${px[7]}`);
+
+  // Buffer<f32>
+  let fs = new Buffer<f32>(3);
+  fs[0] = 1;
+  fs[1] = 2;
+  fs[2] = 3;
+  wasmWrite(inst, 1024, fs);
+  check(wasmCall(inst, "scale", [WasmValue.I32(1024), WasmValue.I32(3), WasmValue.F32(1.5)]));
+  wasmRead(inst, 1024, mut fs);
+  print(`${fs[0]} ${fs[1]} ${fs[2]}`);
+
+  // Buffer<u8> の一部: 先頭から 2 番目と 3 番目の 2 バイトだけを、wasm のメモリの 0 バイト目へ写し、
+  // 読むときは 4 バイトのうち後ろの 2 つへ写す。
+  let b = new Buffer<u8>(4);
+  b[1] = 8;
+  b[2] = 6;
+  wasmWrite(inst, 0, b, 1, 2);
+  let back = new Buffer<u8>(4);
+  wasmRead(inst, 0, mut back, 2, -1);
+  print(`${back[0]} ${back[1]} ${back[2]} ${back[3]}`);
+
+  // メモリの外は失敗（停止しない）。
+  let big = new Buffer<u8>(16);
+  print(wasmWrite(inst, 65530, big));
+  print(wasmError());
+  print(wasmMemorySize(inst));
+}
+
+export function main(): i32 {
+  match (wasmFromWat(WAT)) {
+    Result.Err(why) => print(why),
+    Result.Ok(bytes) => {
+      match (wasmLoad(bytes)) {
+        Result.Err(why) => print(why),
+        Result.Ok(m) => {
+          match (wasmNew(m, new WasmLimits())) {
+            Result.Err(why) => print(why),
+            Result.Ok(inst) => {
+              run(inst);
+              wasmFreeInstance(inst);
+            }
+          }
+          wasmFreeModule(m);
+        }
+      }
+    }
+  }
+  return 0;
+}

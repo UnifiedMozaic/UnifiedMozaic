@@ -1,0 +1,46 @@
+// プラグインの export が、ホストから借りた Buffer を差し替えると停止（トラップ）する。原因は umPanicCode で読める。
+// plugin: plugin/replace.um
+// expect: 9
+// expect: trap in 'replace': unreachable executed
+// expect: 15
+
+function one(inst: i64, name: string, args: WasmValue[]): i32 {
+  match (wasmCall(inst, name, args)) {
+    Result.Err(why) => {
+      print(why);
+      return -1;
+    }
+    Result.Ok(values) => {
+      if (values.length == 0) {
+        return 0;
+      }
+      match (values[0]) {
+        WasmValue.I32(v) => return v,
+        _ => return -1,
+      }
+    }
+  }
+}
+
+export function main(): i32 {
+  match (wasmLoadFile("replace.wasm")) {
+    Result.Err(why) => print(why),
+    Result.Ok(m) => {
+      match (wasmNew(m, new WasmLimits())) {
+        Result.Err(why) => print(why),
+        Result.Ok(inst) => {
+          const at = one(inst, "umAlloc", [WasmValue.I32(8)]);
+          one(inst, "touch", [WasmValue.I32(at), WasmValue.I32(8)]);
+          let b = new Buffer<u8>(1);
+          wasmRead(inst, at as i64, mut b);
+          print(b[0]);
+          one(inst, "replace", [WasmValue.I32(at), WasmValue.I32(8)]);
+          print(one(inst, "umPanicCode", []));
+          wasmFreeInstance(inst);
+        }
+      }
+      wasmFreeModule(m);
+    }
+  }
+  return 0;
+}
