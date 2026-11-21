@@ -10,7 +10,7 @@ UnifiedMozaic のコンパイラを手元で使えるようにする手順です
 | --- | --- | --- | --- |
 | macOS（Apple Silicon） | ○ | ○ | ○（Homebrew の LLVM と lld が要る） |
 | Linux（x86_64 / arm64） | ○ | — | ○（`lld` が要る） |
-| Windows | 試していません。WSL2 の Linux で使ってください | — | — |
+| Windows（x86_64） | ○（Visual Studio か Build Tools の MSVC が要る） | — | ○ |
 
 ## 1. Node.js（22.18 以上）
 
@@ -37,6 +37,9 @@ xcode-select --install
 
 # Linux（Debian / Ubuntu）: lld は wasm32 のリンクに使う（wasm-ld）
 sudo apt install clang lld
+
+# Windows: LLVM の公式のビルド（clang・lld・wasm-ld が入る）
+winget install LLVM.LLVM
 ```
 
 ```sh
@@ -47,6 +50,12 @@ clang --version  # 18 以上
 
 ```sh
 brew install llvm lld
+```
+
+**Windows**: ネイティブのリンクには、MSVC のツールと Windows SDK を使います。Visual Studio（Community でよい）か Build Tools for Visual Studio を、「C++ によるデスクトップ開発」を選んで入れてください。clang は自動でそれを見つけます（開発者用のコマンドプロンプトでなくてよい）。LLVM のインストーラは既定では `PATH` に足しませんが、`PATH` に clang がなければ `C:Program FilesLLVMinclang.exe` を自動で使います。
+
+```powershell
+winget install Microsoft.VisualStudio.2022.BuildTools --override "--wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
 ```
 
 別の clang を使いたいときは、環境変数 `UM_CLANG` に場所を書きます（すべてのターゲットでその clang を使う）。
@@ -79,6 +88,10 @@ um --help
 um build examples/structs.um --target host -o structs
 ./structs                   # 32、1.5、2.5、3.5、7、1 と出る
 
+# ネイティブ（Windows）。拡張子のない名前には .exe が付く
+um build examples/structs.um --target host -o structs
+.structs.exe
+
 # Metal（Mac）。kernel を GPU でも実行する
 UM_METAL=1 um build examples/gpu_submit.um --target host -o gpu_submit
 ./gpu_submit                # 30、true、285、3 と出る
@@ -99,6 +112,7 @@ node tests/run.ts           # npm test でも同じ
 - wasm32 を出せる clang がない（Homebrew の LLVM のない Mac など）→ wasm32 のテストを飛ばす。
 - AddressSanitizer・valgrind・`leaks`（Mac）のどれもない → メモリ検査つきの実行を飛ばす。Linux では `sudo apt install valgrind` で足せます。
 - Metal がない → `tests/metal/` は arm64 向けに作れることだけを確かめる。
+- Windows → AddressSanitizer で解放漏れは調べられない（解放後使用・範囲外アクセス・二重解放だけを調べる）。ThreadSanitizer はないので、`tests/threads` の競合検査を飛ばす。
 
 ## 7. エディタ
 
@@ -115,5 +129,7 @@ code --install-extension unifiedmozaic-0.1.0.vsix
 | `ERR_UNKNOWN_FILE_EXTENSION ".ts"` や、型の注釈での `SyntaxError` | Node.js が古い。22.18 以上にする |
 | `clang が見つかりません` / `the LLVM toolchain (clang) failed` | clang を入れるか、`UM_CLANG` で場所を指定する |
 | `この clang は wasm32 を出力できない` | macOS は `brew install llvm lld`。Linux は `lld` を入れる |
+| Windows で `unable to find a Visual Studio installation`、`link.exe` や `kernel32.lib` が見つからない | Visual Studio か Build Tools に「C++ によるデスクトップ開発」（MSVC と Windows SDK）を入れる |
+| Windows のコンソールで日本語が化ける | ネイティブのプログラムは、コンソールに出す間だけ出力の文字コードを UTF-8 にする。化けるときは、コンソールのフォントがその文字を持っているか確かめる |
 | `gpu.dispatch` がコンパイルエラーになる | GPU の経路は `UM_METAL=1` を付けた Mac のネイティブのビルドだけ。付けないときは `dispatch` か `cpu.dispatch` を使う |
 | 実行時に `panic: the GPU is not available` | `gpu.dispatch` は GPU がないと停止する。`dispatch`（自動）なら CPU で動く |

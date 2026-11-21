@@ -51,6 +51,7 @@ export function main(): i32 {
 - Node.js 22.18 以上（TypeScript のソースをそのまま実行します）
 - LLVM 18 以上の `clang`。wasm32 を出すには `wasm-ld` も必要です
   - macOS の Xcode の clang は wasm32 を出せません。`brew install llvm lld` で入れておけば、wasm32 のビルドには自動でそちらを使います
+  - Windows では LLVM（`winget install LLVM.LLVM`）と、Visual Studio か Build Tools の MSVC（「C++ によるデスクトップ開発」）を入れます
 - Mac の GPU で実行するには: Apple Silicon と、Xcode か Command Line Tools（Metal）
 
 入れ方の手順（`um` コマンドを使えるようにする `npm link` や、うまくいかないときの対処を含む）は [docs/setup.ja.md](docs/setup.ja.md) にあります。

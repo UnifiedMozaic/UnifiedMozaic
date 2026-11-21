@@ -1,23 +1,35 @@
 // UnifiedMozaic のネイティブ用ランタイム（最小）。
 // 生成コードから呼ばれる関数だけを置く。
 // 入力を受け取るのは、標準入力（um_read_line）と、プログラムが名前を指定したファイル（um_read_file）だけ。
+// POSIX（macOS・Linux）と Windows（clang の MSVC ターゲット）で同じファイル。Windows の差は runtime/win32.h と、
+// このファイルの `#ifdef _WIN32` の部分（標準入力、ファイル、コマンドライン引数、コンソールの文字コード）。
+
+#ifdef _WIN32
+// getenv などの標準の関数を「安全でない」とする MSVC の警告を出さない（どれも使い方を確かめてある）。
+#define _CRT_SECURE_NO_WARNINGS
+#endif
 
 #include <errno.h>
-#include <fcntl.h>
 #include <inttypes.h>
 #include <limits.h>
 #include <math.h>
-#include <poll.h>
-#include <pthread.h>
-#include <sched.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <time.h>
+
+#ifdef _WIN32
+#include "win32.h"
+#else
+#include <fcntl.h>
+#include <poll.h>
+#include <pthread.h>
+#include <sched.h>
+#include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 #include "f16.h"
 #include "smallfloat.h"
@@ -266,9 +278,15 @@ void *um_alloc_shared(size_t count, size_t elem_size) {
   if (bytes > SIZE_MAX - page) um_panic(5, 0);
   size_t rounded = (bytes + page - 1) / page * page;
   if (rounded == 0) rounded = page;
+#ifdef _WIN32
+  // Windows には Metal がないので、ページ境界に揃える必要はない（_aligned_malloc の領域は free で解放できない）。
+  void *p = calloc(1, rounded);
+  if (!p) um_panic(5, 0);
+#else
   void *p = NULL;
   if (posix_memalign(&p, page, rounded) != 0 || !p) um_panic(5, 0);
   memset(p, 0, rounded);
+#endif
   return p;
 }
 
@@ -672,6 +690,210 @@ char *um_str_from_f64(double v, size_t *len) {
   return str_from(buf, fmt_f64(v, buf), len);
 }
 
+// ---- OS の違い（ファイル、標準入力、コンソール） ----
+// ファイルの名前は UTF-8 の文字列（0 で終わる写し）。Windows では UTF-16 に直して開く（ANSI のコードページを通さない）。
+// 開き方 how: 0 = 読む、1 = 作って（あれば中身を捨てて）書く、2 = 終わりに書き足す（なければ作る）。
+// os_stat / os_fstat は種類を返す: 0 = 調べられない、1 = ふつうのファイル、2 = フォルダ、3 = そのほか。
+#define OS_NONE 0
+#define OS_FILE 1
+#define OS_DIR 2
+#define OS_OTHER 3
+
+#ifdef _WIN32
+
+// 0 で終わる UTF-8 を UTF-16 にする（新しく確保する）。UTF-8 として正しくなければ NULL（別の名前に化けたファイルを開かない）。
+static WCHAR *os_wide(const char *z) {
+  int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, z, -1, NULL, 0);
+  if (n <= 0) return NULL;
+  WCHAR *w = malloc((size_t)n * sizeof(WCHAR));
+  if (!w) um_panic(5, 0);
+  MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, z, -1, w, n);
+  return w;
+}
+
+static int os_open(const char *z, int how) {
+  WCHAR *w = os_wide(z);
+  if (!w) return -1;
+  int flags = how == 0 ? _O_RDONLY : _O_WRONLY | _O_CREAT | (how == 1 ? _O_TRUNC : _O_APPEND);
+  int fd = _wopen(w, flags | _O_BINARY | _O_NOINHERIT, _S_IREAD | _S_IWRITE);
+  free(w);
+  return fd;
+}
+
+// n は UM_IO_CHUNK 以下で呼ぶ（unsigned int に収まる）。
+static ssize_t os_read(int fd, void *buf, size_t n) { return _read(fd, buf, (unsigned)n); }
+static ssize_t os_write(int fd, const void *buf, size_t n) { return _write(fd, buf, (unsigned)n); }
+static ssize_t os_pread(int fd, void *buf, size_t n, int64_t offset) {
+  if (_lseeki64(fd, offset, SEEK_SET) < 0) return -1;
+  return _read(fd, buf, (unsigned)n);
+}
+static int os_close(int fd) { return _close(fd); }
+
+static int os_kind(unsigned short mode) {
+  return (mode & _S_IFMT) == _S_IFREG ? OS_FILE : (mode & _S_IFMT) == _S_IFDIR ? OS_DIR : OS_OTHER;
+}
+
+static int os_fstat(int fd, int64_t *size) {
+  struct _stat64 st;
+  if (_fstat64(fd, &st) != 0) return OS_NONE;
+  *size = st.st_size;
+  return os_kind(st.st_mode);
+}
+
+static int os_stat(const char *z, int64_t *size) {
+  WCHAR *w = os_wide(z);
+  if (!w) return OS_NONE;
+  struct _stat64 st;
+  int r = _wstat64(w, &st);
+  free(w);
+  if (r != 0) return OS_NONE;
+  *size = st.st_size;
+  return os_kind(st.st_mode);
+}
+
+// 標準入力。コンソールからは ReadConsoleW で UTF-16 を読んで UTF-8 にする（コンソールの文字コードによらず、
+// 文字列は UTF-8 になる）。パイプやファイルからはバイト列のまま読む。Windows の標準入力に「待たない」設定はない。
+static struct {
+  int ready;
+  HANDLE h;
+  DWORD type;   // GetFileType の値
+  int console;  // コンソールから読む
+  int started;  // パイプやファイルから一度でも読んだ（先頭の BOM を確かめた）
+  unsigned char text[4096 * 3];  // UTF-8 にして、まだ渡していない分 [at, n)
+  size_t at, n;
+  WCHAR high;   // 前回の終わりの上位サロゲート（次に読んだ分の先頭とつなぐ）
+} um_win_in;
+
+static void os_stdin_init(void) {
+  if (um_win_in.ready) return;
+  um_win_in.ready = 1;
+  um_win_in.h = GetStdHandle(STD_INPUT_HANDLE);
+  DWORD mode;
+  um_win_in.type = um_win_in.h && um_win_in.h != INVALID_HANDLE_VALUE ? GetFileType(um_win_in.h) : FILE_TYPE_UNKNOWN;
+  um_win_in.console = um_win_in.type == FILE_TYPE_CHAR && GetConsoleMode(um_win_in.h, &mode);
+}
+
+// 標準入力から最大 want バイト読む。読めたバイト数を返す。入力の終わり、または読めないときは 0。
+static ssize_t os_read_stdin(unsigned char *buf, size_t want) {
+  os_stdin_init();
+  if (!um_win_in.console) {
+    for (;;) {
+      int n = _read(0, buf, (unsigned)want);
+      if (n < 0 && errno == EINTR) continue;
+      if (n <= 0) return 0;  // 書く側が閉じたパイプは 0（入力の終わり）
+      // Windows PowerShell 5.1 は、パイプでプログラムに渡す文字列の先頭に UTF-8 の BOM を付ける。
+      // 入力の先頭の BOM は1回だけ読み飛ばす（1行目が "﻿usi" のようにならないように）。
+      if (!um_win_in.started) {
+        um_win_in.started = 1;
+        if (n >= 3 && buf[0] == 0xEF && buf[1] == 0xBB && buf[2] == 0xBF) {
+          memmove(buf, buf + 3, (size_t)n - 3);
+          n -= 3;
+          if (n == 0) continue;
+        }
+      }
+      return n;
+    }
+  }
+  while (um_win_in.at == um_win_in.n) {
+    WCHAR w[4096];
+    DWORD k = 0, got = 0;
+    if (um_win_in.high) {
+      w[k++] = um_win_in.high;
+      um_win_in.high = 0;
+    }
+    if (!ReadConsoleW(um_win_in.h, w + k, 4096 - k, &got, NULL)) return 0;
+    if (got == 0) return 0;
+    k += got;
+    // Ctrl+Z（0x1A）で始まる行は入力の終わり（Windows のコンソールの決まり）。
+    if (w[0] == 0x1A) return 0;
+    if (w[k - 1] >= 0xD800 && w[k - 1] <= 0xDBFF) um_win_in.high = w[--k];
+    int n = k ? WideCharToMultiByte(CP_UTF8, 0, w, (int)k, (char *)um_win_in.text, (int)sizeof um_win_in.text, NULL, NULL) : 0;
+    um_win_in.at = 0;
+    um_win_in.n = n > 0 ? (size_t)n : 0;
+  }
+  size_t n = um_win_in.n - um_win_in.at;
+  if (n > want) n = want;
+  memcpy(buf, um_win_in.text + um_win_in.at, n);
+  um_win_in.at += n;
+  return (ssize_t)n;
+}
+
+// 標準入力を待たずに読めるか: 1 = 読める（または終わっている）、0 = まだ何も届いていない、-1 = 確かめられない。
+static int os_stdin_ready(void) {
+  os_stdin_init();
+  if (um_win_in.console) {
+    if (um_win_in.at < um_win_in.n) return 1;
+    // コンソールは Enter が押されるまで1行を渡さない。入力の列に Enter があれば、ReadConsoleW は待たずに戻る。
+    DWORD count = 0;
+    if (!GetNumberOfConsoleInputEvents(um_win_in.h, &count)) return -1;
+    if (count == 0) return 0;
+    INPUT_RECORD *recs = malloc(count * sizeof *recs);
+    if (!recs) um_panic(5, 0);
+    DWORD got = 0;
+    int ready = 0;
+    if (PeekConsoleInputW(um_win_in.h, recs, count, &got)) {
+      for (DWORD i = 0; i < got && !ready; i++) {
+        ready = recs[i].EventType == KEY_EVENT && recs[i].Event.KeyEvent.bKeyDown && recs[i].Event.KeyEvent.wVirtualKeyCode == VK_RETURN;
+      }
+    }
+    free(recs);
+    return ready;
+  }
+  if (um_win_in.type == FILE_TYPE_PIPE) {
+    DWORD avail = 0;
+    // 書く側が閉じたパイプでは失敗する。そのときの読み込みは待たずに「入力の終わり」を返すので、-1 でよい。
+    if (!PeekNamedPipe(um_win_in.h, NULL, 0, NULL, &avail, NULL)) return -1;
+    return avail > 0;
+  }
+  return 1;  // ファイルや NUL は待たずに読める
+}
+
+// 改行を "\r\n" に変えない（出力を macOS・Linux・wasm と同じバイト列にする。コンソールは "\n" だけで改行する）。
+// 文字列は UTF-8 なので、コンソールに出すときはコンソールの出力の文字コードを UTF-8 にし、終了時に戻す。
+static UINT um_win_saved_cp;
+static void um_win_restore_cp(void) { SetConsoleOutputCP(um_win_saved_cp); }
+
+__attribute__((constructor)) static void um_win_init(void) {
+  _setmode(0, _O_BINARY);
+  _setmode(1, _O_BINARY);
+  _setmode(2, _O_BINARY);
+  DWORD mode;
+  if (GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &mode) || GetConsoleMode(GetStdHandle(STD_ERROR_HANDLE), &mode)) {
+    um_win_saved_cp = GetConsoleOutputCP();
+    if (um_win_saved_cp != CP_UTF8 && SetConsoleOutputCP(CP_UTF8)) atexit(um_win_restore_cp);
+  }
+}
+
+#else
+
+static int os_open(const char *z, int how) {
+  int flags = how == 0 ? O_RDONLY : O_WRONLY | O_CREAT | (how == 1 ? O_TRUNC : O_APPEND);
+  return open(z, flags | O_CLOEXEC, 0644);
+}
+
+static ssize_t os_read(int fd, void *buf, size_t n) { return read(fd, buf, n); }
+static ssize_t os_write(int fd, const void *buf, size_t n) { return write(fd, buf, n); }
+static ssize_t os_pread(int fd, void *buf, size_t n, int64_t offset) { return pread(fd, buf, n, (off_t)offset); }
+static int os_close(int fd) { return close(fd); }
+
+static int os_kind(mode_t mode) { return S_ISREG(mode) ? OS_FILE : S_ISDIR(mode) ? OS_DIR : OS_OTHER; }
+
+static int os_fstat(int fd, int64_t *size) {
+  struct stat st;
+  if (fstat(fd, &st) != 0) return OS_NONE;
+  *size = (int64_t)st.st_size;
+  return os_kind(st.st_mode);
+}
+
+static int os_stat(const char *z, int64_t *size) {
+  struct stat st;
+  if (stat(z, &st) != 0) return OS_NONE;
+  *size = (int64_t)st.st_size;
+  return os_kind(st.st_mode);
+}
+
+#endif
+
 // ---- 入出力（readLine / inputReady / clock / readFile / writeFile） ----
 
 // 標準入力は stdio を通さず、自前のバッファで read(2) する。
@@ -718,6 +940,17 @@ static int in_fill(int wait) {
   }
   size_t want = um_in.cap - um_in.end;
   if (want > UM_IO_CHUNK) want = UM_IO_CHUNK;
+#ifdef _WIN32
+  // Windows の標準入力に「待たない」設定はない（wait が 0 のときは、os_stdin_ready が読めると答えたあとに呼ばれる）。
+  (void)wait;
+  ssize_t got = os_read_stdin(um_in.buf + um_in.end, want);
+  if (got > 0) {
+    um_in.end += (size_t)got;
+    return 1;
+  }
+  um_in.eof = 1;
+  return 0;
+#else
   for (;;) {
     ssize_t n = read(0, um_in.buf + um_in.end, want);
     if (n > 0) {
@@ -733,6 +966,7 @@ static int in_fill(int wait) {
     um_in.eof = 1;
     return 0;
   }
+#endif
 }
 
 // バッファの [start, start + n) を1行として渡す（末尾の "\r" を1つ除く）。skip は読み飛ばす改行の数（0 か 1）。
@@ -789,11 +1023,15 @@ int32_t um_input_ready(void) {
   for (int round = 0; round < 16; round++) {
     if (in_newline()) return 1;
     if (um_in.eof) return 1;
+#ifdef _WIN32
+    int r = os_stdin_ready();
+#else
     struct pollfd p = {.fd = 0, .events = POLLIN, .revents = 0};
     int r;
     do {
       r = poll(&p, 1, 0);
     } while (r < 0 && errno == EINTR);
+#endif
     if (r == 0) return 0;
     // 確かめられないとき（r < 0）は 1 にする。um_read_line は、読めなければすぐ「入力の終わり」として戻る。
     if (r < 0) return 1;
@@ -827,13 +1065,13 @@ int32_t um_read_file(const char *path, size_t plen, unsigned char **out, size_t 
   *len = 0;
   char *z = path_copy(path, plen);
   if (!z) return 0;
-  int fd = open(z, O_RDONLY | O_CLOEXEC);
+  int fd = os_open(z, 0);
   free(z);
   if (fd < 0) return 0;
   // ふつうのファイルなら、大きさ + 1 バイトを最初に確保する（最後の「もうない」の確認まで伸ばさずに済む）。
   size_t first = 65536;
-  struct stat st;
-  if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0 && (uintmax_t)st.st_size < SIZE_MAX) first = (size_t)st.st_size + 1;
+  int64_t size = 0;
+  if (os_fstat(fd, &size) == OS_FILE && size > 0 && (uint64_t)size < SIZE_MAX) first = (size_t)size + 1;
   unsigned char *buf = NULL;
   size_t n = 0, cap = 0;
   for (;;) {
@@ -845,18 +1083,18 @@ int32_t um_read_file(const char *path, size_t plen, unsigned char **out, size_t 
       buf = p;
       cap = next;
     }
-    ssize_t r = read(fd, buf + n, cap - n > UM_IO_CHUNK ? UM_IO_CHUNK : cap - n);
+    ssize_t r = os_read(fd, buf + n, cap - n > UM_IO_CHUNK ? UM_IO_CHUNK : cap - n);
     if (r < 0 && errno == EINTR) continue;
     if (r < 0) {
       // フォルダなど、読めないもの。
       free(buf);
-      close(fd);
+      os_close(fd);
       return 0;
     }
     if (r == 0) break;
     n += (size_t)r;
   }
-  close(fd);
+  os_close(fd);
   if (n == 0) {
     free(buf);
     return 1;
@@ -872,20 +1110,20 @@ int32_t um_read_file(const char *path, size_t plen, unsigned char **out, size_t 
 int32_t um_write_file(const char *path, size_t plen, const unsigned char *data, size_t len) {
   char *z = path_copy(path, plen);
   if (!z) return 0;
-  int fd = open(z, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+  int fd = os_open(z, 1);
   free(z);
   if (fd < 0) return 0;
   size_t done = 0;
   while (done < len) {
-    ssize_t r = write(fd, data + done, len - done > UM_IO_CHUNK ? UM_IO_CHUNK : len - done);
+    ssize_t r = os_write(fd, data + done, len - done > UM_IO_CHUNK ? UM_IO_CHUNK : len - done);
     if (r < 0 && errno == EINTR) continue;
     if (r <= 0) {
-      close(fd);
+      os_close(fd);
       return 0;
     }
     done += (size_t)r;
   }
-  return close(fd) == 0;
+  return os_close(fd) == 0;
 }
 
 // ---- ファイルの一部と追記（fileSize / readFileRange / appendFile） ----
@@ -895,11 +1133,11 @@ int32_t um_file_size(const char *path, size_t plen, int64_t *out) {
   *out = 0;
   char *z = path_copy(path, plen);
   if (!z) return 0;
-  struct stat st;
-  int r = stat(z, &st);
+  int64_t size = 0;
+  int kind = os_stat(z, &size);
   free(z);
-  if (r != 0 || !S_ISREG(st.st_mode) || st.st_size < 0) return 0;
-  *out = (int64_t)st.st_size;
+  if (kind != OS_FILE || size < 0) return 0;
+  *out = size;
   return 1;
 }
 
@@ -912,47 +1150,48 @@ int32_t um_read_file_range(const char *path, size_t plen, int64_t offset, int64_
   if (offset < 0 || want < 0 || offset > INT64_MAX - want) return 0;
   char *z = path_copy(path, plen);
   if (!z) return 0;
-  int fd = open(z, O_RDONLY | O_CLOEXEC);
+  int fd = os_open(z, 0);
   free(z);
   if (fd < 0) return 0;
-  struct stat st;
-  if (fstat(fd, &st) != 0 || S_ISDIR(st.st_mode)) {
-    close(fd);
+  int64_t size = 0;
+  int kind = os_fstat(fd, &size);
+  if (kind == OS_NONE || kind == OS_DIR) {
+    os_close(fd);
     return 0;
   }
-  int regular = S_ISREG(st.st_mode);
+  int regular = kind == OS_FILE;
   if (!regular && offset != 0) {
-    close(fd);
+    os_close(fd);
     return 0;
   }
   // ふつうのファイルなら、ファイルに残っている分より多くは確保しない。
   if (regular) {
-    int64_t rest = st.st_size > offset ? (int64_t)st.st_size - offset : 0;
+    int64_t rest = size > offset ? size - offset : 0;
     if (want > rest) want = rest;
   }
   if ((uint64_t)want > (uint64_t)(SIZE_MAX / 2)) {
-    close(fd);
+    os_close(fd);
     return 0;
   }
   size_t cap = (size_t)want, n = 0;
   unsigned char *buf = cap > 0 ? malloc(cap) : NULL;
   if (cap > 0 && !buf) {
-    close(fd);
+    os_close(fd);
     return 0;
   }
   while (n < cap) {
     size_t step = cap - n > UM_IO_CHUNK ? UM_IO_CHUNK : cap - n;
-    ssize_t r = regular ? pread(fd, buf + n, step, (off_t)(offset + (int64_t)n)) : read(fd, buf + n, step);
+    ssize_t r = regular ? os_pread(fd, buf + n, step, offset + (int64_t)n) : os_read(fd, buf + n, step);
     if (r < 0 && errno == EINTR) continue;
     if (r < 0) {
       free(buf);
-      close(fd);
+      os_close(fd);
       return 0;
     }
     if (r == 0) break;  // 読んでいるあいだにファイルが短くなった、または入力の終わり。
     n += (size_t)r;
   }
-  close(fd);
+  os_close(fd);
   if (n == 0) {
     free(buf);
     return 1;
@@ -970,20 +1209,20 @@ int32_t um_read_file_range(const char *path, size_t plen, int64_t offset, int64_
 int32_t um_append_file(const char *path, size_t plen, const unsigned char *data, size_t len) {
   char *z = path_copy(path, plen);
   if (!z) return 0;
-  int fd = open(z, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+  int fd = os_open(z, 2);
   free(z);
   if (fd < 0) return 0;
   size_t done = 0;
   while (done < len) {
-    ssize_t r = write(fd, data + done, len - done > UM_IO_CHUNK ? UM_IO_CHUNK : len - done);
+    ssize_t r = os_write(fd, data + done, len - done > UM_IO_CHUNK ? UM_IO_CHUNK : len - done);
     if (r < 0 && errno == EINTR) continue;
     if (r <= 0) {
-      close(fd);
+      os_close(fd);
       return 0;
     }
     done += (size_t)r;
   }
-  return close(fd) == 0;
+  return os_close(fd) == 0;
 }
 
 // ---- コマンドライン引数（args）と標準エラー出力（eprint） ----
@@ -992,6 +1231,28 @@ int32_t um_append_file(const char *path, size_t plen, const unsigned char *data,
 static int um_argc;
 static char **um_argv;
 void um_set_args(int32_t argc, char **argv) {
+#ifdef _WIN32
+  // Windows の argv は ANSI のコードページの文字列なので使わず、UTF-16 のコマンドラインから UTF-8 の並びを作る。
+  // 作った並びはプログラムの終わりまで使う（解放しない）。
+  int n = 0;
+  LPWSTR *w = CommandLineToArgvW(GetCommandLineW(), &n);
+  if (w && n > 0) {
+    char **a = calloc((size_t)n + 1, sizeof *a);
+    if (!a) um_panic(5, 0);
+    for (int i = 0; i < n; i++) {
+      int len = WideCharToMultiByte(CP_UTF8, 0, w[i], -1, NULL, 0, NULL, NULL);
+      a[i] = malloc(len > 0 ? (size_t)len : 1);
+      if (!a[i]) um_panic(5, 0);
+      a[i][0] = 0;
+      if (len > 0) WideCharToMultiByte(CP_UTF8, 0, w[i], -1, a[i], len, NULL, NULL);
+    }
+    LocalFree(w);
+    um_argc = n;
+    um_argv = a;
+    return;
+  }
+  if (w) LocalFree(w);
+#endif
   um_argc = argc;
   um_argv = argv;
 }

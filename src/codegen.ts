@@ -1105,10 +1105,17 @@ class ModuleGen {
   /** macOS の arm64 向けか（SIMD の dot に NEON の sdot を直接使う。Apple の arm64 はどれも dotprod を持つ）。 */
   appleArm: boolean;
 
-  constructor(prog: Program, target: TargetKind, sanitize: boolean | 'thread' = false, metal = false, appleArm = false) {
+  /**
+   * Windows 向けか。Windows では LLVM が大きなスタックフレームに必ず __chkstk の呼び出しを入れるので、
+   * `"probe-stack"="inline-asm"` は付けない（Windows では、それが `inline-asm` という名前の関数の呼び出しになる）。
+   */
+  windows: boolean;
+
+  constructor(prog: Program, target: TargetKind, sanitize: boolean | 'thread' = false, metal = false, appleArm = false, windows = false) {
     this.prog = prog;
     this.target = target;
     this.appleArm = appleArm;
+    this.windows = windows;
     this.gpu = target === 'wasm32' ? 'webgpu' : metal ? 'metal' : null;
     this.sanitize = sanitize;
     this.usz = `i${prog.ptrBits}`;
@@ -1399,7 +1406,7 @@ class ModuleGen {
   fnAttrs(): string {
     let a = 'nounwind';
     // ネイティブでは大きなスタックフレームがガードページを飛び越えないよう、スタックプローブを入れる。
-    if (this.target === 'native') a += ' "probe-stack"="inline-asm"';
+    if (this.target === 'native' && !this.windows) a += ' "probe-stack"="inline-asm"';
     if (this.sanitize === 'thread') a += ' sanitize_thread';
     else if (this.sanitize) a += ' sanitize_address';
     return a;
@@ -4555,6 +4562,6 @@ class FnGen {
   }
 }
 
-export function generate(prog: Program, target: TargetKind, sanitize: boolean | 'thread' = false, metal = false, appleArm = false): string {
-  return new ModuleGen(prog, target, sanitize, metal, appleArm).generate();
+export function generate(prog: Program, target: TargetKind, sanitize: boolean | 'thread' = false, metal = false, appleArm = false, windows = false): string {
+  return new ModuleGen(prog, target, sanitize, metal, appleArm, windows).generate();
 }

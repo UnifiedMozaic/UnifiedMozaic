@@ -1,6 +1,7 @@
 // 止める合図が立つまで回るループ（Lazy SMP の補助スレッドの形）。kernel の外の RacyBuffer の読み書きは
 // monotonic なので、最適化してもループの中で毎回読み直され、必ず止まる（unordered だとループの外へ出されうる）。
-function spin(k: u32, stop: RacyBuffer<u32>, counts: RacyBuffer<u64>): u32 {
+function spin(k: u32, stop: RacyBuffer<u32>, started: RacyBuffer<u32>, counts: RacyBuffer<u64>): u32 {
+  started[k] = 1;
   let n: u64 = 0;
   while (stop[0] == 0) {
     n = n + 1;
@@ -11,11 +12,16 @@ function spin(k: u32, stop: RacyBuffer<u32>, counts: RacyBuffer<u64>): u32 {
 
 export function main(): i32 {
   const stop = new RacyBuffer<u32>(1);
+  const started = new RacyBuffer<u32>(4);
   const counts = new RacyBuffer<u64>(4);
   let ks: u32[] = [0, 1, 2, 3];
   {
-    const g = thread.spawnEach(spin, own ks, stop, counts);
-    // 補助スレッドが回り始めるまで少し待ってから合図を立てる。
+    const g = thread.spawnEach(spin, own ks, stop, started, counts);
+    // 補助スレッドがすべて回り始めてから（スレッドの起動の速さは OS やメモリ検査の有無で大きく違う）、
+    // 少し待って合図を立てる。
+    while (started[0] + started[1] + started[2] + started[3] < 4) {
+      thread.yield();
+    }
     const t0 = clock();
     while (clock() - t0 < 0.02) {
     }

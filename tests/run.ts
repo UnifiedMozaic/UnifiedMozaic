@@ -19,18 +19,38 @@
 //   tests/errors/*.um  `// error: コード` の診断がすべて出ることを確認。
 //   tests/panics/*.um  `// panic: メッセージ` で停止することを確認。
 
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CompileError, CompileErrors } from '../src/diag.ts';
-import { build, CLANG, compileMsl, compileToLL, compileWgsl } from '../src/driver.ts';
+import { build, CLANG, compileMsl, compileToLL, compileWgsl, exePath } from '../src/driver.ts';
 import { smallMagnitudes } from '../src/codegen.ts';
 // @ts-ignore 型定義のないJSモジュール
 import { instantiate, UmPanic } from '../runtime/host.mjs';
 
 const root = join(import.meta.dirname, '..');
 const tmp = mkdtempSync(join(tmpdir(), 'um-test-'));
+const windows = process.platform === 'win32';
+/** clang と同じ場所の clang++（Windows の LLVM は PATH に入っていないことがある）。 */
+const CLANGXX = CLANG.replace(/clang(\.exe)?$/i, (_m, ext: string | undefined) => `clang++${ext ?? ''}`);
+
+/**
+ * AddressSanitizer つきの実行に渡す環境変数。Windows の AddressSanitizer は解放漏れを調べられない
+ * （detect_leaks を付けると止まる）。また、ランタイムの DLL を clang のリソースフォルダから読ませる。
+ */
+function asanEnv(options: string): NodeJS.ProcessEnv {
+  if (!windows) return { ...process.env, ASAN_OPTIONS: options };
+  const env: NodeJS.ProcessEnv = { ...process.env, ASAN_OPTIONS: options.replace(/(^|:)detect_leaks=1/, '').replace(/^:/, '') };
+  try {
+    const res = execFileSync(CLANG, ['-print-resource-dir'], { encoding: 'utf8' }).trim();
+    const key = Object.keys(env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
+    env[key] = `${join(res, 'lib', 'windows')};${env[key] ?? ''}`;
+  } catch {
+    // clang のリソースフォルダが分からない。DLL が PATH にあれば動く。
+  }
+  return env;
+}
 let passed = 0;
 const failures: string[] = [];
 
@@ -142,14 +162,16 @@ function runMemChecked(src: string, tag: string, tool: 'asan' | 'valgrind' | 'ma
     }
   } else if (tool === 'asan') {
     build(compileToLL(src, 'host', true), 'host', exe, '1', true, quiet);
-    r = spawnSync(exe, [], { encoding: 'utf8', input: stdinText(src), cwd: tmp, env: { ...process.env, ASAN_OPTIONS: 'detect_leaks=1:halt_on_error=1' } });
+    r = spawnSync(exe, [], { encoding: 'utf8', input: stdinText(src), cwd: tmp, env: asanEnv('detect_leaks=1:halt_on_error=1') });
   } else {
     build(compileToLL(src, 'host'), 'host', exe, '1');
     r = spawnSync('valgrind', ['-q', '--error-exitcode=97', '--leak-check=full', '--errors-for-leak-kinds=all', exe], { encoding: 'utf8', input: stdinText(src), cwd: tmp });
   }
   const out = r.stdout.split('\n').filter((l) => l !== '');
   const bad = tool !== 'valgrind' ? r.status !== 0 : r.status === 97 || r.signal !== null;
-  return { out, report: bad ? r.stderr.trim().split('\n').slice(0, 14).join('\n') : '' };
+  // 何も書かずに失敗した（ランタイムを読めなかったなど）ときも、空でない報告にする。
+  const report = bad ? r.stderr.trim().split('\n').slice(0, 14).join('\n') || `exited with ${r.status ?? r.signal}` : '';
+  return { out, report };
 }
 
 function detectMemCheck(): MemCheck {
@@ -194,6 +216,7 @@ try {
 
 const memCheck = detectMemCheck();
 if (!memCheck) console.log('note: AddressSanitizer も valgrind も leaks も使えないため、メモリ検査つきの実行は省略します');
+else if (memCheck === 'asan' && windows) console.log('note: Windows の AddressSanitizer は解放漏れを調べられないため、メモリ検査では解放漏れを確かめません');
 
 for (const f of files('examples')) {
   const src = readFileSync(join(root, f), 'utf8');
@@ -231,12 +254,13 @@ for (const f of files('examples')) {
 
   try {
     const obj = join(tmp, `${tag}.o`);
-    if (process.platform === 'darwin') {
-      build(compileToLL(src, 'arm64-macos'), 'arm64-macos', obj);
-    } else {
-      build(compileToLL(src, 'arm64-macos'), 'arm64-macos', obj);
-      const desc = execFileSync('file', ['-b', obj], { encoding: 'utf8' });
-      if (!/Mach-O 64-bit.*arm64/.test(desc)) throw new Error(`unexpected object format: ${desc.trim()}`);
+    build(compileToLL(src, 'arm64-macos'), 'arm64-macos', obj);
+    if (process.platform !== 'darwin') {
+      // Mach-O の 64 ビット（0xfeedfacf）で、CPU が arm64（0x0100000c）のオブジェクトか。
+      const head = readFileSync(obj).subarray(0, 8);
+      if (head.length < 8 || head.readUInt32LE(0) !== 0xfeedfacf || head.readUInt32LE(4) !== 0x0100000c) {
+        throw new Error(`unexpected object format: ${head.toString('hex')}`);
+      }
     }
     ok(`${f} [arm64-macos build]`);
   } catch (e) {
@@ -267,13 +291,17 @@ for (const f of files('tests/gpu')) {
 
 // MSL: Metal コンパイラの代わりに、C++14 として構文検査し、スタブヘッダで実行して CPU と照合する。
 {
-  const hasCxx = spawnSync('clang++', ['--version']).status === 0;
+  const hasCxx = spawnSync(CLANGXX, ['--version']).status === 0;
   if (!hasCxx) {
     console.log('note: clang++ が使えないため、MSL の確認は省略します');
   } else {
     const mslDir = join(root, 'tests', 'msl');
     const out = join(tmp, 'msl');
     mkdirSync(out);
+    // MSL の long は 64 ビット。Windows の C++ の long は 32 ビットなので、stub の 64 ビットの型（um_long）に読み替え、
+    // リテラルの接尾辞 l / ul も ll / ull にする。
+    const asCxx = (msl: string) =>
+      windows ? msl.replace(/\blong\b/g, 'um_long').replace(/\b(\d[\dA-Fa-fxX]*)(u?)l\b/g, '$1$2ll') : msl;
     const cxx = ['-std=c++14', '-ffp-contract=off', '-Wall', '-Wextra', '-Wno-unknown-attributes', '-Wno-unknown-pragmas', '-Wno-unused-parameter', '-I', mslDir];
 
     // 1. tests/gpu と examples の kernel の MSL が、スタブつきの C++14 として通ること
@@ -290,9 +318,9 @@ for (const f of files('tests/gpu')) {
       for (const [name, text] of shaders) {
         try {
           const base = join(out, `${tag}_${name}`);
-          writeFileSync(`${base}.metal`, text);
+          writeFileSync(`${base}.metal`, asCxx(text));
           writeFileSync(`${base}.cpp`, `#include <cmath>\n#include <cstdint>\n#include "metal_stub.h"\n#include "${base}.metal"\n`);
-          const r = spawnSync('clang++', [...cxx, '-Werror', '-fsyntax-only', `${base}.cpp`], { encoding: 'utf8' });
+          const r = spawnSync(CLANGXX, [...cxx, '-Werror', '-fsyntax-only', `${base}.cpp`], { encoding: 'utf8' });
           if (r.status === 0) ok(`${f} kernel ${name} [msl syntax, C++14 + stub]`);
           else fail(`${f} kernel ${name} [msl syntax, C++14 + stub]`, r.stderr.split('\n').slice(0, 14).join('\n'));
         } catch (e) {
@@ -310,12 +338,13 @@ for (const f of files('tests/gpu')) {
       if (cpu.out.length === 0) throw new Error('no output from the CPU run');
       const dir = join(out, 'kernels');
       mkdirSync(dir);
-      for (const [name, text] of compileMsl(src)) writeFileSync(join(dir, `${name}.metal`), text);
-      const exe = join(out, 'harness');
-      const c = spawnSync('clang++', [...cxx, '-O1', '-I', dir, join(mslDir, 'harness.cpp'), '-o', exe], { encoding: 'utf8' });
+      for (const [name, text] of compileMsl(src)) writeFileSync(join(dir, `${name}.metal`), asCxx(text));
+      const exe = exePath(join(out, 'harness'));
+      const c = spawnSync(CLANGXX, [...cxx, '-O1', '-I', dir, join(mslDir, 'harness.cpp'), '-o', exe], { encoding: 'utf8' });
       if (c.status !== 0) throw new Error(c.stderr.split('\n').slice(0, 20).join('\n'));
       const r = spawnSync(exe, [], { encoding: 'utf8' });
-      const msl = r.stdout.split('\n').filter((l) => l !== '');
+      // harness は C++ の printf で書く（Windows では改行が \r\n になる）。
+      const msl = r.stdout.split(/\r?\n/).filter((l) => l !== '');
       if (same(msl, cpu.out)) ok(`${f} [msl as C++ vs CPU: ${cpu.out.length} checksums]`);
       else fail(`${f} [msl as C++ vs CPU]`, `cpu: ${cpu.out.join(' ')}\nmsl: ${msl.join(' ')}`);
     } catch (e) {
@@ -430,6 +459,43 @@ if (process.platform !== 'win32') {
       fail(`${f} [host, piped stdin]`, String(e));
     }
   }
+} else {
+  // Windows: pipe_driver.c は POSIX 用なので、同じ書き方をここで行う。Windows のパイプに「待たない」設定はないので、
+  // nonblocking.um は「間を空けて届く行を、readLine が待って受け取る」ことだけを確かめる。
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  for (const f of files('tests/io')) {
+    const src = readFileSync(join(root, f), 'utf8');
+    const want = directives(src, 'expect');
+    const mode = f.replace(/^.*[\\/]/, '').replace(/\.um$/, '');
+    const name = `${f} [host, piped stdin]`;
+    try {
+      const exe = join(tmp, `io_${mode}.bin`);
+      build(compileToLL(src, 'host'), 'host', exe);
+      const child = spawn(exe, [], { cwd: tmp, stdio: ['pipe', 'pipe', 'inherit'] });
+      let stdout = '';
+      child.stdout.setEncoding('utf8');
+      child.stdout.on('data', (d: string) => (stdout += d));
+      const closed = new Promise<number | null>((r) => child.on('close', (code) => r(code)));
+      const timer = setTimeout(() => child.kill(), 60000);
+      if (mode === 'partial') {
+        child.stdin.write('sto');
+        await sleep(1000);
+        child.stdin.end('p\n');
+      } else {
+        await sleep(300);
+        child.stdin.write('first\n');
+        await sleep(300);
+        child.stdin.end('second\n');
+      }
+      const status = await closed;
+      clearTimeout(timer);
+      const out = stdout.split('\n').filter((l) => l !== '');
+      if (status === 0 && same(out, want)) ok(name);
+      else fail(name, `expected: ${want.join(' ')}\nactual:   ${out.join(' ')} (exit ${status})`);
+    } catch (e) {
+      fail(name, String(e));
+    }
+  }
 }
 
 // 後ろで宣言した定数を次々に使う長い並びでも、コンパイラが止まらないこと（再帰が深くならない）。
@@ -498,6 +564,22 @@ if (process.platform !== 'win32') {
     } catch (e) {
       fail('args() and eprint() [wasm32]', String(e));
     }
+  }
+}
+
+// Windows: 標準入力の先頭の UTF-8 の BOM（Windows PowerShell 5.1 がパイプで付ける）は読み飛ばす。2行目以降の BOM はそのまま。
+if (windows) {
+  const name = 'leading UTF-8 BOM on stdin is skipped [host, Windows]';
+  try {
+    const src = 'export function main(): i32 { const a = readLine(); if (a != null) { print(a.length); } const b = readLine(); if (b != null) { print(b.length); } return 0; }';
+    const exe = join(tmp, 'bom_test.bin');
+    build(compileToLL(src, 'host'), 'host', exe);
+    const r = spawnSync(exe, [], { encoding: 'utf8', input: Buffer.from('﻿usi\r\n﻿x\r\n'), cwd: tmp });
+    const out = r.stdout.split('\n').filter((l) => l !== '');
+    if (same(out, ['3', '4'])) ok(name);
+    else fail(name, `expected: 3 4\nactual:   ${out.join(' ')}`);
+  } catch (e) {
+    fail(name, String(e));
   }
 }
 
@@ -576,7 +658,7 @@ for (const f of files('tests/simd')) {
   // ThreadSanitizer が使えるか。
   let tsan = false;
   try {
-    const probe = join(tmp, 'probe_tsan');
+    const probe = exePath(join(tmp, 'probe_tsan'));
     build(compileToLL('export function main(): i32 { return 0; }', 'host', 'thread'), 'host', probe, '1', 'thread', true);
     tsan = spawnSync(probe, []).status === 0;
   } catch {

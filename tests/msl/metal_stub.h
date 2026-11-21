@@ -16,7 +16,13 @@
 
 typedef unsigned int uint;
 // MSL の long / ulong は 64 ビット（この stub を使う LP64 の C++ の long も 64 ビット）。
+#ifdef _WIN32
+// Windows の C++ の long は 32 ビット（LLP64）。tests/run.ts が MSL の long を um_long に置き換えてから読み込む。
+typedef long long um_long;
+typedef unsigned long long ulong;
+#else
 typedef unsigned long ulong;
+#endif
 
 namespace metal {
 

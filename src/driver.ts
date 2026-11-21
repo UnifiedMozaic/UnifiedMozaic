@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { dirname, extname, join, relative, resolve, sep } from 'node:path';
 import { check } from './checker.ts';
 import { generate, kernelUses64 } from './codegen.ts';
 import { emitMsl } from './msl.ts';
@@ -20,25 +20,48 @@ export const TARGETS: Record<TargetName, { kind: TargetKind; ptrBits: 32 | 64 }>
 };
 
 const RUNTIME_C = join(import.meta.dirname, '..', 'runtime', 'native.c');
-/**
- * 使う clang。環境変数 UM_CLANG で差し替えられる（macOS の標準の clang は wasm32 を出力できないので、
- * Homebrew の LLVM を指定するときなどに使う）。
- */
-export const CLANG = process.env.UM_CLANG || 'clang';
 
 /** macOS で Homebrew の LLVM が入っている場所（Apple Silicon と Intel）。 */
 const BREW_CLANGS = ['/opt/homebrew/opt/llvm/bin/clang', '/usr/local/opt/llvm/bin/clang'];
 
+/** Windows で LLVM の公式のインストーラ（`winget install LLVM.LLVM`）が clang を置く場所。 */
+const WINDOWS_CLANGS = [join(process.env.ProgramFiles ?? 'C:\\Program Files', 'LLVM', 'bin', 'clang.exe')];
+
+/** PATH に clang があるか（Windows では clang.exe）。 */
+function clangOnPath(): boolean {
+  const name = process.platform === 'win32' ? 'clang.exe' : 'clang';
+  const sepChar = process.platform === 'win32' ? ';' : ':';
+  return (process.env.PATH ?? process.env.Path ?? '').split(sepChar).some((d) => d !== '' && existsSync(join(d, name)));
+}
+
 /**
  * そのターゲットに使う clang。UM_CLANG があればそれ。macOS の wasm32 は、標準の clang が出力できないので、
- * Homebrew の LLVM があれば自動でそちらを使う（`brew install llvm lld`）。ほかは PATH の clang。
+ * Homebrew の LLVM があれば自動でそちらを使う（`brew install llvm lld`）。Windows で PATH に clang がなければ、
+ * LLVM の公式のインストーラが入れた場所を使う（インストーラは既定では PATH に足さない）。ほかは PATH の clang。
  */
 export function clangFor(target: TargetName): string {
   if (process.env.UM_CLANG) return process.env.UM_CLANG;
   if (target === 'wasm32' && process.platform === 'darwin') {
     for (const c of BREW_CLANGS) if (existsSync(c)) return c;
   }
+  if (process.platform === 'win32' && !clangOnPath()) {
+    for (const c of WINDOWS_CLANGS) if (existsSync(c)) return c;
+  }
   return 'clang';
+}
+
+/**
+ * 使う clang（ネイティブ）。環境変数 UM_CLANG で差し替えられる（macOS の標準の clang は wasm32 を出力できないので、
+ * Homebrew の LLVM を指定するときなどに使う）。
+ */
+export const CLANG = clangFor('host');
+
+/**
+ * ネイティブの実行ファイルの名前。Windows では拡張子のない名前に `.exe` を付ける
+ * （拡張子がないと、Windows のほかのプログラムやシェルから実行ファイルとして起動できない）。
+ */
+export function exePath(path: string): string {
+  return process.platform === 'win32' && extname(path) === '' ? `${path}.exe` : path;
 }
 const RUNTIME_METAL = join(import.meta.dirname, '..', 'runtime', 'metal.m');
 
@@ -113,7 +136,8 @@ export function parseProgram(src: string, file?: string): Module {
         } catch {
           throw new CompileError('import-path', `cannot read '${imp.path}'`, imp.pos);
         }
-        target = { id: loaded.size, mod: parse(text, relative(root, abs)) };
+        // 診断に出すファイル名は、どの OS でも `lib/math.um` の形（区切りは /）。
+        target = { id: loaded.size, mod: parse(text, relative(root, abs).split(sep).join('/')) };
         loaded.set(abs, target);
         load(target.mod, target.id, dirname(abs));
       }
@@ -159,7 +183,8 @@ export function compileToLL(src: string, target: TargetName, sanitize: boolean |
   // UM_GENERIC_SIMD=1 で汎用の経路にする（テストで両方の経路を確かめるため）。
   const appleArm = process.env.UM_GENERIC_SIMD !== '1' &&
     (target === 'arm64-macos' || (target === 'host' && process.platform === 'darwin' && process.arch === 'arm64'));
-  return generate(prog, t.kind, sanitize, metal, appleArm);
+  const windows = target === 'host' && process.platform === 'win32';
+  return generate(prog, t.kind, sanitize, metal, appleArm, windows);
 }
 
 /**
@@ -245,6 +270,18 @@ export function build(ll: string, target: TargetName, outPath: string, optLevel 
       // macOS以外ではリンクに必要なSDKがないので、オブジェクトファイルまで。
       clang(['--target=arm64-apple-macos13', opt, '-c', '-o', out, llPath]);
       return { output: out, objectOnly: true };
+    }
+
+    if (process.platform === 'win32') {
+      // Windows（clang の既定の MSVC ターゲット。リンクには Visual Studio か Build Tools の MSVC と Windows SDK を使う）。
+      // スレッドは Win32 の API（runtime/win32.h）で、-pthread と libm は要らない。ASLR と DEP は MSVC のリンカの既定で有効。
+      // メインスレッドのスタックは、Windows の既定の 1 MiB では探索の再帰が足りないので、macOS・Linux と同じ 8 MiB を予約する。
+      const exe = exePath(out);
+      const args = [opt, '-fstack-protector-strong', '-o', exe, llPath, RUNTIME_C, '-Wl,/STACK:8388608'];
+      if (sanitize === 'thread') args.unshift('-fsanitize=thread', '-g');
+      else if (sanitize) args.unshift('-fsanitize=address', '-g');
+      clang(args, quiet);
+      return { output: exe, objectOnly: false };
     }
 
     const args = [opt, '-fstack-protector-strong', '-pthread', '-o', out, llPath, RUNTIME_C, '-lm'];

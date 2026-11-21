@@ -24,6 +24,8 @@ const isIdentStart = (c: string) =>
 const isIdentPart = (c: string) => isIdentStart(c) || isDigit(c);
 
 export function lex(src: string, startLine = 1, startCol = 1): Token[] {
+  // Windows の改行（CRLF）は LF として読む（複数行のテンプレート文字列の中身が、改行の形によらず同じになるように）。
+  src = src.replace(/\r\n/g, '\n');
   const toks: Token[] = [];
   let i = 0;
   let line = startLine;
