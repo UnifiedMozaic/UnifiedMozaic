@@ -103,7 +103,7 @@ else
     # Linux の runner には画面がなく、テストは offscreen と dummy の駆動を使うので、X11 / Wayland なしでビルドする。
     if [ "$os" = linux ]; then extra+=(-DSDL_UNIX_CONSOLE_BUILD=ON); fi
     cmake -S "$src/SDL3-$SDL3_VERSION" -B "$src/build" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$sdl_dir" \
-      -DCMAKE_INSTALL_LIBDIR=lib -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF "${extra[@]}"
+      -DCMAKE_INSTALL_LIBDIR=lib -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF ${extra[@]+"${extra[@]}"}
     cmake --build "$src/build" --parallel "$JOBS"
     cmake --install "$src/build"
     rm -rf "$src"
