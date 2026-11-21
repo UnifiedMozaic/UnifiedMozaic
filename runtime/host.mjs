@@ -23,6 +23,7 @@ const PANIC_MESSAGES = {
   8: 'could not start a thread',
   9: 'readLine and inputReady can only be called from the main thread',
   10: 'invalid group size (it must be 1 to 1024, and groups times size must fit in u32)',
+  16: 'invalid file call (a range outside the array)',
 };
 
 // src/wgsl.ts の WORKGROUP_SIZE と揃えること。
@@ -219,6 +220,7 @@ class GpuRunner {
  *     readFileRange が length より長いデータを返したときは、length バイトに切り詰める。
  *   args: プログラムの args() が返す引数（プログラム名を含めない）。渡さなければ空。
  *   eprint: プログラムの eprint() の出力先。渡さなければ console.error。
+ *   readFileInto() は readFileRange の口（なければ readFile の口）を通り、データを Buffer へ直接写す。
  * @returns {Promise<WebAssembly.Exports & { um_gpu?: { available: boolean, dispatches: () => number } }>}
  */
 export async function instantiate(bytes, options = {}) {

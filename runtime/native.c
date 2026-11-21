@@ -170,6 +170,7 @@ _Noreturn void um_panic(int32_t code, int32_t line) {
     case 13: msg = "invalid wasm call (an unknown or freed module / instance, or a range outside the array)"; break;
     case 14: msg = "a wasm instance was freed while another thread was using it"; break;
     case 15: msg = "an exported function of a wasm32-plugin module replaced a Buffer that the host lent it"; break;
+    case 16: msg = "invalid file call (a range outside the array)"; break;
     case 20: msg = "invalid media call (an unknown or closed reader / writer)"; break;
     case 21: msg = "a media reader or writer was closed while another thread was using it"; break;
   }
@@ -1303,4 +1304,56 @@ void um_eprint(const char *data, size_t len) {
   if (len > 0) fwrite(data, 1, len, stderr);
   fputc('\n', stderr);
   funlockfile(stderr);
+}
+
+// ---- ファイルに直接読む（readFileInto） ----
+// 配列の範囲の誤りは、プログラムの誤りなので停止する（16）。読めなければ null。
+
+// 配列（長さ blen）の start 番目から count 個（負なら終わりまで）が範囲に入っているか確かめ、個数を返す。
+static size_t um_file_range(size_t blen, int64_t start, int64_t count, int32_t line) {
+  if (start < 0 || (uint64_t)start > blen) um_panic(16, line);
+  size_t rest = blen - (size_t)start;
+  if (count < 0) return rest;
+  if ((uint64_t)count > rest) um_panic(16, line);
+  return (size_t)count;
+}
+
+// 読めるだけ読む（ファイルの終わりで止まる）。positional なら offset から。読めたバイト数、失敗は -1。
+static int64_t um_read_loop(int fd, int positional, int64_t offset, unsigned char *dst, size_t want) {
+  size_t n = 0;
+  while (n < want) {
+    size_t step = want - n > UM_IO_CHUNK ? UM_IO_CHUNK : want - n;
+    ssize_t r = positional ? os_pread(fd, dst + n, step, offset + (int64_t)n) : os_read(fd, dst + n, step);
+    if (r < 0 && errno == EINTR) continue;
+    if (r < 0) return -1;
+    if (r == 0) break;
+    n += (size_t)r;
+  }
+  return (int64_t)n;
+}
+
+// offset バイト目から最大 want バイトを buf の boff 番目からに読む。読めたバイト数を *out に書く。
+int32_t um_read_file_into(const char *path, size_t plen, int64_t offset, unsigned char *buf, size_t blen, int64_t boff, int64_t want,
+                          int64_t *out, int32_t line) {
+  *out = 0;
+  if (want < 0) um_panic(16, line);
+  size_t n = um_file_range(blen, boff, want, line);
+  if (offset < 0 || offset > INT64_MAX - want) return 0;
+  char *z = path_copy(path, plen);
+  if (!z) return 0;
+  int fd = os_open(z, 0);
+  free(z);
+  if (fd < 0) return 0;
+  int64_t size = 0;
+  int kind = os_fstat(fd, &size);
+  int64_t got = -1;
+  if (kind == OS_FILE) {
+    got = um_read_loop(fd, 1, offset, buf + boff, n);
+  } else if (kind == OS_OTHER && offset == 0) {
+    got = um_read_loop(fd, 0, 0, buf + boff, n);
+  }
+  os_close(fd);
+  if (got < 0) return 0;
+  *out = got;
+  return 1;
 }

@@ -184,6 +184,7 @@ export function simdInfo(t: Ty | undefined): { elem: Ty & { k: 'int' | 'float' }
  * 型検査は呼び出しの名前を `__io_名前` に書き換え、コード生成がランタイムの呼び出しにする。kernel の中では使えない。
  */
 const IO_BUILTINS = new Set(['readLine', 'inputReady', 'clock', 'stringFromBytes', 'readFile', 'writeFile', 'fileSize', 'readFileRange', 'appendFile', 'args', 'eprint',
+  'readFileInto',
   'windowOpen', 'windowClose', 'windowPoll', 'windowPresent', 'windowPresentRect', 'windowUpdateRect', 'windowCtl', 'windowCtlF', 'windowSetText', 'windowGetText',
   'audioWrite',
   'wasmCompile', 'wasmFreeModule', 'wasmExportList', 'wasmInstantiate', 'wasmFreeInstance', 'wasmInvoke', 'wasmRead', 'wasmWrite',
@@ -2728,6 +2729,8 @@ class Checker {
    *   appendFile(path: string, bytes: u8[]): bool  終わりに書き足す（なければ作る）。
    *   args(): string[]                     コマンドライン引数（プログラム名を除く）。
    *   eprint(text: string): void           標準エラー出力に1行。
+   *   readFileInto(path: string, offset: i64, buf: mut u8 の配列か Buffer, bufOffset: i64, length: i64): i64 | null
+   *       offset から最大 length バイトを buf の bufOffset 番目からに直接読み、読めたバイト数を返す。
    * ウィンドウ（ネイティブだけ。メインスレッドから呼ぶ。runtime/window.c が SDL3 で実装する）:
    *   windowOpen(title: string, width: i32, height: i32): i32 | null  ウィンドウを開き、その番号を返す。
    *   windowClose(window: i32): void       ウィンドウを閉じる。
@@ -2797,6 +2800,10 @@ class Checker {
       appendFile: { params: [['path', STR], ['bytes', bytes]], ret: BOOL },
       args: { params: [], ret: { k: 'heap', elem: STR } },
       eprint: { params: [['text', STR]], ret: VOID },
+      readFileInto: {
+        params: name === 'readFileInto' ? [['path', STR], ['offset', I64], ['buf', this.byteArg(e, 2, name, false)], ['bufOffset', I64], ['length', I64]] : [],
+        ret: this.optionalOf(I64, e.pos), mut: [2],
+      },
       windowOpen: { params: [['title', STR], ['width', I32], ['height', I32]], ret: this.optionalOf(I32, e.pos) },
       windowClose: { params: [['window', I32]], ret: VOID },
       windowPoll: { params: [['event', { k: 'heap', elem: I32, buffer: true }], ['timeoutMs', I32]], ret: BOOL, mut: [0] },
@@ -2873,6 +2880,32 @@ class Checker {
     this.checkArgs(sig, e.args, e.pos);
     e.callee = `__io_${name}`;
     return shape.ret;
+  }
+
+  /**
+   * バイトを写す配列の引数: u8[] か Buffer<u8>（allowStr なら文字列も）。実引数の型をそのまま仮引数の型にする。
+   * 配列は変数（かそのフィールド・要素）に限る（もう一度検査しても同じになるように）。allowStr のとき、変数でない式は文字列とする。
+   */
+  byteArg(e: Expr & { kind: 'call' }, at: number, name: string, allowStr: boolean): Ty {
+    const fallback: Ty = { k: 'heap', elem: PRIMS.u8 };
+    const arg = e.args[at];
+    if (!arg) return fallback;
+    // 変数でない式（"..." や line + "\n"）は文字列として検査する。
+    if (allowStr && !isPlace(arg.expr)) return STR;
+    const what = allowStr ? 'u8[], Buffer<u8> or a string' : 'u8[] or Buffer<u8>';
+    if (!isPlace(arg.expr)) {
+      this.err('type-mismatch', `the ${allowStr ? 'data' : 'array'} of \`${name}\` must be a variable (or a field / element of one)`, arg.expr.pos,
+        `store the ${what} in a variable first`);
+      return fallback;
+    }
+    const t = this.checkExpr(arg.expr);
+    const ok = t.k === 'heap' && !t.racy && (t.str ? allowStr : t.elem.k === 'int' && t.elem.bits === 8 && !t.elem.signed && !t.elem.usize);
+    if (!ok) {
+      this.err('type-mismatch', `\`${name}\` ${allowStr ? 'writes' : 'reads into'} ${what}, but found ${tyStr(t)}`, arg.expr.pos,
+        allowStr ? 'convert other data to bytes first' : 'read into a u8[] or Buffer<u8> and convert afterwards');
+      return fallback;
+    }
+    return t;
   }
 
   /** WebAssembly を実行する関数は、wasm32 のプログラムでは使えない（wasmtime はネイティブのプログラムにリンクするため）。 */

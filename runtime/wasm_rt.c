@@ -305,6 +305,36 @@ void um_args(um_bytes **out, size_t *len) {
 
 void um_eprint(const char *data, size_t len) { um_host_eprint(data, len); }
 
+// ---- ファイルに直接読む（readFileInto） ----
+
+static size_t file_range(size_t blen, long long start, long long count, int line) {
+  if (start < 0 || (unsigned long long)start > blen) um_panic(16, line);
+  size_t rest = blen - (size_t)start;
+  if (count < 0) return rest;
+  if ((unsigned long long)count > rest) um_panic(16, line);
+  return (size_t)count;
+}
+
+// 用意された n バイト（max 以下）を dst へ写す。
+static long long take_into(int n, unsigned char *dst, size_t max) {
+  if (n < 0) return -1;
+  if ((size_t)n > max) n = (int)max;  // ホストが切り詰めるので、ここには来ない
+  if (n > 0) um_host_take(dst);
+  return n;
+}
+
+int um_read_file_into(const char *path, size_t plen, long long offset, unsigned char *buf, size_t blen, long long boff, long long want,
+                      long long *out, int line) {
+  *out = 0;
+  if (want < 0) um_panic(16, line);
+  size_t n = file_range(blen, boff, want, line);
+  if (offset < 0) return 0;
+  long long got = take_into(um_host_read_file_range(path, plen, offset, (long long)n), buf + boff, n);
+  if (got < 0) return 0;
+  *out = got;
+  return 1;
+}
+
 // ---- スレッド ----
 // wasm32 にはスレッドがないので、thread.spawn / spawnEach は控えておくだけにし、合流の時点（thread.join か
 // ブロックの終わりの自動の合流）でその場で最後まで実行する（spawnEach は要素の順）。起動の時点で実行しないのは、

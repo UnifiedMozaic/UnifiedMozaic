@@ -1718,6 +1718,7 @@ class ModuleGen {
     out.push(`declare i32 @um_read_file(ptr, ${this.usz}, ptr, ptr) #0`, `declare i32 @um_write_file(ptr, ${this.usz}, ptr, ${this.usz}) #0`);
     out.push(`declare i32 @um_file_size(ptr, ${this.usz}, ptr) #0`, `declare i32 @um_read_file_range(ptr, ${this.usz}, i64, i64, ptr, ptr) #0`);
     out.push(`declare i32 @um_append_file(ptr, ${this.usz}, ptr, ${this.usz}) #0`, 'declare void @um_args(ptr, ptr) #0', `declare void @um_eprint(ptr, ${this.usz}) #0`);
+    out.push(`declare i32 @um_read_file_into(ptr, ${this.usz}, i64, ptr, ${this.usz}, i64, i64, ptr, i32) #0`);
     if (this.target === 'native') out.push('declare void @um_set_args(i32, ptr) #0');
     // ウィンドウ（runtime/window.c）。使ったときだけ宣言する。ドライバはこの宣言を見て window.c と SDL3 をリンクする。
     if (this.usesWindow) {
@@ -3528,6 +3529,20 @@ class FnGen {
         this.emit(`call void @um_eprint(ptr ${data}, ${usz} ${len})`);
         return '';
       }
+      // ファイルに直接読む。範囲の検査はランタイムが行い、違反なら行番号つきで停止する（16）。
+      case 'readFileInto': {
+        const pathParts = this.heapParts(e.args[0].expr);
+        const off = this.expr(e.args[1].expr);
+        const bufParts = this.heapParts(e.args[2].expr);
+        const boff = this.expr(e.args[3].expr);
+        const want = this.expr(e.args[4].expr);
+        const [path, plen] = pathParts();
+        const [data, len] = bufParts();
+        const slot = this.i64Slot();
+        const ok = this.tmp();
+        this.emit(`${ok} = call i32 @um_read_file_into(ptr ${path}, ${usz} ${plen}, i64 ${off}, ptr ${data}, ${usz} ${len}, i64 ${boff}, i64 ${want}, ptr ${slot}, i32 ${e.pos.line})`);
+        return this.optionalI64(e, ok, slot);
+      }
       // ウィンドウ（runtime/window.c）。メインスレッドの確認と引数の検査はランタイムが行い、違反なら行番号つきで停止する。
       case 'windowOpen': {
         this.m.usesWindow = true;
@@ -3893,6 +3908,28 @@ class FnGen {
       }
     }
     throw new Error(`internal: builtin ${name}`);
+  }
+
+  /** ランタイムが i64 を書き込む場所（0 で初期化）。 */
+  i64Slot(): string {
+    const slot = `%g${++this.n}`;
+    this.allocas.push(`  ${slot} = alloca i64`);
+    this.emit(`store i64 0, ptr ${slot}`);
+    return slot;
+  }
+
+  /** ok（i32、0 は失敗）と slot の i64 を `i64 | null` にする。 */
+  optionalI64(e: Expr, ok: string, slot: string): string {
+    const t = llTy(e.ty!);
+    const v = this.tmp();
+    const some = this.tmp();
+    const a = this.tmp();
+    const b = this.tmp();
+    this.emit(`${v} = load i64, ptr ${slot}`);
+    this.emit(`${some} = icmp ne i32 ${ok}, 0`);
+    this.emit(`${a} = insertvalue ${t} undef, i1 ${some}, 0`);
+    this.emit(`${b} = insertvalue ${t} ${a}, i64 ${v}, 1`);
+    return b;
   }
 
   /** 文字列リテラル。内容を定数として持ち、新しく確保した領域へコピーする（文字列は所有される値なので）。 */
