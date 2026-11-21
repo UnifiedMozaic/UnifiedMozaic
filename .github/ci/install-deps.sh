@@ -4,6 +4,7 @@
 #   wgpu-native        → UM_WGPU_HOME
 #   SDL3               → UM_SDL3
 #   FFmpeg（LGPL の共有ライブラリ）→ UM_FFMPEG_HOME
+#   LLVM（Windows だけ）→ UM_CLANG と PATH
 # どれも公式の配布物（GitHub の releases）から取る。配布物のない組み合わせ（macOS と Linux の SDL3、macOS の FFmpeg）は、
 # 同じ版のソース（GitHub の releases / タグ）からビルドする。すでに $UM_DEPS にあるもの（キャッシュから戻したもの）は取り直さない。
 # 版を変えたら、このファイルが変わるのでキャッシュの鍵も変わる（ci.yml の hashFiles）。
@@ -13,6 +14,7 @@ WASMTIME_VERSION=51.0.0
 WGPU_VERSION=29.0.1.1
 SDL3_VERSION=3.4.20
 FFMPEG_VERSION=9.0
+LLVM_VERSION=23.1.6
 
 DEPS="${UM_DEPS:?UM_DEPS is not set}"
 mkdir -p "$DEPS"
@@ -62,6 +64,31 @@ rpath_install_name() {
        codesign --force --sign - "$lib" ;;
   esac
 }
+
+# --- LLVM（Windows だけ） ---
+# runner に入っている LLVM は、runner の Visual Studio の C++ 標準ライブラリより古いことがある（LLVM 20 に対して
+# 「Clang 22 or newer」を求められ、tests/msl の C++ の検査が通らない）。手元と同じ版の公式の配布物を使う。
+# 配布物は大きいので、使うもの（clang・clang++・lld・llvm-rc・llvm-readobj・DLL・clang のリソース）だけ展開する。
+if [ "$os" = windows ]; then
+  llvm_name=clang+llvm-$LLVM_VERSION-x86_64-pc-windows-msvc
+  llvm_dir="$DEPS/llvm-$LLVM_VERSION"
+  if [ ! -f "$llvm_dir/bin/clang.exe" ]; then
+    tmp=$(mktemp -d)
+    echo "download: LLVM $LLVM_VERSION"
+    curl -fsSL --retry 3 -o "$tmp/llvm.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM_VERSION/$llvm_name.tar.xz"
+    mkdir -p "$tmp/x"
+    # .tar.zst のほうが小さいが、長い窓の zstd なので Windows の tar（bsdtar）では展開できない。
+    xz -T0 -dc "$tmp/llvm.tar.xz" | tar -x --wildcards -C "$tmp/x" \
+      "$llvm_name/bin/clang.exe" "$llvm_name/bin/clang++.exe" "$llvm_name/bin/lld-link.exe" "$llvm_name/bin/wasm-ld.exe" \
+      "$llvm_name/bin/llvm-rc.exe" "$llvm_name/bin/llvm-readobj.exe" "$llvm_name/bin/*.dll" "$llvm_name/lib/clang"
+    rm -rf "$llvm_dir"
+    mv "$tmp/x/$llvm_name" "$llvm_dir"
+    rm -rf "$tmp"
+  fi
+  setenv UM_CLANG "$llvm_dir/bin/clang.exe"
+  native_path "$llvm_dir/bin" >> "${GITHUB_PATH:-/dev/null}"
+  "$llvm_dir/bin/clang.exe" --version
+fi
 
 # --- wasmtime の C API ---
 case "$os" in
