@@ -38,7 +38,7 @@
 //                      （makeMediaClips）。FFmpeg のライブラリか ffmpeg のコマンドが見つからなければ飛ばす。
 
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { CompileError, CompileErrors } from '../src/diag.ts';
@@ -628,6 +628,53 @@ if (windows) {
     else fail(name, `expected: 3 4\nactual:   ${out.join(' ')}`);
   } catch (e) {
     fail(name, String(e));
+  }
+}
+
+// build の linkInputs（um build --link-input）。リンクしないターゲット（wasm32）では使わずに印を立てる。
+// Windows では、llvm-rc で作ったアイコンのリソース（.res）を渡して、exe にアイコンが入ることを確かめる（llvm-rc がなければ飛ばす）。
+{
+  const src = 'export function main(): i32 { print("linked"); return 0; }';
+  const name = 'build linkInputs are ignored when the target does not link [wasm32]';
+  try {
+    const dummy = join(tmp, 'link_input_dummy.bin');
+    writeFileSync(dummy, 'x');
+    const r = build(compileToLL(src, 'wasm32'), 'wasm32', join(tmp, 'link_input.wasm'), '2', false, false, [dummy]);
+    if (r.linkInputsIgnored === true) ok(name);
+    else fail(name, 'linkInputsIgnored was not set');
+  } catch (e) {
+    fail(name, String(e));
+  }
+  if (windows) {
+    const llvmBin = [dirname(CLANG), 'C:\\Program Files\\LLVM\\bin'].find((d) => d !== '.' && existsSync(join(d, 'llvm-rc.exe')));
+    const label = 'build linkInputs embed an icon resource in the exe [host, Windows]';
+    if (!llvmBin || !existsSync(join(llvmBin, 'llvm-readobj.exe'))) {
+      console.log('note: llvm-rc / llvm-readobj が見つからないため、exe にアイコンを埋め込むテストは飛ばします');
+    } else {
+      try {
+        // 16×16・32 ビットの .ico を1枚だけ持つアイコンを作り、llvm-rc でリソースにする。
+        const w = 16;
+        const xor = Buffer.alloc(w * w * 4, Buffer.from([0xcc, 0x66, 0x33, 0xff]));
+        const and = Buffer.alloc(4 * w);
+        const bih = Buffer.alloc(40);
+        bih.writeUInt32LE(40, 0); bih.writeInt32LE(w, 4); bih.writeInt32LE(w * 2, 8); bih.writeUInt16LE(1, 12); bih.writeUInt16LE(32, 14);
+        bih.writeUInt32LE(xor.length + and.length, 20);
+        const img = Buffer.concat([bih, xor, and]);
+        const dir = Buffer.alloc(22);
+        dir.writeUInt16LE(1, 2); dir.writeUInt16LE(1, 4); dir[6] = w; dir[7] = w; dir.writeUInt16LE(1, 10); dir.writeUInt16LE(32, 12);
+        dir.writeUInt32LE(img.length, 14); dir.writeUInt32LE(22, 18);
+        writeFileSync(join(tmp, 'app.ico'), Buffer.concat([dir, img]));
+        writeFileSync(join(tmp, 'app.rc'), '1 ICON "app.ico"\n');
+        execFileSync(join(llvmBin, 'llvm-rc.exe'), ['-fo', join(tmp, 'app.res'), join(tmp, 'app.rc')], { cwd: tmp, stdio: 'ignore' });
+        const exe = build(compileToLL(src, 'host'), 'host', join(tmp, 'with_icon.exe'), '2', false, false, [join(tmp, 'app.res')]).output;
+        const run = spawnSync(exe, [], { encoding: 'utf8', cwd: tmp });
+        const res = execFileSync(join(llvmBin, 'llvm-readobj.exe'), ['--coff-resources', exe], { encoding: 'utf8' });
+        if (run.stdout.trim() === 'linked' && /Type: ICON/.test(res) && /Type: GROUP_ICON/.test(res)) ok(label);
+        else fail(label, `output: ${run.stdout.trim()}\nresources:\n${res.split('\n').filter((l) => /Type:/.test(l)).join('\n')}`);
+      } catch (e) {
+        fail(label, String(e));
+      }
+    }
   }
 }
 
