@@ -96,8 +96,18 @@ node src/cli.ts build examples/window/paint.um --target host -o paint
 | `windowState(window): WindowState` | `fullscreen`・`maximized`・`minimized`・`focused`・`hidden` の `bool` |
 | `windowSetResizable(window, on: bool): bool` | 大きさを変えられるか |
 | `windowRaise(window): bool` | 前に出して焦点を移す |
+| `windowSetIcon(window, pixels: Buffer<u32>, width, height): bool` | 窓のアイコン（題名の帯・タスクバー・Alt+Tab）。下の「アイコン」 |
 
 `WindowSize` は `{ width, height }`、`WindowPos` は `{ x, y }`、`DisplayRect` は `{ x, y, width, height }`（どれも `i32`）です。
+
+### アイコン
+
+`windowSetIcon(window, pixels, width, height)` は、`0xAARRGGBB` の画素を `width × height` 並べたものを窓のアイコンにします
+（`windowPresent` と同じ並び）。大きさは 32×32 か 64×64 くらいが目安です（OS が縮めます）。SDL が画素を写すので、呼び終えたら
+`Buffer` は手放してかまいません。ドライバが窓のアイコンを持たないとき（`offscreen` など）は `false` を返します。
+
+これは動いている窓のアイコンです。エクスプローラーなどに出る実行ファイル（.exe）のアイコンは別で、ビルドのときにリソースとして
+埋め込みます。
 
 ### 高密度の画面（HiDPI）とディスプレイ
 

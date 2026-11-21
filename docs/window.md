@@ -93,6 +93,8 @@ The Japanese page ([window.ja.md](window.ja.md)) has the full reference; this is
   composition yourself; `windowSetTextInputArea(window, x, y, w, h, cursor)` places the OS candidate list; `windowStartTextInput` / `windowStopTextInput`.
 - **Window control**: `windowSetTitle`, `windowTitle`, `windowSetSize`, `windowSize`, `windowSetPosition`, `windowPosition`, `windowSetMinimumSize`,
   `windowMaximize`, `windowMinimize`, `windowRestore`, `windowSetFullscreen`, `windowState`, `windowSetResizable`, `windowRaise`.
+- **Window icon**: `windowSetIcon(window, pixels: Buffer<u32>, width, height): bool` sets the icon of a running window
+  (`0xAARRGGBB`, e.g. 32×32 or 64×64; returns `false` when the video driver has no window icons, such as `offscreen`).
 - **HiDPI and displays**: `windowPixelSize`, `windowPixelDensity`, `windowDisplayScale`, `windowDisplay`, `displayCount`, `displayBounds`,
   `displayUsableBounds`, `displayName`, `displayContentScale`, `displayRefreshRate`; events `PixelSizeChanged`, `ScaleChanged`, `DisplaysChanged`.
 - **Other events**: `Focus`, `MouseEnter`, `MouseLeave`, `Moved`, `StateChanged`, `Exposed` (redraw needed).
