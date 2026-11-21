@@ -78,7 +78,7 @@ node src/cli.ts build examples/structs.um --emit-llvm -o structs.ll
 | 式 | 四則演算と剰余、比較、`&&` / `\|\|` / `!`、条件式 `a ? b : c`、`x ?? 既定値`、ビット演算とシフト、`as` による変換、関数とメソッドの呼び出し、`new`、`this`、フィールドと添字、オブジェクトリテラル、配列リテラル、`new Array<T>(n)`、`xs.length`、テンプレート文字列 `` `x = ${x}` ``、`String(x)` |
 | 配列のメソッド | `push`、`pop`、`clear`、`clone`、一括の書き込み `fill(v)` / `fill(v, start, end)`（Buffer / RacyBuffer にも。下の「一括の書き込み」） |
 | 組み込み | `print(x)`（数、`bool`、文字列）、`dispatch` / `cpu.dispatch` / `gpu.dispatch`、グループで実行する `dispatchGroups`（下の「グループ（共有配列・barrier）と kernel の中のアトミック演算」）、`gpu.submit` / `gpu.ready` / `gpu.wait`、`gpu.flags` / `gpu.commit` / `gpu.untracked`（下の「Metal（Mac）での GPU 実行」）、実行時に WGSL の kernel を読み込む `gpu.loadKernel` / `gpu.runKernel`（[wgpu での GPU 実行](wgpu.ja.md)）、`thread.*`（下の「スレッド」）、`Math.sqrt` / `floor` / `ceil` / `abs` / `min` / `max`、ビット演算の `Math.popcount` / `clz` / `ctz`、マスクつきシフト `Math.shl` / `Math.shr`（下の「マスクつきシフトと範囲チェックの除去」）、先読み `Math.prefetch(arr, i)`（下の「先読み」）、SIMD の `Simd.*`（下の「SIMD のベクトル」） |
-| 入出力の組み込み | `readLine()`、`inputReady()`、`clock()`、`stringFromBytes(bytes)`、`readFile(path)`、`writeFile(path, bytes)`、`fileSize(path)`、`readFileRange(path, offset, length)`、`appendFile(path, bytes)`、`args()`、`eprint(text)`（下の「入出力」） |
+| 入出力の組み込み | `readLine()`、`inputReady()`、`clock()`、`stringFromBytes(bytes)`、`readFile(path)`、`writeFile(path, bytes)`、`fileSize(path)`、`readFileRange(path, offset, length)`、`appendFile(path, bytes)`、`readFileInto(...)`、開いたままのファイル `fileOpen` / `fileRead` / `fileReadAt` / `fileWrite` / `fileSeek` / `fileLength` / `fileClose`、フォルダ `listDir` / `makeDir` / `isDir`、パス `cwd()` / `exePath()` / `exeDir()` / `absPath(path)`、`args()`、`eprint(text)`（下の「入出力」） |
 | ネイティブだけの組み込み | ウィンドウ（`windowOpen` など。[window.ja.md](window.ja.md)）、WebAssembly のモジュールの実行（`wasmLoad` / `wasmNew` / `wasmCall` など。[wasm.ja.md](wasm.ja.md)）、動画・音声の読み書き（`mediaOpenVideo` / `mediaFrame` / `mediaSamples` / `mediaCreate` など。FFmpeg を使う。[media.ja.md](media.ja.md)） |
 
 それぞれの書き方は、下の各節と「そのほかの機能」の例にあります。
@@ -187,6 +187,7 @@ while (true) {
 | `fileSize(path: string): i64 \| null` | ふつうのファイルの大きさ（バイト数）。ないファイルやフォルダなどは `null`。 |
 | `readFileRange(path: string, offset: i64, length: i64): u8[] \| null` | `offset` バイト目から最大 `length` バイトを読みます。ファイルの終わりで止まるので短く（終わりより後ろなら長さ 0 に）なります。負の `offset` / `length` や読めないファイルは `null`。大きなファイルの中を二分探索するときなどに、全体を読まずに済みます。ふつうのファイルでないもの（`/dev/urandom` など）は `offset` が 0 のときだけ読めます。 |
 | `appendFile(path: string, bytes: u8[]): bool` | ファイルの終わりに書き足します（なければ作ります）。すべて書けたら `true`。ログを少しずつ書くのに使います。 |
+| `readFileInto(path: string, offset: i64, mut buf, bufOffset: i64, length: i64): i64 \| null` | `offset` バイト目から最大 `length` バイトを、`buf`（`Buffer<u8>` か `u8[]`）の `bufOffset` 番目からに**直接**読み、読めたバイト数を返します。新しい配列を確保しないので、動画のコマのように同じ大きさを何度も読むときに速くなります。ファイルの終わりで止まるのは `readFileRange` と同じ。読めなければ `null`。`bufOffset` と `length` が `buf` からはみ出すと停止します。 |
 | `args(): string[]` | コマンドライン引数。プログラム名（`argv[0]`）は含みません。引数がなければ長さ 0。 |
 | `eprint(text: string)` | 標準エラー出力に1行書きます（改行を付けます）。`print` と違って、まとめずにすぐ書きます。 |
 
@@ -196,9 +197,60 @@ while (true) {
 - **名前に 0 のバイトを含むファイルは読めず、書けません**（`null` / `false`）。
 - **標準入力が「待たない」設定（O_NONBLOCK）でも、`readLine()` は行が届くまで待ちます**（まだ届いていないことを、入力の終わりとは扱いません）。
 - **2 GiB 以上のファイルや行も読み書きできます**（OS への依頼を 1 GiB ずつに分けます）。
-- **wasm32 では、入出力は読み込む側が渡した口だけを通ります。** `instantiate(bytes, { readLine, inputReady, readFile, writeFile, fileSize, readFileRange, appendFile, args, eprint })` で渡します。渡さなければ `readLine()` は `null`、`inputReady()` は `true`（入力は終わっている）、`readFile()` は `null`、`writeFile()` は `false`、`args()` は空、`eprint()` は `console.error` です。`fileSize` / `readFileRange` / `appendFile` の口がなければ、`readFile` / `writeFile` の口で代わりに行います（ファイル全体を読むので遅くなります）。wasm32 の `readFileRange` が一度に返せるのは 2 GiB 未満までです。ファイルの名前は UTF-8 の文字列として口に渡すので、UTF-8 として読めない名前は wasm32 では失敗（`null` / `false`）になります。`runtime/run-node.mjs` は標準入力とファイルをそのままつなぎ、`--` のあとの引数を `args()` に渡します（Node には待たずに読めるかを確かめる方法がないので、`inputReady()` は読み込み済みの分だけで答えます）。wasm32 の入出力は、`node tests/run.ts` が `runtime/run-node.mjs` で実行して、ネイティブと同じ結果になることを確かめています。
+- **wasm32 では、入出力は読み込む側が渡した口だけを通ります。** `instantiate(bytes, { readLine, inputReady, readFile, writeFile, fileSize, readFileRange, appendFile, args, eprint, ... })` で渡します（開いたままのファイル・フォルダ・パスの口は下の「開いたままのファイル」と「フォルダとパス」）。`readFileInto()` は `readFileRange` の口を通り、データを Buffer へ直接写します。渡さなければ `readLine()` は `null`、`inputReady()` は `true`（入力は終わっている）、`readFile()` は `null`、`writeFile()` は `false`、`args()` は空、`eprint()` は `console.error` です。`fileSize` / `readFileRange` / `appendFile` の口がなければ、`readFile` / `writeFile` の口で代わりに行います（ファイル全体を読むので遅くなります）。wasm32 の `readFileRange` が一度に返せるのは 2 GiB 未満までです。ファイルの名前は UTF-8 の文字列として口に渡すので、UTF-8 として読めない名前は wasm32 では失敗（`null` / `false`）になります。`runtime/run-node.mjs` は標準入力とファイルをそのままつなぎ、`--` のあとの引数を `args()` に渡します（Node には待たずに読めるかを確かめる方法がないので、`inputReady()` は読み込み済みの分だけで答えます）。wasm32 の入出力は、`node tests/run.ts` が `runtime/run-node.mjs` で実行して、ネイティブと同じ結果になることを確かめています。
 
 例: [examples/input_lines.um](../examples/input_lines.um)、[examples/bytes_and_files.um](../examples/bytes_and_files.um)、[examples/file_ranges.um](../examples/file_ranges.um)。
+
+### 開いたままのファイル
+
+`appendFile` は呼ぶたびにファイルを開いて閉じるので、動画の書き出しのように毎コマ書くと遅くなります。
+`fileOpen` で開いた番号を使えば、開いたまま何度でも読み書きできます。どのスレッドからも呼べます。
+
+```ts
+const out = fileOpen("movie.raw", "w");      // i32 | null
+if (out != null) {
+  for (let n = 0; n < frames; n++) {
+    render(mut pixels, n);                    // pixels: Buffer<u8>
+    fileWrite(out, pixels);                   // Buffer をそのまま書く（写さない）
+  }
+  fileClose(out);
+}
+```
+
+| 関数 | 動作 |
+| --- | --- |
+| `fileOpen(path: string, mode: string): i32 \| null` | ファイルを開いて番号を返します。`mode` は `"r"`（読む）、`"w"`（作って書く。あれば中身を捨てる）、`"a"`（終わりに書き足す。なければ作る）、`"r+"`（読み書き。あるファイルだけ）。開けなければ（ないファイルを `"r"` で、フォルダ、名前に 0 のバイトなど）`null`。ほかの `mode` は停止します。 |
+| `fileWrite(file: i32, data [, start: i64, count: i64]): bool` | `data`（`u8[]`、`Buffer<u8>`、文字列）を今の位置に書きます（`"a"` では常に終わりに）。`start` と `count` で配列の一部だけを書けます（`count` が負なら終わりまで）。すべて書けたら `true`。OS へそのまま渡すので、まとめて書くほど速くなります。 |
+| `fileRead(file: i32, mut buf [, start: i64, count: i64]): i64 \| null` | 今の位置から `buf`（`u8[]` か `Buffer<u8>`）へ読み、読めたバイト数を返します（位置はその分進みます）。ファイルの終わりでは 0。省略すると `buf` 全体に読みます。読み込みに失敗したら `null`。 |
+| `fileReadAt(file: i32, offset: i64, mut buf [, start, count]): i64 \| null` | `offset` バイト目から読みます。今の位置は動きません。 |
+| `fileSeek(file: i32, offset: i64): bool` | 今の位置を、先頭から `offset` バイト目にします。 |
+| `fileLength(file: i32): i64 \| null` | 開いたファイルの大きさ（ふつうのファイルでなければ `null`）。 |
+| `fileClose(file: i32)` | 閉じます。番号はもう使えません。 |
+
+- **閉じた番号や知らない番号を使うと停止します**（`invalid file call ...`）。`buf` の範囲（`start` + `count`）がはみ出したときも停止します。読み書きの失敗は `null` / `false` です。
+- **同じ番号を複数のスレッドから使えます。** 同じ番号の操作は1つずつ行われます（ほかのスレッドの読み書きと、1回の呼び出しの途中で混ざりません）。`fileRead` / `fileWrite` は共有の「今の位置」を進めるので、複数のスレッドから読むときは `fileReadAt` を使います。スレッドごとに別々に開けば、同時に読み書きできます。
+- **書いた内容はその場で OS に渡します**（プログラムの中でためないので、`fileFlush` はありません）。プログラムが終わると、閉じていないファイルも OS が閉じます。同時に開けるのは 4096 個までです。
+- **wasm32 の口**: `fileOpen(path, mode)`（`null` 以外の値を返す）、`fileRead(file, length, offset)`（`offset` が `null` なら今の位置から）、`fileWrite(file, bytes)`、`fileSeek(file, offset)`、`fileLength(file)`、`fileClose(file)`。`file` は `fileOpen` の口が返した値で、プログラムに見せる番号は `runtime/host.mjs` が別に作ります（知らない番号の検査もそこで行います）。`fileOpen` の口がなければ `readFile` / `writeFile` / `appendFile` の口で代わりに行います（`"r"` と `"r+"` は開くときに全体を読み、`"w"` と `"a"` は書くたびに書き足します）。`runtime/run-node.mjs` は Node の `fs` につなぎます。
+
+例: [examples/open_files.um](../examples/open_files.um)、[tests/threads/files.um](../tests/threads/files.um)。
+
+### フォルダとパス
+
+| 関数 | 動作 |
+| --- | --- |
+| `listDir(path: string): string[] \| null` | フォルダの中の名前（ファイルとフォルダ）。`.` と `..` は含まず、名前のバイト順に並べます。フォルダでなければ `null`。 |
+| `makeDir(path: string): bool` | フォルダを作ります。途中のフォルダもなければ作ります。すでにフォルダがあれば `true`。 |
+| `isDir(path: string): bool` | フォルダなら `true`。 |
+| `cwd(): string` | 今いるフォルダの絶対パス。 |
+| `exePath(): string` | 実行ファイルの絶対パス（Windows は `GetModuleFileNameW`、Linux は `/proc/self/exe`、macOS は `_NSGetExecutablePath`）。 |
+| `exeDir(): string` | 実行ファイルのあるフォルダ。同梱のファイルは `exeDir() + "/fonts/a.ttf"` のように探せます（Windows でも `/` で区切れます）。 |
+| `absPath(path: string): string` | 今いるフォルダとつないだ絶対パス。`.` と `..` を名前だけで取り除きます（ファイルがなくてもよく、リンクはたどりません）。空の名前などで作れなければ空。 |
+
+- **パスは OS の形のまま返します。** Windows では `C:\Users\...` のように `\` で区切り、macOS と Linux では `/` で区切ります。
+- **消す操作（ファイルやフォルダの削除）はありません。**
+- **wasm32 の口**: `listDir(path)`、`makeDir(path)`、`isDir(path)`（渡さなければ `null` / `false` / `false`）、`cwd`（文字列か関数。既定 `"/"`）、`exePath`（文字列。既定 `""`）、`absPath(path)`（渡さなければ `cwd` とつないで `/` で区切って正規化）。`runtime/run-node.mjs` は Node の `fs` と `process.cwd()` につなぎ、`exePath()` は `.wasm` の場所を返します。
+
+例: [examples/dirs_and_paths.um](../examples/dirs_and_paths.um)。
 
 ## 所有権
 
