@@ -1,0 +1,11 @@
+# Windows の runner（GPU なし）で、UM のせいではない理由で通らない試験（tests/run.ts の UM_TEST_KNOWN_FAILURES）。
+# 1 行に「試験の名前 | 理由」。ci.yml が Windows のときだけ読ませる。
+#
+# runner には GPU がなく、wgpu は Direct3D 12 のソフトウェアの描画（Microsoft Basic Render Driver = WARP）を GPU として使う。
+# WARP では、barrier のあとに共有配列（group.shared）を分岐（if やループ）の中で読む kernel が、dispatch の実行中に
+# プロセスごと落ちる（0xC0000005。例: `t[l] = xs[i]; group.barrier(); if (l == 0) { out[g] = t[5]; }`）。
+# 分岐の外で読むだけなら通る。同じ実行ファイルは本物の GPU（NVIDIA、Direct3D 12 と Vulkan）では通り、wgpu の検証の
+# 誤りも出ない。手元の Windows でも、アダプタに WARP を選ばせる（forceFallbackAdapter）と同じく落ちる。
+tests/metal/groups.um [wgpu] | WARP（ソフトウェアの D3D12）で、共有配列を分岐の中で読む kernel の実行中に落ちる
+tests/metal/groups_resident.um [wgpu] | WARP（ソフトウェアの D3D12）で、共有配列を分岐の中で読む kernel の実行中に落ちる
+tests/wgpu/prefer.um [wgpu] | WARP（ソフトウェアの D3D12）で、共有配列を分岐の中で読む kernel の実行中に落ちる

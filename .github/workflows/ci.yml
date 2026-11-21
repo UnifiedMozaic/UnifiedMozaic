@@ -73,7 +73,14 @@ jobs:
 
       # --- テスト ---
       - name: test
-        run: node tests/run.ts 2>&1 | tee test.log
+        run: |
+          # Windows の runner だけで、UM のせいではなく通らない試験の一覧（理由はファイルに書いてある）。
+          if [ "$RUNNER_OS" = Windows ]; then export UM_TEST_KNOWN_FAILURES=.github/ci/known-failures-windows.txt; fi
+          node tests/run.ts 2>&1 | tee test.log
+      - name: known failures
+        if: always()
+        # 既知の失敗として数えなかった試験を警告の注釈にする（黙って飛ばさない）。
+        run: "grep -E '^known ' test.log | sed 's/^known /::warning title=known failure (${{ matrix.name }})::/' || true"
       - name: report failures
         if: failure()
         # 落ちた試験と、ログの最後の行を注釈にする（実行の画面の一覧で、ログを開かずに読めるように）。
