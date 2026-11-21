@@ -64,7 +64,15 @@ node src/cli.ts check examples/structs.um --json
 
 # 生成される LLVM IR を見る（--emit-wgsl / --emit-msl で kernel のシェーダも書き出す）
 node src/cli.ts build examples/structs.um --emit-llvm -o structs.ll
+
+# リンクにファイルを足す（何度でも。Windows のリソース .res・オブジェクトファイル・ライブラリなど）
+node src/cli.ts build app.um --target host -o app --link-input app.res
 ```
+
+`--link-input <file>` は、ネイティブの実行ファイルを作るリンクに、そのファイルをそのまま足します（Windows・macOS・Linux とも）。
+Windows で exe にアイコンを付けるには、`llvm-rc`（LLVM に入っている。`C:\Program Files\LLVM\bin`）で作ったリソースを渡します
+（[docs/window.ja.md](window.ja.md) の「アイコン」）。リンクしないターゲット（`wasm32`・`wasm32-plugin`、Mac 以外での `arm64-macos`）では
+使わずに注意（note）を出します。ないファイルを指定するとエラーです。
 
 ブラウザでは `runtime/host.mjs` の `instantiate(bytes)` で読み込み、`export` した関数を呼びます。
 

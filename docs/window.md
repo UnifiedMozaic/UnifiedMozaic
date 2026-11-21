@@ -95,6 +95,9 @@ The Japanese page ([window.ja.md](window.ja.md)) has the full reference; this is
   `windowMaximize`, `windowMinimize`, `windowRestore`, `windowSetFullscreen`, `windowState`, `windowSetResizable`, `windowRaise`.
 - **Window icon**: `windowSetIcon(window, pixels: Buffer<u32>, width, height): bool` sets the icon of a running window
   (`0xAARRGGBB`, e.g. 32×32 or 64×64; returns `false` when the video driver has no window icons, such as `offscreen`).
+  The icon of the `.exe` file itself is a resource embedded at build time: compile `1 ICON "app.ico"` with `llvm-rc -fo app.res app.rc`
+  and pass it with `um build --target host --link-input app.res`. `--link-input` hands any file to the native link as is
+  (also on macOS and Linux) and is ignored with a note for targets that do not link (wasm32, wasm32-plugin, arm64-macos on a non-Mac).
 - **HiDPI and displays**: `windowPixelSize`, `windowPixelDensity`, `windowDisplayScale`, `windowDisplay`, `displayCount`, `displayBounds`,
   `displayUsableBounds`, `displayName`, `displayContentScale`, `displayRefreshRate`; events `PixelSizeChanged`, `ScaleChanged`, `DisplaysChanged`.
 - **Other events**: `Focus`, `MouseEnter`, `MouseLeave`, `Moved`, `StateChanged`, `Exposed` (redraw needed).

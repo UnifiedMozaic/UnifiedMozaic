@@ -107,7 +107,17 @@ node src/cli.ts build examples/window/paint.um --target host -o paint
 `Buffer` は手放してかまいません。ドライバが窓のアイコンを持たないとき（`offscreen` など）は `false` を返します。
 
 これは動いている窓のアイコンです。エクスプローラーなどに出る実行ファイル（.exe）のアイコンは別で、ビルドのときにリソースとして
-埋め込みます。
+埋め込みます。Windows では、`.ico` を指すリソースの定義を `llvm-rc` でリソース（`.res`）にして、`um build --link-input` で渡します。
+
+```powershell
+# app.rc の中身: 1 ICON "app.ico"（最初のアイコンが exe のアイコンになる）
+& "C:\Program Files\LLVM\bin\llvm-rc.exe" -fo app.res app.rc
+node src/cli.ts build app.um --target host -o app --link-input app.res
+```
+
+`.ico` には 16×16・32×32・48×48・256×256 などの大きさを入れておくと、OS が場面に合うものを選びます。
+macOS の `.app` のアイコン（`Info.plist` と `.icns`）と Linux のデスクトップのアイコン（`.desktop` ファイル）は、実行ファイルの外に置くものなので、
+`--link-input` は使いません（配布の形を作るときに置きます）。
 
 ### 高密度の画面（HiDPI）とディスプレイ
 
