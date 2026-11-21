@@ -3,7 +3,8 @@
 //   examples/*.um      `// expect: 行` と出力を照合。wasm32 で実行、ホストのネイティブでも実行。
 //                      `// stdin: 行` があれば、その行を標準入力として与える（何回でも書ける。1つにつき1行）。
 //                      ネイティブの実行は一時フォルダの中で行うので、writeFile で相対パスに書いたファイルはそこにできる。
-//                      wasm32 では、ファイルはメモリ上の入れ物に読み書きする。
+//                      wasm32 では、ファイルはメモリ上の入れ物に読み書きする（今いるフォルダは /um、実行ファイルは
+//                      /um/bin/prog.wasm。開いたままのファイルは readFile / writeFile の口で代わりに行われる）。
 //                      AddressSanitizer か valgrind があれば、メモリ検査つきでも実行する
 //                      （解放後使用・範囲外アクセス・二重解放・解放漏れを検出）。
 //                      arm64-macos はオブジェクト生成まで確認。
@@ -123,17 +124,45 @@ async function runWasm(src: string, tag: string): Promise<{ out: string[]; panic
   const out: string[] = [];
   // 標準入力は `// stdin:` の行。ファイルはメモリ上の入れ物（実行ごとに空から始まる）。
   const lines = stdinLines(src);
+  // 今いるフォルダは /um、実行ファイルは /um/bin/prog.wasm とする。名前は絶対パスにして入れ物の鍵にする。
   const disk = new Map<string, Uint8Array>();
+  const dirs = new Set<string>(['/', '/um', '/um/bin']);
+  const norm = (p: string): string => {
+    const parts: string[] = [];
+    for (const s of (p.startsWith('/') ? p : '/um/' + p).split('/')) {
+      if (s === '..') parts.pop();
+      else if (s !== '' && s !== '.') parts.push(s);
+    }
+    return '/' + parts.join('/');
+  };
+  const parent = (p: string): string => p.slice(0, Math.max(1, p.lastIndexOf('/')));
   const exports = await instantiate(readFileSync(wasm), {
     print: (s: string) => out.push(s),
     readLine: () => lines.shift() ?? null,
     inputReady: () => true,
-    readFile: (path: string) => disk.get(path) ?? null,
+    readFile: (path: string) => disk.get(norm(path)) ?? null,
     writeFile: (path: string, bytes: Uint8Array) => {
-      disk.set(path, bytes);
+      if (!dirs.has(parent(norm(path))) || dirs.has(norm(path))) return false;
+      disk.set(norm(path), bytes);
       return true;
     },
-    // fileSize / readFileRange / appendFile は、readFile / writeFile の口で代わりに行われる。
+    // fileSize / readFileRange / appendFile と開いたままのファイルは、readFile / writeFile の口で代わりに行われる。
+    listDir: (path: string) => {
+      const d = norm(path);
+      if (!dirs.has(d)) return null;
+      return [...disk.keys(), ...dirs].filter((k) => k !== d && parent(k) === d).map((k) => k.slice(k.lastIndexOf('/') + 1));
+    },
+    makeDir: (path: string) => {
+      const d = norm(path);
+      for (let p = d; !dirs.has(p); p = parent(p)) {
+        if (disk.has(p)) return false;
+        dirs.add(p);
+      }
+      return true;
+    },
+    isDir: (path: string) => dirs.has(norm(path)),
+    cwd: '/um',
+    exePath: '/um/bin/prog.wasm',
     eprint: () => {},
   });
   try {

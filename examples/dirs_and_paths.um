@@ -1,0 +1,51 @@
+// フォルダ（makeDir / listDir / isDir）と、パス（cwd / exePath / exeDir / absPath）。
+// 絶対パスの中身は OS や置き場所で変わるので、ここでは性質だけを確かめる。
+// expect: true
+// expect: true
+// expect: true
+// expect: 3
+// expect: a.txt
+// expect: b.txt
+// expect: sub
+// expect: true
+// expect: false
+// expect: true
+// expect: true
+// expect: true
+// expect: true
+// expect: true
+// expect: true
+// expect: true
+// expect: true
+
+export function main(): i32 {
+  // 途中のフォルダも作る。すでにあっても true。
+  print(makeDir("um_example_dir/sub/deeper"));
+  print(makeDir("um_example_dir/sub"));
+  const one: u8[] = [1];
+  print(writeFile("um_example_dir/b.txt", one) && writeFile("um_example_dir/a.txt", one));
+  // 名前の一覧（"." と ".." を除き、バイト順）。
+  const names = listDir("um_example_dir");
+  if (names != null) {
+    print(names.length);
+    for (const name of names) {
+      print(name);
+    }
+  }
+  print(isDir("um_example_dir/sub"));
+  print(isDir("um_example_dir/a.txt"));
+  print(listDir("um_example_no_such_dir") == null);
+
+  // 今いるフォルダと実行ファイルの場所（wasm32 では読み込む側が渡したもの）。
+  const here = cwd();
+  print(here.length > 0);
+  print(exePath().length > exeDir().length);
+  print(isDir(exeDir()));
+  // absPath: 今いるフォルダとつなぎ、"." と ".." を名前だけで取り除く（ファイルがなくてもよい）。
+  const p = absPath("um_example_dir/a.txt");
+  print(p.length > here.length);
+  print(absPath("um_example_dir/sub/../a.txt") == p);
+  print(absPath("./um_example_dir/./a.txt") == p);
+  print(absPath(p) == p);
+  return 0;
+}
