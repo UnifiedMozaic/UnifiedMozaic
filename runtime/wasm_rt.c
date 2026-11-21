@@ -305,8 +305,16 @@ void um_args(um_bytes **out, size_t *len) {
 
 void um_eprint(const char *data, size_t len) { um_host_eprint(data, len); }
 
-// ---- ファイルに直接読む（readFileInto） ----
+// ---- ファイルに直接読む・開いたままのファイル・フォルダとパス ----
+// 開いたファイルの番号はホスト（runtime/host.mjs）が管理する。知らない・閉じた番号には -2 が返るので、停止する（16）。
 
+int um_host_file_open(const char *path, size_t plen, int mode) __attribute__((import_module("env"), import_name("um_host_file_open")));
+// 読んだデータを用意して、そのバイト数を返す（失敗 -1、知らない番号 -2）。at が負なら今の位置から。
+int um_host_file_read(int id, long long at, int len) __attribute__((import_module("env"), import_name("um_host_file_read")));
+int um_host_file_write(int id, const unsigned char *data, size_t len) __attribute__((import_module("env"), import_name("um_host_file_write")));
+int um_host_file_seek(int id, long long offset) __attribute__((import_module("env"), import_name("um_host_file_seek")));
+long long um_host_file_length(int id) __attribute__((import_module("env"), import_name("um_host_file_length")));
+int um_host_file_close(int id) __attribute__((import_module("env"), import_name("um_host_file_close")));
 static size_t file_range(size_t blen, long long start, long long count, int line) {
   if (start < 0 || (unsigned long long)start > blen) um_panic(16, line);
   size_t rest = blen - (size_t)start;
@@ -333,6 +341,59 @@ int um_read_file_into(const char *path, size_t plen, long long offset, unsigned 
   if (got < 0) return 0;
   *out = got;
   return 1;
+}
+
+int um_file_open(const char *path, size_t plen, const char *mode, size_t mlen, int line) {
+  int how = -1;
+  if (mlen == 1 && mode[0] == 'r') how = 0;
+  else if (mlen == 1 && mode[0] == 'w') how = 1;
+  else if (mlen == 1 && mode[0] == 'a') how = 2;
+  else if (mlen == 2 && mode[0] == 'r' && mode[1] == '+') how = 3;
+  if (how < 0) um_panic(16, line);
+  int id = um_host_file_open(path, plen, how);
+  return id > 0 ? id : 0;
+}
+
+int um_file_read(int id, int positional, long long offset, unsigned char *buf, size_t blen, long long start, long long count,
+                 long long *out, int line) {
+  *out = 0;
+  size_t n = file_range(blen, start, count, line);
+  if (positional && offset < 0) {
+    // 番号だけは確かめる（ネイティブと同じく、知らない番号なら停止）。
+    if (um_host_file_length(id) == -2) um_panic(16, line);
+    return 0;
+  }
+  if (n > 0x7fffffff) n = 0x7fffffff;
+  int r = um_host_file_read(id, positional ? offset : -1, (int)n);
+  if (r == -2) um_panic(16, line);
+  long long got = take_into(r, buf + start, n);
+  if (got < 0) return 0;
+  *out = got;
+  return 1;
+}
+
+int um_file_write(int id, const unsigned char *data, size_t len, long long start, long long count, int line) {
+  size_t n = file_range(len, start, count, line);
+  int r = um_host_file_write(id, data + start, n);
+  if (r == -2) um_panic(16, line);
+  return r > 0;
+}
+
+int um_file_seek(int id, long long offset, int line) {
+  int r = um_host_file_seek(id, offset);
+  if (r == -2) um_panic(16, line);
+  return r > 0;
+}
+
+int um_file_length(int id, long long *out, int line) {
+  long long n = um_host_file_length(id);
+  if (n == -2) um_panic(16, line);
+  *out = n < 0 ? 0 : n;
+  return n >= 0;
+}
+
+void um_file_close(int id, int line) {
+  if (um_host_file_close(id) == -2) um_panic(16, line);
 }
 
 // ---- スレッド ----

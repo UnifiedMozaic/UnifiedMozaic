@@ -23,7 +23,7 @@ const PANIC_MESSAGES = {
   8: 'could not start a thread',
   9: 'readLine and inputReady can only be called from the main thread',
   10: 'invalid group size (it must be 1 to 1024, and groups times size must fit in u32)',
-  16: 'invalid file call (a range outside the array)',
+  16: 'invalid file call (an unknown or closed file, an unknown open mode, or a range outside the array)',
 };
 
 // src/wgsl.ts の WORKGROUP_SIZE と揃えること。
@@ -207,6 +207,12 @@ class GpuRunner {
  *   appendFile?: (path: string, bytes: Uint8Array) => boolean,
  *   args?: string[],
  *   eprint?: (line: string) => void,
+ *   fileOpen?: (path: string, mode: 'r' | 'w' | 'a' | 'r+') => unknown,
+ *   fileRead?: (file: unknown, length: number, offset: number | null) => Uint8Array | null,
+ *   fileWrite?: (file: unknown, bytes: Uint8Array) => boolean,
+ *   fileSeek?: (file: unknown, offset: number) => boolean,
+ *   fileLength?: (file: unknown) => number | bigint | null,
+ *   fileClose?: (file: unknown) => void,
  * }} [options] print の出力先（関数を直接渡してもよい）と GPU の設定、入出力の口。
  *   gpu: false で GPU を使わない。gpuThreshold: 自動判断で GPU に回す最小の要素数（既定 4096）。
  *   readLine: プログラムの readLine() に渡す次の1行（改行を除く）を返す。もうなければ null。同期的に返すこと。
@@ -221,6 +227,10 @@ class GpuRunner {
  *   args: プログラムの args() が返す引数（プログラム名を含めない）。渡さなければ空。
  *   eprint: プログラムの eprint() の出力先。渡さなければ console.error。
  *   readFileInto() は readFileRange の口（なければ readFile の口）を通り、データを Buffer へ直接写す。
+ *   fileOpen / fileRead / fileWrite / fileSeek / fileLength / fileClose: 開いたままのファイル。fileOpen が返した値（null 以外）を
+ *     ほかの口に渡す（プログラムに見せる番号は、ここで別に作る）。fileRead の offset が null なら今の位置から読み、
+ *     数なら offset から読んで位置は動かさない。fileOpen の口がなければ、readFile / writeFile / appendFile の口で代わりに行う
+ *     （"r" と "r+" は開くときに全体を読む。"w" と "a" は書くたびに書き足す。"w" / "a" の fileSeek は false）。
  * @returns {Promise<WebAssembly.Exports & { um_gpu?: { available: boolean, dispatches: () => number } }>}
  */
 export async function instantiate(bytes, options = {}) {
@@ -255,6 +265,25 @@ export async function instantiate(bytes, options = {}) {
       return null;
     }
   };
+
+  // 書き足す。appendFile の口がなければ、readFile / writeFile の口で全体を書き直す。
+  const appendBytes = (path, bytes) => {
+    try {
+      if (options.appendFile) return !!options.appendFile(path, bytes);
+      if (!options.writeFile) return false;
+      const old = options.readFile ? options.readFile(path) : null;
+      if (!(old instanceof Uint8Array)) return !!options.writeFile(path, bytes);
+      const joined = new Uint8Array(old.length + bytes.length);
+      joined.set(old);
+      joined.set(bytes, old.length);
+      return !!options.writeFile(path, joined);
+    } catch {
+      return false;
+    }
+  };
+  // 開いたままのファイル（プログラムに見せる番号 → 口の値か、代わりに行うときの状態）。
+  const files = new Map();
+  let nextFile = 1;
 
   const env = {
     um_print_i64: (v) => print(BigInt.asIntN(64, v).toString()),
@@ -358,24 +387,125 @@ export async function instantiate(bytes, options = {}) {
       const path = pathOf(ptr, len);
       if (path === null) return 0;
       const bytes = mem(dataPtr, dataLen).slice();
-      try {
-        if (options.appendFile) return options.appendFile(path, bytes) ? 1 : 0;
-        if (!options.writeFile) return 0;
-        const old = options.readFile ? options.readFile(path) : null;
-        if (!(old instanceof Uint8Array)) return options.writeFile(path, bytes) ? 1 : 0;
-        const joined = new Uint8Array(old.length + bytes.length);
-        joined.set(old);
-        joined.set(bytes, old.length);
-        return options.writeFile(path, joined) ? 1 : 0;
-      } catch {
-        return 0;
-      }
+      return appendBytes(path, bytes) ? 1 : 0;
     },
     um_host_argc: () => (Array.isArray(options.args) ? options.args.length : 0),
     um_host_arg: (i) => prepare(new TextEncoder().encode(String(options.args[i]))),
     um_host_eprint: (ptr, len) => {
       const text = new TextDecoder().decode(mem(ptr, len).slice());
       (options.eprint ?? ((s) => console.error(s)))(text);
+    },
+    // 開いたままのファイル。知らない・閉じた番号には -2 を返す（wasm 側が停止する）。
+    um_host_file_open: (ptr, len, how) => {
+      const path = pathOf(ptr, len);
+      const mode = ['r', 'w', 'a', 'r+'][how];
+      if (path === null || !mode) return 0;
+      let entry;
+      try {
+        if (options.fileOpen) {
+          const h = options.fileOpen(path, mode);
+          if (h === null || h === undefined || h === false) return 0;
+          entry = { h };
+        } else if (mode === 'r' || mode === 'r+') {
+          const data = options.readFile ? options.readFile(path) : null;
+          if (!(data instanceof Uint8Array)) return 0;
+          entry = { emu: mode, path, data: data.slice(), pos: 0 };
+        } else {
+          const ok = mode === 'w' ? options.writeFile && options.writeFile(path, new Uint8Array(0)) : appendBytes(path, new Uint8Array(0));
+          if (!ok) return 0;
+          entry = { emu: mode, path };
+        }
+      } catch {
+        return 0;
+      }
+      if (nextFile > 0x7fffffff) return 0;
+      files.set(nextFile, entry);
+      return nextFile++;
+    },
+    um_host_file_read: (id, at, length) => {
+      const e = files.get(id);
+      if (!e) return -2;
+      try {
+        let data;
+        if (e.emu) {
+          if (e.emu !== 'r' && e.emu !== 'r+') return -1;
+          const size = e.data.length;
+          const from = at < 0n ? Math.min(e.pos, size) : Number(at > BigInt(size) ? BigInt(size) : at);
+          data = e.data.subarray(from, from + length);
+          if (at < 0n) e.pos = from + data.length;
+        } else {
+          if (!options.fileRead) return -1;
+          data = options.fileRead(e.h, length, at < 0n ? null : Number(at));
+        }
+        if (data instanceof Uint8Array && data.length > length) data = data.subarray(0, length);
+        return prepare(data);
+      } catch {
+        return -1;
+      }
+    },
+    um_host_file_write: (id, ptr, len) => {
+      const e = files.get(id);
+      if (!e) return -2;
+      const bytes = mem(ptr, len).slice();
+      try {
+        if (!e.emu) return options.fileWrite && options.fileWrite(e.h, bytes) ? 1 : 0;
+        if (e.emu === 'r') return 0;
+        if (e.emu !== 'r+') return appendBytes(e.path, bytes) ? 1 : 0;
+        // 読み書き: 今の位置に上書きし（足りなければ伸ばし）、全体を書き戻す。
+        const end = e.pos + bytes.length;
+        if (end > e.data.length) {
+          const grown = new Uint8Array(end);
+          grown.set(e.data);
+          e.data = grown;
+        }
+        e.data.set(bytes, e.pos);
+        e.pos = end;
+        return options.writeFile && options.writeFile(e.path, e.data.slice()) ? 1 : 0;
+      } catch {
+        return 0;
+      }
+    },
+    um_host_file_seek: (id, offset) => {
+      const e = files.get(id);
+      if (!e) return -2;
+      if (offset < 0n || offset > BigInt(Number.MAX_SAFE_INTEGER)) return 0;
+      try {
+        if (!e.emu) return options.fileSeek && options.fileSeek(e.h, Number(offset)) ? 1 : 0;
+        if (e.emu !== 'r' && e.emu !== 'r+') return 0;
+        e.pos = Number(offset);
+        return 1;
+      } catch {
+        return 0;
+      }
+    },
+    um_host_file_length: (id) => {
+      const e = files.get(id);
+      if (!e) return -2n;
+      try {
+        let n;
+        if (!e.emu) n = options.fileLength ? options.fileLength(e.h) : null;
+        else if (e.data) n = e.data.length;
+        else {
+          const all = options.readFile ? options.readFile(e.path) : null;
+          n = all instanceof Uint8Array ? all.length : null;
+        }
+        if (n === null || n === undefined) return -1n;
+        const b = BigInt(n);
+        return b < 0n || b > 0x7fffffffffffffffn ? -1n : b;
+      } catch {
+        return -1n;
+      }
+    },
+    um_host_file_close: (id) => {
+      const e = files.get(id);
+      if (!e) return -2;
+      files.delete(id);
+      try {
+        if (!e.emu && options.fileClose) options.fileClose(e.h);
+      } catch {
+        // 閉じられなくても、番号はもう使えない。
+      }
+      return 0;
     },
     um_gpu_available: () => (runner ? 1 : 0),
     // 自動判断: いまは「GPU があり、要素数がしきい値以上」なら GPU。実測による補正は今後入れる。

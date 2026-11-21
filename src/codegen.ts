@@ -1718,7 +1718,9 @@ class ModuleGen {
     out.push(`declare i32 @um_read_file(ptr, ${this.usz}, ptr, ptr) #0`, `declare i32 @um_write_file(ptr, ${this.usz}, ptr, ${this.usz}) #0`);
     out.push(`declare i32 @um_file_size(ptr, ${this.usz}, ptr) #0`, `declare i32 @um_read_file_range(ptr, ${this.usz}, i64, i64, ptr, ptr) #0`);
     out.push(`declare i32 @um_append_file(ptr, ${this.usz}, ptr, ${this.usz}) #0`, 'declare void @um_args(ptr, ptr) #0', `declare void @um_eprint(ptr, ${this.usz}) #0`);
-    out.push(`declare i32 @um_read_file_into(ptr, ${this.usz}, i64, ptr, ${this.usz}, i64, i64, ptr, i32) #0`);
+    out.push(`declare i32 @um_read_file_into(ptr, ${this.usz}, i64, ptr, ${this.usz}, i64, i64, ptr, i32) #0`, `declare i32 @um_file_open(ptr, ${this.usz}, ptr, ${this.usz}, i32) #0`);
+    out.push(`declare i32 @um_file_read(i32, i32, i64, ptr, ${this.usz}, i64, i64, ptr, i32) #0`, `declare i32 @um_file_write(i32, ptr, ${this.usz}, i64, i64, i32) #0`);
+    out.push('declare i32 @um_file_seek(i32, i64, i32) #0', 'declare i32 @um_file_length(i32, ptr, i32) #0', 'declare void @um_file_close(i32, i32) #0');
     if (this.target === 'native') out.push('declare void @um_set_args(i32, ptr) #0');
     // ウィンドウ（runtime/window.c）。使ったときだけ宣言する。ドライバはこの宣言を見て window.c と SDL3 をリンクする。
     if (this.usesWindow) {
@@ -3529,7 +3531,7 @@ class FnGen {
         this.emit(`call void @um_eprint(ptr ${data}, ${usz} ${len})`);
         return '';
       }
-      // ファイルに直接読む。範囲の検査はランタイムが行い、違反なら行番号つきで停止する（16）。
+      // ファイルに直接読む・開いたままのファイル。番号と範囲の検査はランタイムが行い、違反なら行番号つきで停止する（16）。
       case 'readFileInto': {
         const pathParts = this.heapParts(e.args[0].expr);
         const off = this.expr(e.args[1].expr);
@@ -3542,6 +3544,61 @@ class FnGen {
         const ok = this.tmp();
         this.emit(`${ok} = call i32 @um_read_file_into(ptr ${path}, ${usz} ${plen}, i64 ${off}, ptr ${data}, ${usz} ${len}, i64 ${boff}, i64 ${want}, ptr ${slot}, i32 ${e.pos.line})`);
         return this.optionalI64(e, ok, slot);
+      }
+      case 'fileOpen': {
+        const pathParts = this.heapParts(e.args[0].expr);
+        const modeParts = this.heapParts(e.args[1].expr);
+        const [path, plen] = pathParts();
+        const [mode, mlen] = modeParts();
+        const id = this.tmp();
+        this.emit(`${id} = call i32 @um_file_open(ptr ${path}, ${usz} ${plen}, ptr ${mode}, ${usz} ${mlen}, i32 ${e.pos.line})`);
+        const t = llTy(e.ty!);
+        const some = this.tmp();
+        const a = this.tmp();
+        const b = this.tmp();
+        this.emit(`${some} = icmp ne i32 ${id}, 0`);
+        this.emit(`${a} = insertvalue ${t} undef, i1 ${some}, 0`);
+        this.emit(`${b} = insertvalue ${t} ${a}, i32 ${id}, 1`);
+        return b;
+      }
+      case 'fileRead':
+      case 'fileReadAt': {
+        const at = name === 'fileReadAt' ? 2 : 1;
+        const h = this.expr(e.args[0].expr);
+        const off = at === 2 ? this.expr(e.args[1].expr) : '0';
+        const bufParts = this.heapParts(e.args[at].expr);
+        const start = e.args.length > at + 1 ? this.expr(e.args[at + 1].expr) : '0';
+        const count = e.args.length > at + 1 ? this.expr(e.args[at + 2].expr) : '-1';
+        const [data, len] = bufParts();
+        const slot = this.i64Slot();
+        const ok = this.tmp();
+        this.emit(`${ok} = call i32 @um_file_read(i32 ${h}, i32 ${at === 2 ? 1 : 0}, i64 ${off}, ptr ${data}, ${usz} ${len}, i64 ${start}, i64 ${count}, ptr ${slot}, i32 ${e.pos.line})`);
+        return this.optionalI64(e, ok, slot);
+      }
+      case 'fileWrite': {
+        const h = this.expr(e.args[0].expr);
+        const dataParts = this.heapParts(e.args[1].expr);
+        const start = e.args.length > 2 ? this.expr(e.args[2].expr) : '0';
+        const count = e.args.length > 2 ? this.expr(e.args[3].expr) : '-1';
+        const [data, len] = dataParts();
+        return flag(`@um_file_write(i32 ${h}, ptr ${data}, ${usz} ${len}, i64 ${start}, i64 ${count}, i32 ${e.pos.line})`);
+      }
+      case 'fileSeek': {
+        const h = this.expr(e.args[0].expr);
+        const off = this.expr(e.args[1].expr);
+        return flag(`@um_file_seek(i32 ${h}, i64 ${off}, i32 ${e.pos.line})`);
+      }
+      case 'fileLength': {
+        const h = this.expr(e.args[0].expr);
+        const slot = this.i64Slot();
+        const ok = this.tmp();
+        this.emit(`${ok} = call i32 @um_file_length(i32 ${h}, ptr ${slot}, i32 ${e.pos.line})`);
+        return this.optionalI64(e, ok, slot);
+      }
+      case 'fileClose': {
+        const h = this.expr(e.args[0].expr);
+        this.emit(`call void @um_file_close(i32 ${h}, i32 ${e.pos.line})`);
+        return '';
       }
       // ウィンドウ（runtime/window.c）。メインスレッドの確認と引数の検査はランタイムが行い、違反なら行番号つきで停止する。
       case 'windowOpen': {

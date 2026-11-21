@@ -170,7 +170,7 @@ _Noreturn void um_panic(int32_t code, int32_t line) {
     case 13: msg = "invalid wasm call (an unknown or freed module / instance, or a range outside the array)"; break;
     case 14: msg = "a wasm instance was freed while another thread was using it"; break;
     case 15: msg = "an exported function of a wasm32-plugin module replaced a Buffer that the host lent it"; break;
-    case 16: msg = "invalid file call (a range outside the array)"; break;
+    case 16: msg = "invalid file call (an unknown or closed file, an unknown open mode, or a range outside the array)"; break;
     case 20: msg = "invalid media call (an unknown or closed reader / writer)"; break;
     case 21: msg = "a media reader or writer was closed while another thread was using it"; break;
   }
@@ -1306,8 +1306,8 @@ void um_eprint(const char *data, size_t len) {
   funlockfile(stderr);
 }
 
-// ---- ファイルに直接読む（readFileInto） ----
-// 配列の範囲の誤りは、プログラムの誤りなので停止する（16）。読めなければ null。
+// ---- ファイルに直接読む（readFileInto）と、開いたままのファイル（fileOpen など） ----
+// 配列の範囲の誤りや、知らない・閉じた番号は、プログラムの誤りなので停止する（16）。読み書きの失敗は null / false。
 
 // 配列（長さ blen）の start 番目から count 個（負なら終わりまで）が範囲に入っているか確かめ、個数を返す。
 static size_t um_file_range(size_t blen, int64_t start, int64_t count, int32_t line) {
@@ -1356,4 +1356,179 @@ int32_t um_read_file_into(const char *path, size_t plen, int64_t offset, unsigne
   if (got < 0) return 0;
   *out = got;
   return 1;
+}
+
+// 開いたファイルの表。番号は (世代 << 16) | (場所 + 1)。閉じると世代が進むので、古い番号は使えなくなる。
+// 操作のあいだは項目の lock を持つ（同じ番号の操作は1つずつ）。表の lock は番号を確かめるあいだだけ持つ。
+#define UM_FILES_MAX 4096
+enum { UM_FILE_FREE, UM_FILE_OPEN, UM_FILE_CLOSING };
+typedef struct {
+  pthread_mutex_t lock;
+  int ready;  // lock を初期化した
+  int state;
+  uint32_t gen;
+  int refs;  // 番号を確かめて、操作を始めようとしている（している）数
+  int fd;
+} um_file;
+static um_file um_files[UM_FILES_MAX];
+static pthread_mutex_t um_files_lock = PTHREAD_MUTEX_INITIALIZER;
+static const pthread_mutex_t um_mutex_init = PTHREAD_MUTEX_INITIALIZER;
+
+// 番号を確かめ、項目の lock を取って返す。終わったら um_file_put。
+static um_file *um_file_get(int32_t id, int32_t line) {
+  uint32_t slot = ((uint32_t)id & 0xffff) - 1;
+  uint32_t gen = ((uint32_t)id >> 16) & 0x7fff;
+  pthread_mutex_lock(&um_files_lock);
+  um_file *f = id > 0 && slot < UM_FILES_MAX ? &um_files[slot] : NULL;
+  if (!f || f->state != UM_FILE_OPEN || f->gen != gen) {
+    pthread_mutex_unlock(&um_files_lock);
+    um_panic(16, line);
+  }
+  f->refs++;
+  pthread_mutex_unlock(&um_files_lock);
+  pthread_mutex_lock(&f->lock);
+  if (f->fd < 0) um_panic(16, line);  // 待つあいだに、ほかのスレッドが閉じた
+  return f;
+}
+
+static void um_file_put(um_file *f) {
+  pthread_mutex_unlock(&f->lock);
+  pthread_mutex_lock(&um_files_lock);
+  if (--f->refs == 0 && f->state == UM_FILE_CLOSING && f->fd < 0) f->state = UM_FILE_FREE;
+  pthread_mutex_unlock(&um_files_lock);
+}
+
+// mode: "r" 読む / "w" 作って（あれば中身を捨てて）書く / "a" 終わりに書き足す（なければ作る）/ "r+" 読み書き（あるファイル）。
+int32_t um_file_open(const char *path, size_t plen, const char *mode, size_t mlen, int32_t line) {
+  int how = -1;
+  if (mlen == 1 && mode[0] == 'r') how = 0;
+  else if (mlen == 1 && mode[0] == 'w') how = 1;
+  else if (mlen == 1 && mode[0] == 'a') how = 2;
+  else if (mlen == 2 && mode[0] == 'r' && mode[1] == '+') how = 3;
+  if (how < 0) um_panic(16, line);
+  char *z = path_copy(path, plen);
+  if (!z) return 0;
+#ifdef _WIN32
+  WCHAR *w = os_wide(z);
+  free(z);
+  if (!w) return 0;
+  static const int flags[4] = {_O_RDONLY, _O_WRONLY | _O_CREAT | _O_TRUNC, _O_WRONLY | _O_CREAT | _O_APPEND, _O_RDWR};
+  int fd = _wopen(w, flags[how] | _O_BINARY | _O_NOINHERIT, _S_IREAD | _S_IWRITE);
+  free(w);
+#else
+  static const int flags[4] = {O_RDONLY, O_WRONLY | O_CREAT | O_TRUNC, O_WRONLY | O_CREAT | O_APPEND, O_RDWR};
+  int fd = open(z, flags[how] | O_CLOEXEC, 0644);
+  free(z);
+#endif
+  if (fd < 0) return 0;
+  int64_t size = 0;
+  if (os_fstat(fd, &size) == OS_DIR) {
+    os_close(fd);
+    return 0;
+  }
+  pthread_mutex_lock(&um_files_lock);
+  for (uint32_t i = 0; i < UM_FILES_MAX; i++) {
+    um_file *f = &um_files[i];
+    if (f->state != UM_FILE_FREE) continue;
+    if (!f->ready) {
+      f->lock = um_mutex_init;
+      f->ready = 1;
+    }
+    f->state = UM_FILE_OPEN;
+    f->fd = fd;
+    f->gen = (f->gen + 1) & 0x7fff;
+    if (f->gen == 0) f->gen = 1;
+    int32_t id = (int32_t)((f->gen << 16) | (i + 1));
+    pthread_mutex_unlock(&um_files_lock);
+    return id;
+  }
+  pthread_mutex_unlock(&um_files_lock);
+  os_close(fd);
+  return 0;  // 開いているファイルが多すぎる
+}
+
+int32_t um_file_read(int32_t id, int32_t positional, int64_t offset, unsigned char *buf, size_t blen, int64_t start, int64_t count,
+                     int64_t *out, int32_t line) {
+  *out = 0;
+  size_t n = um_file_range(blen, start, count, line);
+  um_file *f = um_file_get(id, line);
+  int64_t got = -1;
+  if (!positional) {
+    got = um_read_loop(f->fd, 0, 0, buf + start, n);
+  } else if (offset >= 0) {
+#ifdef _WIN32
+    // Windows の os_pread は位置を動かすので、元に戻す。
+    int64_t at = _lseeki64(f->fd, 0, SEEK_CUR);
+    if (at >= 0) {
+      got = um_read_loop(f->fd, 1, offset, buf + start, n);
+      _lseeki64(f->fd, at, SEEK_SET);
+    }
+#else
+    got = um_read_loop(f->fd, 1, offset, buf + start, n);
+#endif
+  }
+  um_file_put(f);
+  if (got < 0) return 0;
+  *out = got;
+  return 1;
+}
+
+int32_t um_file_write(int32_t id, const unsigned char *data, size_t len, int64_t start, int64_t count, int32_t line) {
+  size_t n = um_file_range(len, start, count, line);
+  um_file *f = um_file_get(id, line);
+  size_t done = 0;
+  int ok = 1;
+  while (done < n) {
+    ssize_t r = os_write(f->fd, data + start + done, n - done > UM_IO_CHUNK ? UM_IO_CHUNK : n - done);
+    if (r < 0 && errno == EINTR) continue;
+    if (r <= 0) {
+      ok = 0;
+      break;
+    }
+    done += (size_t)r;
+  }
+  um_file_put(f);
+  return ok;
+}
+
+int32_t um_file_seek(int32_t id, int64_t offset, int32_t line) {
+  um_file *f = um_file_get(id, line);
+#ifdef _WIN32
+  int ok = offset >= 0 && _lseeki64(f->fd, offset, SEEK_SET) >= 0;
+#else
+  int ok = offset >= 0 && lseek(f->fd, (off_t)offset, SEEK_SET) >= 0;
+#endif
+  um_file_put(f);
+  return ok;
+}
+
+int32_t um_file_length(int32_t id, int64_t *out, int32_t line) {
+  *out = 0;
+  um_file *f = um_file_get(id, line);
+  int64_t size = 0;
+  int ok = os_fstat(f->fd, &size) == OS_FILE;
+  um_file_put(f);
+  if (ok) *out = size;
+  return ok;
+}
+
+void um_file_close(int32_t id, int32_t line) {
+  uint32_t slot = ((uint32_t)id & 0xffff) - 1;
+  uint32_t gen = ((uint32_t)id >> 16) & 0x7fff;
+  pthread_mutex_lock(&um_files_lock);
+  um_file *f = id > 0 && slot < UM_FILES_MAX ? &um_files[slot] : NULL;
+  if (!f || f->state != UM_FILE_OPEN || f->gen != gen) {
+    pthread_mutex_unlock(&um_files_lock);
+    um_panic(16, line);
+  }
+  f->state = UM_FILE_CLOSING;
+  pthread_mutex_unlock(&um_files_lock);
+  // ほかのスレッドの操作が終わるのを待ってから閉じる。
+  pthread_mutex_lock(&f->lock);
+  os_close(f->fd);
+  f->fd = -1;
+  pthread_mutex_unlock(&f->lock);
+  pthread_mutex_lock(&um_files_lock);
+  if (f->refs == 0) f->state = UM_FILE_FREE;
+  pthread_mutex_unlock(&um_files_lock);
 }

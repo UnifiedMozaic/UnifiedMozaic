@@ -184,7 +184,7 @@ export function simdInfo(t: Ty | undefined): { elem: Ty & { k: 'int' | 'float' }
  * 型検査は呼び出しの名前を `__io_名前` に書き換え、コード生成がランタイムの呼び出しにする。kernel の中では使えない。
  */
 const IO_BUILTINS = new Set(['readLine', 'inputReady', 'clock', 'stringFromBytes', 'readFile', 'writeFile', 'fileSize', 'readFileRange', 'appendFile', 'args', 'eprint',
-  'readFileInto',
+  'readFileInto', 'fileOpen', 'fileRead', 'fileReadAt', 'fileWrite', 'fileSeek', 'fileLength', 'fileClose',
   'windowOpen', 'windowClose', 'windowPoll', 'windowPresent', 'windowPresentRect', 'windowUpdateRect', 'windowCtl', 'windowCtlF', 'windowSetText', 'windowGetText',
   'audioWrite',
   'wasmCompile', 'wasmFreeModule', 'wasmExportList', 'wasmInstantiate', 'wasmFreeInstance', 'wasmInvoke', 'wasmRead', 'wasmWrite',
@@ -2731,6 +2731,12 @@ class Checker {
    *   eprint(text: string): void           標準エラー出力に1行。
    *   readFileInto(path: string, offset: i64, buf: mut u8 の配列か Buffer, bufOffset: i64, length: i64): i64 | null
    *       offset から最大 length バイトを buf の bufOffset 番目からに直接読み、読めたバイト数を返す。
+   * 開いたままのファイル（番号は i32。どのスレッドからも呼べる。同じ番号の操作は1つずつ行う）:
+   *   fileOpen(path: string, mode: string): i32 | null   mode は "r"（読む）/ "w"（作って書く）/ "a"（書き足す）/ "r+"（読み書き）。
+   *   fileRead(file: i32, buf: mut u8 の配列か Buffer [, start: i64, count: i64]): i64 | null  今の位置から読む。終わりでは 0。
+   *   fileReadAt(file: i32, offset: i64, buf: mut ... [, start, count]): i64 | null  offset から読む（位置は動かさない）。
+   *   fileWrite(file: i32, data: u8 の配列か Buffer か文字列 [, start, count]): bool
+   *   fileSeek(file: i32, offset: i64): bool / fileLength(file: i32): i64 | null / fileClose(file: i32): void
    * ウィンドウ（ネイティブだけ。メインスレッドから呼ぶ。runtime/window.c が SDL3 で実装する）:
    *   windowOpen(title: string, width: i32, height: i32): i32 | null  ウィンドウを開き、その番号を返す。
    *   windowClose(window: i32): void       ウィンドウを閉じる。
@@ -2804,6 +2810,13 @@ class Checker {
         params: name === 'readFileInto' ? [['path', STR], ['offset', I64], ['buf', this.byteArg(e, 2, name, false)], ['bufOffset', I64], ['length', I64]] : [],
         ret: this.optionalOf(I64, e.pos), mut: [2],
       },
+      fileOpen: { params: [['path', STR], ['mode', STR]], ret: this.optionalOf(I32, e.pos) },
+      fileRead: { params: name === 'fileRead' ? this.fileCopyParams(e, 1, name, false) : [], ret: this.optionalOf(I64, e.pos), mut: [1] },
+      fileReadAt: { params: name === 'fileReadAt' ? this.fileCopyParams(e, 2, name, false) : [], ret: this.optionalOf(I64, e.pos), mut: [2] },
+      fileWrite: { params: name === 'fileWrite' ? this.fileCopyParams(e, 1, name, true) : [], ret: BOOL },
+      fileSeek: { params: [['file', I32], ['offset', I64]], ret: BOOL },
+      fileLength: { params: [['file', I32]], ret: this.optionalOf(I64, e.pos) },
+      fileClose: { params: [['file', I32]], ret: VOID },
       windowOpen: { params: [['title', STR], ['width', I32], ['height', I32]], ret: this.optionalOf(I32, e.pos) },
       windowClose: { params: [['window', I32]], ret: VOID },
       windowPoll: { params: [['event', { k: 'heap', elem: I32, buffer: true }], ['timeoutMs', I32]], ret: BOOL, mut: [0] },
@@ -2880,6 +2893,16 @@ class Checker {
     this.checkArgs(sig, e.args, e.pos);
     e.callee = `__io_${name}`;
     return shape.ret;
+  }
+
+  /**
+   * fileRead / fileReadAt / fileWrite の引数。at 番目が写す配列で、その前は番号（と fileReadAt の位置）。
+   * 後ろの start と count は省略できる（省略は配列全体）。
+   */
+  fileCopyParams(e: Expr & { kind: 'call' }, at: number, name: string, allowStr: boolean): [string, Ty][] {
+    const head: [string, Ty][] = at === 2 ? [['file', I32], ['offset', I64]] : [['file', I32]];
+    const tail: [string, Ty][] = e.args.length > at + 1 ? [['start', I64], ['count', I64]] : [];
+    return [...head, [allowStr ? 'data' : 'buf', this.byteArg(e, at, name, allowStr)], ...tail];
   }
 
   /**

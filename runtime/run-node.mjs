@@ -3,7 +3,10 @@
 // `--` のあとの引数は、プログラムの args() に渡す。
 // 標準入力の行は readLine() に、ファイルの読み書きは readFile() / writeFile() にそのままつなぐ
 // （ネイティブのバイナリと同じく、プログラムが指定したファイルを読み書きできる）。
-import { appendFileSync, closeSync, fstatSync, openSync, readFileSync, readSync, statSync, writeFileSync } from 'node:fs';
+// 開いたままのファイルもつなぐ。
+import {
+  appendFileSync, closeSync, fstatSync, openSync, readFileSync, readSync, statSync, writeFileSync, writeSync,
+} from 'node:fs';
 import { instantiate, UmPanic } from './host.mjs';
 
 const argv = process.argv.slice(2);
@@ -114,6 +117,49 @@ const exports = await instantiate(readFileSync(file), {
       return false;
     }
   },
+  // Node には位置を動かす関数がないので、位置はここで覚えておき、読み書きのたびに渡す（"a" は常に終わりへ）。
+  fileOpen: (path, mode) => {
+    try {
+      const fd = openSync(path, mode);
+      if (fstatSync(fd).isDirectory()) {
+        closeSync(fd);
+        return null;
+      }
+      return { fd, pos: 0, append: mode === 'a' };
+    } catch {
+      return null;
+    }
+  },
+  fileRead: (f, length, offset) => {
+    const buf = new Uint8Array(length);
+    let n = 0;
+    const at = offset ?? f.pos;
+    while (n < length) {
+      const r = readSync(f.fd, buf, n, length - n, at + n);
+      if (r <= 0) break;
+      n += r;
+    }
+    if (offset === null) f.pos += n;
+    return buf.subarray(0, n);
+  },
+  fileWrite: (f, bytes) => {
+    let n = 0;
+    while (n < bytes.length) {
+      n += writeSync(f.fd, bytes, n, bytes.length - n, f.append ? null : f.pos + n);
+    }
+    if (!f.append) f.pos += n;
+    return true;
+  },
+  fileSeek: (f, offset) => {
+    if (f.append) return false;
+    f.pos = offset;
+    return true;
+  },
+  fileLength: (f) => {
+    const st = fstatSync(f.fd, { bigint: true });
+    return st.isFile() ? st.size : null;
+  },
+  fileClose: (f) => closeSync(f.fd),
   args: programArgs,
   eprint: (line) => process.stderr.write(line + '\n'),
 });
