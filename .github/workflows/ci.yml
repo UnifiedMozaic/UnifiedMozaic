@@ -69,15 +69,12 @@ jobs:
           path: ~/um-deps
           key: um-deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/ci/install-deps.sh') }}
       - name: deps
-        run: bash .github/ci/install-deps.sh
+        run: bash .github/ci/install-deps.sh 2>&1 | tee deps.log
 
       # --- テスト ---
       - name: test
-        run: |
-          set -o pipefail
-          node tests/run.ts 2>&1 | tee test.log
-      - name: failed tests
+        run: node tests/run.ts 2>&1 | tee test.log
+      - name: report failures
         if: failure()
-        run: |
-          # 落ちた試験を注釈にする（実行の画面の一覧で見えるように）。
-          grep -E '^FAIL ' test.log | sed 's/^FAIL /::error title=test failed (${{ matrix.name }})::/' || true
+        # 落ちた試験と、ログの最後の行を注釈にする（実行の画面の一覧で、ログを開かずに読めるように）。
+        run: bash .github/ci/report-failures.sh ${{ matrix.name }} deps.log test.log
