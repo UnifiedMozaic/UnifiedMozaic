@@ -1,0 +1,10 @@
+// 閉じた番号を使うと停止する（つながらない URL なので、外へは出ない）。
+// expect: closed
+// panic: invalid HTTP call (an unknown or closed request) (line 9)
+export function main(): i32 {
+  const id = httpStart("GET", "ftp://127.0.0.1/", "", "", 0);
+  httpClose(id);
+  print("closed");
+  // 次の行で停止する。
+  return httpState(id);
+}

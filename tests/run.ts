@@ -34,6 +34,8 @@
 //                      画面と音のデバイスなしに実行し、`// expect:` か `// panic:` と照合する（`// args:` はコマンドライン引数）。
 //                      `// expect:` のない例はビルドだけ確かめる。SDL3 が見つからなければ飛ばす。
 //   examples/media/*.um 動画・音声の組み込み（FFmpeg。ネイティブだけ）。`// expect:` と照合する。
+//   tests/http/*.um    HTTP の組み込み（ネイティブ）。tests/http/server.mjs を手元（127.0.0.1）に立て、その場所を UM_TEST_HTTP で渡して
+//                      実行し、`// expect:` か `// panic:` と照合する（外へは出ない）。AddressSanitizer があればメモリ検査つきでも実行する。
 //   tests/media/*.um   同じく。`// expect:` か `// panic:` と照合する。素材は ffmpeg のコマンドで一時フォルダに作る
 //                      （makeMediaClips）。FFmpeg のライブラリか ffmpeg のコマンドが見つからなければ飛ばす。
 //
@@ -774,6 +776,106 @@ if (windows) {
       await (exports.main as () => unknown)();
       if (same(out, want)) ok(wname);
       else fail(wname, `expected: ${want.join(' | ')}\nactual:   ${out.join(' | ')}`);
+    } catch (e) {
+      fail(wname, String(e));
+    }
+  }
+}
+
+// HTTP の組み込み（runtime/http.c）。手元に立てた HTTP サーバー（tests/http/server.mjs。127.0.0.1 だけで待ち、外へは出ない）に対して、
+// tests/http/*.um をネイティブで実行し、`// expect:` か `// panic:` と照合する。サーバーの場所は環境変数 UM_TEST_HTTP で渡す。
+// 送受信は裏のスレッドで行うので、AddressSanitizer があればメモリ検査つきでも実行する（panic の試験は除く）。
+// openssl のコマンドがあれば、自分で署名した証明書の HTTPS のサーバーも立て（UM_TEST_HTTPS）、検証で断られることを確かめる（tls.um）。
+// wasm32 では要求がすぐに失敗の状態になり、理由を返すことも確かめる。
+{
+  const tlsDir = join(tmp, 'tls');
+  mkdirSync(tlsDir, { recursive: true });
+  const tlsKey = join(tlsDir, 'key.pem');
+  const tlsCert = join(tlsDir, 'cert.pem');
+  let tls = false;
+  try {
+    tls = spawnSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', tlsKey, '-out', tlsCert, '-days', '2',
+      '-subj', '/CN=127.0.0.1'], { stdio: 'ignore', timeout: 60000 }).status === 0 && existsSync(tlsCert);
+  } catch {
+    tls = false;
+  }
+  const serverEnv = tls ? { ...process.env, UM_TEST_TLS_KEY: tlsKey, UM_TEST_TLS_CERT: tlsCert } : process.env;
+  const server = spawn(process.execPath, [join(root, 'tests', 'http', 'server.mjs')], { stdio: ['pipe', 'pipe', 'inherit'], env: serverEnv });
+  try {
+    const [port, tlsPort] = await new Promise<[number, number]>((resolvePort, reject) => {
+      let text = '';
+      const timer = setTimeout(() => reject(new Error('the test HTTP server did not start within 10 s')), 10000);
+      server.stdout!.on('data', (d: Buffer) => {
+        text += d.toString('utf8');
+        const m = /port (\d+)(?: tlsport (\d+))?\n/.exec(text);
+        if (m) {
+          clearTimeout(timer);
+          resolvePort([Number(m[1]), Number(m[2] ?? 0)]);
+        }
+      });
+      server.on('exit', (code) => {
+        clearTimeout(timer);
+        reject(new Error(`the test HTTP server exited with ${code}`));
+      });
+    });
+    process.env.UM_TEST_HTTP = `http://127.0.0.1:${port}`;
+    if (tlsPort) process.env.UM_TEST_HTTPS = `https://127.0.0.1:${tlsPort}`;
+    else console.log('note: openssl のコマンドが見つからないため、tests/http/tls.um（HTTPS の証明書の検証）は省略します');
+    for (const f of files('tests/http')) {
+      if (f.endsWith('tls.um') && !tlsPort) continue;
+      const src = readFileSync(join(root, f), 'utf8');
+      const want = directives(src, 'expect');
+      const panic = directives(src, 'panic')[0];
+      const tag = f.replace(/[^a-z0-9]/gi, '_');
+      try {
+        const n = runNative(src, tag, join(root, f));
+        if (panic !== undefined) {
+          if (n.panic === `panic: ${panic}` && same(n.out, want)) ok(`${f} [host]`);
+          else fail(`${f} [host]`, `expected: panic: ${panic}\nactual:   ${n.panic ?? 'no panic'} (output: ${n.out.join(' ')})`);
+        } else if (n.panic) fail(`${f} [host]`, n.panic);
+        else if (same(n.out, want)) ok(`${f} [host]`);
+        else fail(`${f} [host]`, `expected: ${want.join(' | ')}\nactual:   ${n.out.join(' | ')}${n.exit ? `\n${n.exit}` : ''}`);
+      } catch (e) {
+        fail(`${f} [host]`, String(e));
+      }
+      if (memCheck === 'asan' && panic === undefined) {
+        try {
+          const m = runMemChecked(src, `${tag}_mem`, 'asan');
+          if (m.report) fail(`${f} [asan]`, m.report);
+          else if (same(m.out, want)) ok(`${f} [asan]`);
+          else fail(`${f} [asan]`, `expected: ${want.join(' | ')}\nactual:   ${m.out.join(' | ')}`);
+        } catch (e) {
+          fail(`${f} [asan]`, String(e));
+        }
+      }
+    }
+  } catch (e) {
+    fail('tests/http', String(e));
+  } finally {
+    delete process.env.UM_TEST_HTTP;
+    delete process.env.UM_TEST_HTTPS;
+    server.stdin!.end();
+    server.kill();
+  }
+  if (hasWasm) {
+    const wname = 'HTTP requests fail with a reason [wasm32]';
+    const src = [
+      'export function main(): i32 {',
+      '  const id = httpStart("GET", "http://127.0.0.1:1/", "", "", 0);',
+      '  print(`${httpState(id)} ${httpStatus(id)} ${httpWait(id, 0)}`);',
+      '  print(httpError(id));',
+      '  const line = httpReadLine(id);',
+      '  print(`${line == null} ${httpRead(id).length} ${httpHeaders(id).length}`);',
+      '  httpCancel(id);',
+      '  httpClose(id);',
+      '  return 0;',
+      '}',
+    ].join('\n');
+    const want = ['3 0 false', 'HTTP requests are not available in wasm32 programs yet (build with --target host)', 'true 0 0'];
+    try {
+      const w = await runWasm(src, 'http_wasm');
+      if (!w.panic && same(w.out, want)) ok(wname);
+      else fail(wname, `expected: ${want.join(' | ')}\nactual:   ${w.out.join(' | ')}${w.panic ? `\n${w.panic}` : ''}`);
     } catch (e) {
       fail(wname, String(e));
     }

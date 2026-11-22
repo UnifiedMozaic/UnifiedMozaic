@@ -1,0 +1,104 @@
+// ストリーミング: SSE（Claude の Messages API の形）と改行区切りの JSON（Ollama の形）を、届いた分から1行ずつ読む。
+// サーバーは行の途中でも区切って少しずつ送る。最後の行が改行で終わらなくても、受け取り終えたら1行として読める。
+// expect: event: message_start
+// expect: text Hel
+// expect: text lo
+// expect: text ,
+// expect: text wor
+// expect: text ld
+// expect: event: message_stop
+// expect: blank lines 7
+// expect: received while streaming true
+// expect: ndjson {"message":{"content":"A"},"done":false}
+// expect: ndjson {"message":{"content":"B"},"done":false}
+// expect: ndjson {"done":true}
+// expect: ndjson state 2 status 200
+
+// "data: {...\"text\":\"X\"}}" から X を取り出す（試験用の小さな切り出し）。
+function textOf(line: string): string {
+  const key = "\"text\":\"";
+  let out = "";
+  let i: usize = 0;
+  while (i + key.length <= line.length) {
+    let hit = true;
+    for (let k: usize = 0; k < key.length; k++) {
+      if (line[i + k] != key[k]) {
+        hit = false;
+        break;
+      }
+    }
+    if (hit) {
+      let j = i + key.length;
+      while (j < line.length && line[j] != 34) {
+        out = out + stringFromBytes([line[j]]);
+        j++;
+      }
+      return out;
+    }
+    i++;
+  }
+  return "";
+}
+
+function startsWith(s: string, p: string): bool {
+  if (s.length < p.length) {
+    return false;
+  }
+  for (let i: usize = 0; i < p.length; i++) {
+    if (s[i] != p[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function main(): i32 {
+  const base = envVar("UM_TEST_HTTP");
+  const id = httpStart("POST", base + "/sse", "Content-Type: application/json\nAccept: text/event-stream", "{\"stream\":true}", 5000);
+  let blanks = 0;
+  let early = false;
+  let finished = false;
+  while (!finished) {
+    httpWait(id, 1000);
+    const st = httpState(id);
+    while (true) {
+      const line = httpReadLine(id);
+      if (line == null) {
+        break;
+      }
+      if (line.length == 0) {
+        blanks++;
+      } else if (startsWith(line, "event: message_start") || startsWith(line, "event: message_stop")) {
+        print(line);
+      } else if (startsWith(line, "data: ") && textOf(line).length > 0) {
+        print("text " + textOf(line));
+        // 終わる前に届いた分を読めた（まとめてではなく、少しずつ届いている）。
+        if (httpState(id) == 1) {
+          early = true;
+        }
+      }
+    }
+    finished = st >= 2;
+  }
+  print(`blank lines ${blanks}`);
+  print(`received while streaming ${early}`);
+  httpClose(id);
+
+  const n = httpStart("POST", base + "/ndjson", "", "{}", 5000);
+  let done = false;
+  while (!done) {
+    httpWait(n, 1000);
+    const st = httpState(n);
+    while (true) {
+      const line = httpReadLine(n);
+      if (line == null) {
+        break;
+      }
+      print("ndjson " + line);
+    }
+    done = st >= 2;
+  }
+  print(`ndjson state ${httpState(n)} status ${httpStatus(n)}`);
+  httpClose(n);
+  return 0;
+}

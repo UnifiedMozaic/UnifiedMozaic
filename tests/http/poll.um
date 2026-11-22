@@ -1,0 +1,54 @@
+// runtime/http.um の httpRequest（頭を配列で渡す）と httpPoll（状態と届いた本文を1度に取り出す）。
+// expect: phase Done status 200
+// expect: GET ?x
+// expect: x-api-key=k
+// expect: content-type=text/plain
+// expect: chunks > 0 true
+// expect: failed: Failed true
+
+export function main(): i32 {
+  const base = envVar("UM_TEST_HTTP");
+  const id = httpRequest("GET", base + "/echo?x", ["x-api-key: k", "Content-Type: text/plain"], "", 0);
+  let body = "";
+  let chunks = 0;
+  let finished = false;
+  let last: HttpPhase = HttpPhase.Waiting;
+  let status = 0;
+  while (!finished) {
+    httpWait(id, 1000);
+    const s = httpPoll(id);
+    if (s.body.length > 0) {
+      chunks++;
+    }
+    body = body + s.body;
+    finished = s.finished;
+    last = s.phase;
+    status = s.status;
+  }
+  match (last) {
+    HttpPhase.Done => { print(`phase Done status ${status}`); }
+    HttpPhase.Waiting => { print("phase Waiting"); }
+    HttpPhase.Receiving => { print("phase Receiving"); }
+    HttpPhase.Failed => { print("phase Failed"); }
+    HttpPhase.Cancelled => { print("phase Cancelled"); }
+  }
+  print(body);
+  print(`chunks > 0 ${chunks > 0}`);
+  httpClose(id);
+
+  const bad = httpRequest("GET", "http://127.0.0.1:1/", [], "", 2000);
+  let s = httpPoll(bad);
+  while (!s.finished) {
+    httpWait(bad, 1000);
+    s = httpPoll(bad);
+  }
+  match (s.phase) {
+    HttpPhase.Failed => { print(`failed: Failed ${s.error.length > 0}`); }
+    HttpPhase.Done => { print("failed: Done"); }
+    HttpPhase.Waiting => { print("failed: Waiting"); }
+    HttpPhase.Receiving => { print("failed: Receiving"); }
+    HttpPhase.Cancelled => { print("failed: Cancelled"); }
+  }
+  httpClose(bad);
+  return 0;
+}

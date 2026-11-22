@@ -1,0 +1,16 @@
+// HTTPS: 自分で署名した証明書のサーバー（tests/run.ts が openssl で作る）には、証明書の検証で断られて失敗する
+// （TLS の検証が有効であることを確かめる）。UM_TEST_HTTPS は "https://127.0.0.1:番号"。openssl がなければ飛ばす。
+// expect: state 3 status 0 reason true body 0
+
+export function main(): i32 {
+  const id = httpStart("GET", envVar("UM_TEST_HTTPS") + "/hello", "", "", 5000);
+  let st = 0;
+  while (st < 2) {
+    httpWait(id, 1000);
+    st = httpState(id);
+  }
+  print(`state ${st} status ${httpStatus(id)} reason ${httpError(id).length > 0} body ${httpRead(id).length}`);
+  eprint(httpError(id));
+  httpClose(id);
+  return 0;
+}

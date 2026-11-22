@@ -1,0 +1,96 @@
+// 失敗の知らせ方: 途中で切れる（Content-Length より短い・チャンクの途中）、時間切れ、中止、つながらない、正しくない要求。
+// どれも停止せず、状態 3（失敗）か 4（中止）と、空でない理由になる。
+// expect: cut: state 3 status 200 body partial reason true
+// expect: cut-chunked: state 3 body data: one reason true
+// expect: slow: state 3 status 0 reason true
+// expect: hang: first data: first
+// expect: hang: state 4 reason true
+// expect: refused: state 3 reason true
+// expect: ftp: state 3 only http:// and https:// URLs are supported
+// expect: header: state 3 each header must be one line of the form "Name: value"
+// expect: method: state 3 the method contains a character that is not allowed
+// expect: close while running: ok
+// expect: done
+
+function settle(id: i64): string {
+  let body = "";
+  let st = 0;
+  while (st < 2) {
+    httpWait(id, 1000);
+    st = httpState(id);
+    const chunk = httpRead(id);
+    body = body + chunk;
+  }
+  return body;
+}
+
+export function main(): i32 {
+  const base = envVar("UM_TEST_HTTP");
+
+  const a = httpStart("GET", base + "/cut", "", "", 5000);
+  const ab = settle(a);
+  print(`cut: state ${httpState(a)} status ${httpStatus(a)} body ${ab} reason ${httpError(a).length > 0}`);
+  httpClose(a);
+
+  const b = httpStart("GET", base + "/cut-chunked", "", "", 5000);
+  const bb = settle(b);
+  let first = "";
+  // 本文の最初の行だけを見る（届いた分は失敗の前でも読める）。
+  for (let i = 0; i < bb.length; i++) {
+    if (bb[i] == 10) {
+      break;
+    }
+    first = first + stringFromBytes([bb[i]]);
+  }
+  print(`cut-chunked: state ${httpState(b)} body ${first} reason ${httpError(b).length > 0}`);
+  httpClose(b);
+
+  // 頭が 3 秒届かない。待ちの上限は 1 秒。
+  const c = httpStart("GET", base + "/slow?ms=4000", "", "", 1000);
+  settle(c);
+  print(`slow: state ${httpState(c)} status ${httpStatus(c)} reason ${httpError(c).length > 0}`);
+  httpClose(c);
+
+  // 最初の行のあと何も届かない要求を中止する。
+  const d = httpStart("GET", base + "/hang", "", "", 30000);
+  let line: string = "";
+  let got = false;
+  while (!got) {
+    httpWait(d, 1000);
+    const l = httpReadLine(d);
+    if (l != null) {
+      line = l.clone();
+      got = true;
+    }
+  }
+  print("hang: first " + line);
+  httpCancel(d);
+  settle(d);
+  print(`hang: state ${httpState(d)} reason ${httpError(d).length > 0}`);
+  httpClose(d);
+
+  const e = httpStart("GET", "http://127.0.0.1:1/", "", "", 5000);
+  settle(e);
+  print(`refused: state ${httpState(e)} reason ${httpError(e).length > 0}`);
+  httpClose(e);
+
+  const f = httpStart("GET", "ftp://127.0.0.1/", "", "", 5000);
+  print(`ftp: state ${httpState(f)} ${httpError(f)}`);
+  httpClose(f);
+
+  const g = httpStart("GET", base + "/hello", "no colon here", "", 5000);
+  print(`header: state ${httpState(g)} ${httpError(g)}`);
+  httpClose(g);
+
+  const h = httpStart("GE T", base + "/hello", "", "", 5000);
+  print(`method: state ${httpState(h)} ${httpError(h)}`);
+  httpClose(h);
+
+  // 動いている要求を閉じても待たない（裏のスレッドがあとで後始末する）。
+  const k = httpStart("GET", base + "/hang", "", "", 30000);
+  httpWait(k, 1000);
+  httpClose(k);
+  print("close while running: ok");
+  print("done");
+  return 0;
+}

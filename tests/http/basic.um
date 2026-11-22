@@ -1,0 +1,71 @@
+// 本文をまとめて受け取る・要求の頭と本文が届く・404・リダイレクト・応答の頭。
+// UM_TEST_HTTP は tests/run.ts が立てた手元のサーバー（tests/http/server.mjs）の "http://127.0.0.1:番号"。
+// expect: 200 2 hello
+// expect: こんにちは
+// expect: x-um-test: yes
+// expect: POST ?q=1
+// expect: x-api-key=dummy-key
+// expect: content-type=application/json
+// expect: {"a":"あ"}
+// expect: 404 2 {"error":"not found"}
+// expect: 302 -> 200 hello
+// expect: こんにちは
+// expect: done
+
+function all(id: i64): string {
+  let body = "";
+  let st = 0;
+  while (st < 2) {
+    httpWait(id, 1000);
+    st = httpState(id);
+    const chunk = httpRead(id);
+    body = body + chunk;
+  }
+  return body;
+}
+
+function hasLine(text: string, want: string): bool {
+  let line = "";
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] == 10) {
+      if (line == want) {
+        return true;
+      }
+      line = "";
+    } else {
+      line = line + stringFromBytes([text[i]]);
+    }
+  }
+  return line == want;
+}
+
+export function main(): i32 {
+  const base = envVar("UM_TEST_HTTP");
+  const a = httpStart("GET", base + "/hello", "", "", 5000);
+  const body = all(a);
+  print(`${httpStatus(a)} ${httpState(a)} ${body}`);
+  const heads = httpHeaders(a);
+  // 頭の名前の大文字・小文字は OS のライブラリで変わらない（サーバーが送ったまま）ので、小文字で送った頭を探す。
+  if (hasLine(heads, "x-um-test: yes") || hasLine(heads, "X-Um-Test: yes")) {
+    print("x-um-test: yes");
+  } else {
+    print(heads);
+  }
+  httpClose(a);
+
+  const b = httpStart("POST", base + "/echo?q=1", "x-api-key: dummy-key\nContent-Type: application/json", "{\"a\":\"あ\"}", 5000);
+  print(all(b));
+  httpClose(b);
+
+  const c = httpStart("GET", base + "/notfound", "", "", 5000);
+  const cb = all(c);
+  print(`${httpStatus(c)} ${httpState(c)} ${cb}`);
+  httpClose(c);
+
+  const d = httpStart("GET", base + "/redirect", "", "", 5000);
+  const db = all(d);
+  print(`302 -> ${httpStatus(d)} ${db}`);
+  httpClose(d);
+  print("done");
+  return 0;
+}
