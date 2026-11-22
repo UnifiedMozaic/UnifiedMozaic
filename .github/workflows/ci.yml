@@ -73,6 +73,8 @@ jobs:
 
       # --- テスト ---
       - name: test
+        # 段階の時間切れは失敗として扱われ、下の report failures がログの最後を注釈にする（どこで止まったか分かる）。
+        timeout-minutes: 60
         run: |
           # Windows の runner だけで、UM のせいではなく通らない試験の一覧（理由はファイルに書いてある）。
           if [ "$RUNNER_OS" = Windows ]; then export UM_TEST_KNOWN_FAILURES=.github/ci/known-failures-windows.txt; fi
