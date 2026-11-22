@@ -60,12 +60,20 @@ jobs:
       # --- ライブラリ（Windows はここで LLVM も入れる） ---
       - name: deps path
         run: echo "UM_DEPS=$HOME/um-deps" >> "$GITHUB_ENV"
-      - uses: actions/cache@v6
+      # 戻すのと残すのを分ける（actions/cache は、ジョブが成功したときしか残さない。テストが落ちても、
+      # 揃えたライブラリは次の実行に残す）。
+      - id: deps-cache
+        uses: actions/cache/restore@v6
         with:
           path: ~/um-deps
           key: um-deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/ci/install-deps.sh') }}
       - name: deps
         run: bash .github/ci/install-deps.sh 2>&1 | tee deps.log
+      - if: steps.deps-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/um-deps
+          key: ${{ steps.deps-cache.outputs.cache-primary-key }}
       - name: clang version
         run: |
           clang --version
