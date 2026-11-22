@@ -5,10 +5,10 @@
 # どれも本物の Mac で通るかを確かめて、通るならここから外し、通らないなら UM の問題として直すこと。
 #
 # wgpu の Metal バックエンド（UM_WGPU=1）。UM_METAL=1 の直接の Metal の経路（tests/metal の [metal]）はすべて通る。
-#   parity.um: f32 の計算（割り算・平方根を含む arith）が、50000 個のうち 5440 個で CPU と最後の桁が違う
-#              （WGSL は割り算に 2.5 ULP の誤差を許す。D3D12 と Vulkan の NVIDIA では一致する）。
+#   parity.um: f32 の計算（割り算・平方根を含む arith）が、50000 個のうち 5440 個で CPU と一致しない（差の大きさは
+#              未確認。WGSL は割り算に 2.5 ULP の誤差を許す。D3D12 と Vulkan の NVIDIA、WSL の Linux では一致する）。
 #   checksum.um: 5 分の時間切れで止められる（終わらない）。
-tests/metal/parity.um [wgpu] | 仮想の GPU の wgpu（Metal）で、f32 の割り算などが CPU と最後の桁で違う（直接の Metal では一致）
+tests/metal/parity.um [wgpu] | 仮想の GPU の wgpu（Metal）で、f32 の割り算などが CPU と一致しない（直接の Metal では一致）
 tests/metal/checksum.um [wgpu] | 仮想の GPU の wgpu（Metal）で、5 分で終わらない（直接の Metal では通る）
 #
 # 動画の書き出し。H.264 の符号器に h264_videotoolbox が選ばれ（仮想の VideoToolbox）、B フレームを求めると、
