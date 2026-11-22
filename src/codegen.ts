@@ -3621,9 +3621,10 @@ class FnGen {
       case 'cwd':
       case 'exePath':
       case 'exeDir':
-      case 'absPath': {
-        const kind = ['cwd', 'exePath', 'exeDir', 'absPath'].indexOf(name);
-        const [path, plen] = name === 'absPath' ? this.heapParts(e.args[0].expr)() : ['null', '0'];
+      case 'absPath':
+      case 'envVar': {
+        const kind = ['cwd', 'exePath', 'exeDir', 'absPath', 'envVar'].indexOf(name);
+        const [path, plen] = name === 'absPath' || name === 'envVar' ? this.heapParts(e.args[0].expr)() : ['null', '0'];
         const [d, l] = outSlots();
         this.emit(`call void @um_path_query(i32 ${kind}, ptr ${path}, ${usz} ${plen}, ptr ${d}, ptr ${l})`);
         const data = this.tmp();

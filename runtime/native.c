@@ -1792,10 +1792,39 @@ static unsigned char *um_exe_path(size_t *len) {
 #endif
 }
 
-// kind: 0 = cwd、1 = exePath、2 = exeDir、3 = absPath(path)。結果は新しい文字列（作れなければ空）。
+// kind: 0 = cwd、1 = exePath、2 = exeDir、3 = absPath(path)、4 = envVar(path は変数の名前)。
+// 結果は新しい文字列（作れなければ空）。
 void um_path_query(int32_t kind, const char *path, size_t plen, unsigned char **out, size_t *len) {
   *out = NULL;
   *len = 0;
+  if (kind == 4) {
+    // 空の名前・0 のバイトを含む名前・ない変数は空。Windows は UTF-16 の環境ブロックから読む（名前と値を UTF-8 に直す）。
+    char *name = path_copy(path, plen);
+    if (!name) return;
+#ifdef _WIN32
+    WCHAR *wn = os_wide(name);
+    free(name);
+    if (!wn) return;
+    DWORD need = GetEnvironmentVariableW(wn, NULL, 0);
+    if (need > 1) {
+      WCHAR *b = malloc(need * sizeof(WCHAR));
+      if (!b) um_panic(5, 0);
+      DWORD n = GetEnvironmentVariableW(wn, b, need);
+      if (n > 0 && n < need) *out = os_narrow(b, len);
+      free(b);
+    }
+    free(wn);
+#else
+    const char *v = getenv(name);
+    free(name);
+    if (v && v[0]) {
+      *len = strlen(v);
+      *out = um_alloc(*len, 1);
+      memcpy(*out, v, *len);
+    }
+#endif
+    return;
+  }
   if (kind == 1 || kind == 2) {
     size_t n;
     unsigned char *p = um_exe_path(&n);

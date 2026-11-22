@@ -246,6 +246,7 @@ class GpuRunner {
  *   cwd?: string | (() => string),
  *   exePath?: string,
  *   absPath?: (path: string) => string,
+ *   env?: Record<string, string | undefined>,
  * }} [options] print の出力先（関数を直接渡してもよい）と GPU の設定、入出力の口。
  *   gpu: false で GPU を使わない。gpuThreshold: 自動判断で GPU に回す最小の要素数（既定 4096）。
  *   readLine: プログラムの readLine() に渡す次の1行（改行を除く）を返す。もうなければ null。同期的に返すこと。
@@ -267,6 +268,7 @@ class GpuRunner {
  *   listDir / makeDir / isDir: プログラムの listDir() / makeDir() / isDir()。渡さなければ null / false / false。
  *   cwd / exePath: プログラムの cwd() / exePath() が返す文字列。渡さなければ "/" と ""。exeDir() は exePath の最後の区切りより前。
  *   absPath: プログラムの absPath()。渡さなければ cwd とつないで "." と ".." を取り除く（"/" で区切る）。
+ *   env: プログラムの envVar() が読む環境変数（名前 → 値）。渡さなければ、どの名前も空。
  * @returns {Promise<WebAssembly.Exports & { um_gpu?: { available: boolean, dispatches: () => number } }>}
  */
 export async function instantiate(bytes, options = {}) {
@@ -589,6 +591,10 @@ export async function instantiate(bytes, options = {}) {
         // 空の名前と、0 のバイトを含む名前は空（ネイティブと同じ）。
         const path = pathOf(ptr, len);
         if (path === null) return -1;
+        if (kind === 4) {
+          const v = options.env && Object.prototype.hasOwnProperty.call(options.env, path) ? options.env[path] : undefined;
+          return v ? prepare(String(v)) : -1;
+        }
         return prepare(options.absPath ? String(options.absPath(path)) : resolvePath(cwd, path));
       } catch {
         return -1;

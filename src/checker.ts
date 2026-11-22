@@ -185,7 +185,7 @@ export function simdInfo(t: Ty | undefined): { elem: Ty & { k: 'int' | 'float' }
  */
 const IO_BUILTINS = new Set(['readLine', 'inputReady', 'clock', 'stringFromBytes', 'readFile', 'writeFile', 'fileSize', 'readFileRange', 'appendFile', 'args', 'eprint',
   'readFileInto', 'fileOpen', 'fileRead', 'fileReadAt', 'fileWrite', 'fileSeek', 'fileLength', 'fileClose',
-  'listDir', 'makeDir', 'isDir', 'cwd', 'exePath', 'exeDir', 'absPath',
+  'listDir', 'makeDir', 'isDir', 'cwd', 'exePath', 'exeDir', 'absPath', 'envVar',
   'windowOpen', 'windowClose', 'windowPoll', 'windowPresent', 'windowPresentRect', 'windowUpdateRect', 'windowSetIcon', 'windowCtl', 'windowCtlF', 'windowSetText', 'windowGetText',
   'audioWrite',
   'wasmCompile', 'wasmFreeModule', 'wasmExportList', 'wasmInstantiate', 'wasmFreeInstance', 'wasmInvoke', 'wasmRead', 'wasmWrite',
@@ -2743,6 +2743,7 @@ class Checker {
    *   makeDir(path: string): bool              途中のフォルダも作る。すでにあれば true。
    *   isDir(path: string): bool
    *   cwd(): string / exePath(): string / exeDir(): string / absPath(path: string): string（作れなければ空）
+   *   envVar(name: string): string             環境変数の値（ないか空の名前なら空）。
    * ウィンドウ（ネイティブだけ。メインスレッドから呼ぶ。runtime/window.c が SDL3 で実装する）:
    *   windowOpen(title: string, width: i32, height: i32): i32 | null  ウィンドウを開き、その番号を返す。
    *   windowClose(window: i32): void       ウィンドウを閉じる。
@@ -2832,6 +2833,7 @@ class Checker {
       exePath: { params: [], ret: STR },
       exeDir: { params: [], ret: STR },
       absPath: { params: [['path', STR]], ret: STR },
+      envVar: { params: [['name', STR]], ret: STR },
       windowOpen: { params: [['title', STR], ['width', I32], ['height', I32]], ret: this.optionalOf(I32, e.pos) },
       windowClose: { params: [['window', I32]], ret: VOID },
       windowPoll: { params: [['event', { k: 'heap', elem: I32, buffer: true }], ['timeoutMs', I32]], ret: BOOL, mut: [0] },

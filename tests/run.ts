@@ -720,6 +720,63 @@ if (windows) {
         fail(label, String(e));
       }
     }
+    // コンソールの窓を出さない exe（Windows のサブシステム）。リンカへの指示（.drectve）だけを持つオブジェクトを clang で作って
+    // linkInputs で渡すと、PE のサブシステムが WINDOWS（2）になり、パイプにつないだ標準出力と終了コードはそのまま使える。
+    const glabel = 'build linkInputs can set the Windows GUI subsystem with a directive object [host, Windows]';
+    try {
+      writeFileSync(join(tmp, 'gui_subsystem.c'), '#pragma comment(linker, "/SUBSYSTEM:WINDOWS")\n#pragma comment(linker, "/ENTRY:mainCRTStartup")\n');
+      execFileSync(CLANG, ['-c', '-o', join(tmp, 'gui_subsystem.obj'), join(tmp, 'gui_subsystem.c')], { stdio: ['ignore', 'ignore', 'pipe'] });
+      const gsrc = 'export function main(): i32 { print(`gui ${args().length}`); return 7; }';
+      const exe = build(compileToLL(gsrc, 'host'), 'host', join(tmp, 'gui_subsystem.exe'), '2', false, false, [join(tmp, 'gui_subsystem.obj')]).output;
+      const pe = readFileSync(exe);
+      const subsystem = pe.readUInt16LE(pe.readUInt32LE(0x3c) + 24 + 68);
+      const run = spawnSync(exe, ['a', 'b'], { encoding: 'utf8', cwd: tmp });
+      if (subsystem === 2 && run.status === 7 && run.stdout.trim() === 'gui 2') ok(glabel);
+      else fail(glabel, `subsystem ${subsystem}, status ${run.status}, output: ${run.stdout.trim()}`);
+    } catch (e) {
+      fail(glabel, String(e));
+    }
+  }
+}
+
+// envVar（環境変数）。ネイティブは OS の環境（Windows は UTF-16 の環境ブロック）から、wasm32 は instantiate の env から読む。
+// 値に日本語・空白・= を入れて、名前と値の文字の変換を確かめる。ない変数と空の名前は空。
+{
+  const src = [
+    'export function main(): i32 {',
+    '  print(envVar("UM_TEST_ENV_VALUE"));',
+    '  print(envVar("UM_TEST_ENV_UNSET") == "");',
+    '  print(envVar("") == "");',
+    '  return 0;',
+    '}',
+  ].join('\n');
+  const value = 'あい = う;x';
+  const want = [value, 'true', 'true'];
+  const name = 'envVar reads the process environment [host]';
+  try {
+    const exe = build(compileToLL(src, 'host'), 'host', join(tmp, 'env_var.bin')).output;
+    const env: NodeJS.ProcessEnv = { ...process.env, UM_TEST_ENV_VALUE: value };
+    delete env.UM_TEST_ENV_UNSET;
+    const r = spawnSync(exe, [], { encoding: 'utf8', cwd: tmp, env });
+    const out = r.stdout.split('\n').map((l) => l.replace(/\r$/, '')).filter((l) => l !== '');
+    if (r.status === 0 && same(out, want)) ok(name);
+    else fail(name, `status ${r.status}\nexpected: ${want.join(' | ')}\nactual:   ${out.join(' | ')}\n${r.stderr}`);
+  } catch (e) {
+    fail(name, String(e));
+  }
+  if (hasWasm) {
+    const wname = 'envVar reads the env option of instantiate [wasm32]';
+    try {
+      const wasm = join(tmp, 'env_var.wasm');
+      build(compileToLL(src, 'wasm32'), 'wasm32', wasm);
+      const out: string[] = [];
+      const exports = await instantiate(readFileSync(wasm), { gpu: false, print: (s: string) => out.push(s), env: { UM_TEST_ENV_VALUE: value } });
+      await (exports.main as () => unknown)();
+      if (same(out, want)) ok(wname);
+      else fail(wname, `expected: ${want.join(' | ')}\nactual:   ${out.join(' | ')}`);
+    } catch (e) {
+      fail(wname, String(e));
+    }
   }
 }
 

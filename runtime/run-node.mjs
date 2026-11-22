@@ -3,7 +3,7 @@
 // `--` のあとの引数は、プログラムの args() に渡す。
 // 標準入力の行は readLine() に、ファイルの読み書きは readFile() / writeFile() にそのままつなぐ
 // （ネイティブのバイナリと同じく、プログラムが指定したファイルを読み書きできる）。
-// 開いたままのファイル・フォルダ・cwd / exePath（exePath は .wasm の場所）・absPath もつなぐ。
+// 開いたままのファイル・フォルダ・cwd / exePath（exePath は .wasm の場所）・absPath・環境変数（envVar）もつなぐ。
 import {
   appendFileSync, closeSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync, writeFileSync, writeSync,
 } from 'node:fs';
@@ -190,6 +190,7 @@ const exports = await instantiate(readFileSync(file), {
   cwd: () => process.cwd(),
   exePath: resolve(file),
   absPath: (path) => resolve(path),
+  env: process.env,
   args: programArgs,
   eprint: (line) => process.stderr.write(line + '\n'),
 });

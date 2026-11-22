@@ -320,7 +320,7 @@ int um_host_list_dir(const char *path, size_t plen) __attribute__((import_module
 int um_host_list_entry(int i) __attribute__((import_module("env"), import_name("um_host_list_entry")));
 int um_host_make_dir(const char *path, size_t plen) __attribute__((import_module("env"), import_name("um_host_make_dir")));
 int um_host_is_dir(const char *path, size_t plen) __attribute__((import_module("env"), import_name("um_host_is_dir")));
-// kind: 0 = cwd、1 = exePath、2 = exeDir、3 = absPath。結果を用意してそのバイト数を返す（なければ -1）。
+// kind: 0 = cwd、1 = exePath、2 = exeDir、3 = absPath、4 = envVar。結果を用意してそのバイト数を返す（なければ -1）。
 int um_host_path(int kind, const char *path, size_t plen) __attribute__((import_module("env"), import_name("um_host_path")));
 
 static size_t file_range(size_t blen, long long start, long long count, int line) {

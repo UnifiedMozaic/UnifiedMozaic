@@ -98,6 +98,9 @@ The Japanese page ([window.ja.md](window.ja.md)) has the full reference; this is
   The icon of the `.exe` file itself is a resource embedded at build time: compile `1 ICON "app.ico"` with `llvm-rc -fo app.res app.rc`
   and pass it with `um build --target host --link-input app.res`. `--link-input` hands any file to the native link as is
   (also on macOS and Linux) and is ignored with a note for targets that do not link (wasm32, wasm32-plugin, arm64-macos on a non-Mac).
+  To start without a console window on Windows, compile a C file holding only `#pragma comment(linker, "/SUBSYSTEM:WINDOWS")` and
+  `#pragma comment(linker, "/ENTRY:mainCRTStartup")` with `clang -c gui.c -o gui.obj` and pass `--link-input gui.obj`
+  (standard output and error still reach pipes the parent connected).
 - **HiDPI and displays**: `windowPixelSize`, `windowPixelDensity`, `windowDisplayScale`, `windowDisplay`, `displayCount`, `displayBounds`,
   `displayUsableBounds`, `displayName`, `displayContentScale`, `displayRefreshRate`; events `PixelSizeChanged`, `ScaleChanged`, `DisplaysChanged`.
 - **Other events**: `Focus`, `MouseEnter`, `MouseLeave`, `Moved`, `StateChanged`, `Exposed` (redraw needed).
