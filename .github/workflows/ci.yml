@@ -84,8 +84,14 @@ jobs:
         # 段階の時間切れは失敗として扱われ、下の report failures がログの最後を注釈にする（どこで止まったか分かる）。
         timeout-minutes: 60
         run: |
-          # Windows の runner だけで、UM のせいではなく通らない試験の一覧（理由はファイルに書いてある）。
-          if [ "$RUNNER_OS" = Windows ]; then export UM_TEST_KNOWN_FAILURES=.github/ci/known-failures-windows.txt; fi
+          # その OS の runner だけで、UM のせいではなく通らない試験の一覧（理由はファイルに書いてある）。
+          case "$RUNNER_OS" in
+            Windows) export UM_TEST_KNOWN_FAILURES=.github/ci/known-failures-windows.txt ;;
+            macOS) export UM_TEST_KNOWN_FAILURES=.github/ci/known-failures-macos.txt ;;
+          esac
+          # macOS の offscreen の駆動はソフトウェアの描画しか持たない（install-deps.sh の SDL3 を参照）。
+          # Metal や OpenGL の描画を試してウィンドウを作り直させないよう、最初からソフトウェアを選ぶ。
+          if [ "$RUNNER_OS" = macOS ]; then export SDL_RENDER_DRIVER=software; fi
           # 出力はファイルに書く。macOS では Node の標準出力がパイプだと非同期で、試験が spawnSync で止まると
           # それまでの出力も書かれないまま残る（ファイルへは同期で書く）。
           set +e
@@ -97,6 +103,10 @@ jobs:
         if: always()
         # 既知の失敗として数えなかった試験を警告の注釈にする（黙って飛ばさない）。
         run: "grep -E '^known ' test.log | sed 's/^known /::warning title=known failure (${{ matrix.name }})::/' || true"
+      - name: notes
+        if: always()
+        # 飛ばした試験の理由（GPU が使えない、など。tests/run.ts の note）を通知の注釈にする。
+        run: "grep -E '^note: ' test.log | sed 's/^note: /::notice title=note (${{ matrix.name }})::/' || true"
       - name: report failures
         if: failure()
         # 落ちた試験と、ログの最後の行を注釈にする（実行の画面の一覧で、ログを開かずに読めるように）。
