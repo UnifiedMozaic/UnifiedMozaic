@@ -205,6 +205,16 @@ async function runWasm(src: string, tag: string): Promise<{ out: string[]; panic
 }
 
 /**
+ * 試験のプログラムを実行する（spawnSync に時間切れを付けたもの）。5 分で終わらなければ止めて、例外にする
+ * （止まったままの試験があっても、ほかの試験は続き、どれが止まったかが失敗として分かる）。
+ */
+function runChild(cmd: string, args: string[], opts: Parameters<typeof spawnSync>[2] & { encoding: 'utf8' }) {
+  const r = spawnSync(cmd, args, { timeout: 300000, ...opts });
+  if (r.error) throw new Error(`${(r.error as NodeJS.ErrnoException).code === 'ETIMEDOUT' ? 'timed out after 300 s' : String(r.error)}: ${cmd}\n${String(r.stderr ?? '').trim().split('\n').slice(-15).join('\n')}`);
+  return r;
+}
+
+/**
  * ネイティブで作って実行する。panic は停止（終了コード 101）の報告。
  * exit は、0 でも 101 でもない終わり方（シグナルなど）をしたときの、終わり方と標準エラー出力の最後（失敗の説明に添える）。
  */
@@ -212,7 +222,7 @@ function runNative(src: string, tag: string, file?: string): { out: string[]; pa
   const exe = join(tmp, `${tag}.bin`);
   // file はソースの場所（import を解決するため。なければ import は使えない）。
   build(compileToLL(src, 'host', false, file), 'host', exe);
-  const r = spawnSync(exe, [], { encoding: 'utf8', input: stdinText(src), cwd: tmp });
+  const r = runChild(exe, [], { encoding: 'utf8', input: stdinText(src), cwd: tmp });
   const out = r.stdout.split('\n').filter((l) => l !== '');
   if (r.status === 101) return { out, panic: r.stderr.trim() };
   if (r.status === 0) return { out };
@@ -231,11 +241,11 @@ function runMemChecked(src: string, tag: string, tool: 'asan' | 'valgrind' | 'ma
   let r;
   if (tool === 'macos') {
     build(compileToLL(src, 'host', true), 'host', exe, '1', true, quiet);
-    r = spawnSync(exe, [], { encoding: 'utf8', input: stdinText(src), cwd: tmp, env: { ...process.env, ASAN_OPTIONS: 'halt_on_error=1' } });
+    r = runChild(exe, [], { encoding: 'utf8', input: stdinText(src), cwd: tmp, env: { ...process.env, ASAN_OPTIONS: 'halt_on_error=1' } });
     if (r.status === 0) {
       const plain = join(tmp, `${tag}.leaks`);
       build(compileToLL(src, 'host'), 'host', plain, '1');
-      const l = spawnSync('leaks', ['-q', '--atExit', '--', plain], { encoding: 'utf8', input: stdinText(src), cwd: tmp });
+      const l = runChild('leaks', ['-q', '--atExit', '--', plain], { encoding: 'utf8', input: stdinText(src), cwd: tmp });
       if (l.status !== 0) {
         // leaks は報告を標準出力に書く。プログラム自身の出力のあとに続く。
         const text = l.stdout.slice(l.stdout.search(/^Process /m) >= 0 ? l.stdout.search(/^Process /m) : 0) + l.stderr;
@@ -244,10 +254,10 @@ function runMemChecked(src: string, tag: string, tool: 'asan' | 'valgrind' | 'ma
     }
   } else if (tool === 'asan') {
     build(compileToLL(src, 'host', true), 'host', exe, '1', true, quiet);
-    r = spawnSync(exe, [], { encoding: 'utf8', input: stdinText(src), cwd: tmp, env: asanEnv('detect_leaks=1:halt_on_error=1') });
+    r = runChild(exe, [], { encoding: 'utf8', input: stdinText(src), cwd: tmp, env: asanEnv('detect_leaks=1:halt_on_error=1') });
   } else {
     build(compileToLL(src, 'host'), 'host', exe, '1');
-    r = spawnSync('valgrind', ['-q', '--error-exitcode=97', '--leak-check=full', '--errors-for-leak-kinds=all', exe], { encoding: 'utf8', input: stdinText(src), cwd: tmp });
+    r = runChild('valgrind', ['-q', '--error-exitcode=97', '--leak-check=full', '--errors-for-leak-kinds=all', exe], { encoding: 'utf8', input: stdinText(src), cwd: tmp });
   }
   const out = r.stdout.split('\n').filter((l) => l !== '');
   const bad = tool !== 'valgrind' ? r.status !== 0 : r.status === 97 || r.signal !== null;
