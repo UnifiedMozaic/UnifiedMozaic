@@ -31,6 +31,10 @@
 #ifdef _WIN32
 #define _CRT_SECURE_NO_WARNINGS  // getenv などの「安全でない」という警告を出さない（native.c と同じ）
 #endif
+#ifdef __linux__
+// memfd_create を使う。glibc は最初のヘッダを読むときにこの指定を見るので、どの #include よりも前に置く。
+#define _GNU_SOURCE
+#endif
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -42,9 +46,6 @@
 #define NOMINMAX
 #include <windows.h>
 #else
-#ifdef __linux__
-#define _GNU_SOURCE  // memfd_create
-#endif
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
