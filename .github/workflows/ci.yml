@@ -86,7 +86,13 @@ jobs:
         run: |
           # Windows の runner だけで、UM のせいではなく通らない試験の一覧（理由はファイルに書いてある）。
           if [ "$RUNNER_OS" = Windows ]; then export UM_TEST_KNOWN_FAILURES=.github/ci/known-failures-windows.txt; fi
-          node tests/run.ts 2>&1 | tee test.log
+          # 出力はファイルに書く。macOS では Node の標準出力がパイプだと非同期で、試験が spawnSync で止まると
+          # それまでの出力も書かれないまま残る（ファイルへは同期で書く）。
+          set +e
+          node tests/run.ts > test.log 2>&1
+          status=$?
+          cat test.log
+          exit $status
       - name: known failures
         if: always()
         # 既知の失敗として数えなかった試験を警告の注釈にする（黙って飛ばさない）。
