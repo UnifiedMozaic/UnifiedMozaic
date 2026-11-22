@@ -129,6 +129,10 @@ else
     extra=()
     # Linux の runner には画面がなく、テストは offscreen と dummy の駆動を使うので、X11 / Wayland なしでビルドする。
     if [ "$os" = linux ]; then extra+=(-DSDL_UNIX_CONSOLE_BUILD=ON); fi
+    # macOS の SDL は、グラフィックスの指定のないウィンドウに OpenGL を既定で付け（SDL_DefaultGraphicsBackends）、
+    # offscreen の駆動の OpenGL は EGL なので、EGL のない Mac ではウィンドウが開けない（Could not initialize OpenGL /
+    # GLES library）。CI では OpenGL ES（EGL）なしでビルドして、offscreen の駆動がソフトウェアの描画だけを使うようにする。
+    if [ "$os" = macos ]; then extra+=(-DSDL_OPENGLES=OFF); fi
     cmake -S "$src/SDL3-$SDL3_VERSION" -B "$src/build" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$sdl_dir" \
       -DCMAKE_INSTALL_LIBDIR=lib -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF ${extra[@]+"${extra[@]}"}
     cmake --build "$src/build" --parallel "$JOBS"
