@@ -179,6 +179,7 @@ _Noreturn void um_panic(int32_t code, int32_t line) {
     case 16: msg = "invalid file call (an unknown or closed file, an unknown open mode, or a range outside the array)"; break;
     case 20: msg = "invalid media call (an unknown or closed reader / writer)"; break;
     case 21: msg = "a media reader or writer was closed while another thread was using it"; break;
+    case 22: msg = "invalid HTTP call (an unknown or closed request)"; break;
   }
   // 複数のスレッドが同時に停止しても、メッセージは1回だけ。2番目以降は、終わるまで寝る。
   if (atomic_exchange(&um_panicking, 1)) {

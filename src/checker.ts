@@ -192,7 +192,8 @@ const IO_BUILTINS = new Set(['readLine', 'inputReady', 'clock', 'stringFromBytes
   'wasmMemorySize', 'wasmWat', 'wasmError',
   'mediaOpen', 'mediaClose', 'mediaInfoNumbers', 'mediaInfoText', 'mediaReadVideo', 'mediaReadAudio', 'mediaLastTime',
   'mediaCreateWriter', 'mediaAddVideo', 'mediaAddAudio', 'mediaWriteVideo', 'mediaWriteAudio', 'mediaFinishWriter', 'mediaWriterText',
-  'mediaEncoderList', 'mediaError', 'mediaVersion']);
+  'mediaEncoderList', 'mediaError', 'mediaVersion',
+  'httpStart', 'httpState', 'httpStatus', 'httpRead', 'httpReadLine', 'httpHeaders', 'httpError', 'httpWait', 'httpCancel', 'httpClose']);
 
 /** 最上位の定数。値は最初に使われたとき（遅くとも宣言の収集の終わり）に求める。 */
 interface ConstInfo {
@@ -2798,6 +2799,22 @@ class Checker {
    *   mediaEncoderList(probe: bool): string[]        5 つずつ: 名前, "video" / "audio", 形式, 説明, "hw" / "sw"。
    *   mediaError(): string                           このスレッドで最後に失敗した理由。
    *   mediaVersion(): string                         FFmpeg のライブラリの版とライセンス。
+   * HTTP(S)（ネイティブ。どのスレッドからも呼べる。runtime/http.c が Windows は WinHTTP、macOS・Linux は libcurl で実装する。
+   * 送受信は裏のスレッドで行うので、どの関数も待たない（httpWait だけは指定の時間まで待つ）。要求は i64 の番号。
+   * wasm32 では、要求はすぐに失敗の状態になる）:
+   *   httpStart(method: string, url: string, headers: string, body: string, timeoutMs: i32): i64
+   *       要求を始める。headers は "名前: 値" を "
+" でつないだもの。timeoutMs は待ちの上限（0 以下は 60 秒）。
+   *       始められなくても番号を返し、要求は失敗の状態になる（理由は httpError）。
+   *   httpState(req: i64): i32      0 応答待ち、1 受信中、2 受け取り終えた、3 失敗、4 中止。
+   *   httpStatus(req: i64): i32     HTTP の状態コード（応答の頭が届くまでは 0）。
+   *   httpRead(req: i64): string    届いてまだ取り出していない本文をすべて取り出す。
+   *   httpReadLine(req: i64): string | null  次の1行（改行を除く）。1行そろっていなければ null。
+   *   httpHeaders(req: i64): string 応答の頭（"名前: 値" を "
+" でつないだもの）。
+   *   httpError(req: i64): string   失敗・中止の理由。
+   *   httpWait(req: i64, timeoutMs: i32): bool  前に見たときから何か届くか状態が変わるまで待つ。
+   *   httpCancel(req: i64): void / httpClose(req: i64): void   中止する / 番号を手放す（待たない）。
    * 引数は借りるだけ。結果は呼び出した側が所有する新しい値。
    */
   inferIo(e: Expr & { kind: 'call' }, name: string): Ty {
@@ -2897,6 +2914,16 @@ class Checker {
       mediaEncoderList: { params: [['probe', BOOL]], ret: { k: 'heap', elem: STR } },
       mediaError: { params: [], ret: STR },
       mediaVersion: { params: [], ret: STR },
+      httpStart: { params: [['method', STR], ['url', STR], ['headers', STR], ['body', STR], ['timeoutMs', I32]], ret: I64 },
+      httpState: { params: [['req', I64]], ret: I32 },
+      httpStatus: { params: [['req', I64]], ret: I32 },
+      httpRead: { params: [['req', I64]], ret: STR },
+      httpReadLine: { params: [['req', I64]], ret: this.optionalOf(STR, e.pos) },
+      httpHeaders: { params: [['req', I64]], ret: STR },
+      httpError: { params: [['req', I64]], ret: STR },
+      httpWait: { params: [['req', I64], ['timeoutMs', I32]], ret: BOOL },
+      httpCancel: { params: [['req', I64]], ret: VOID },
+      httpClose: { params: [['req', I64]], ret: VOID },
     };
     // wasm.um の中の呼び出しは報告しない（wasm.um の関数を呼んだ所で報告する。下の wasmOnly）。
     if (name.startsWith('wasm') && this.ptrBits === 32 && e.pos.file !== 'wasm.um') this.wasmOnly(name, e.pos);

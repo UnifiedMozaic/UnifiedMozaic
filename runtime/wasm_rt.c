@@ -500,6 +500,35 @@ void um_fill(void *data, size_t a, size_t b, int32_t size, uint64_t bits, int32_
   }
 }
 
+// ---- HTTP（httpStart など）----
+// wasm32 ではまだ使えない。httpStart は番号を返すが、要求はすぐに失敗の状態（3）になり、httpError が理由を返す。
+// 番号の検査はしない（どの番号も同じ失敗の要求として扱う）。
+
+static const char http_unsupported[] = "HTTP requests are not available in wasm32 programs yet (build with --target host)";
+
+long long um_http_start(const char *m, size_t ml, const char *u, size_t ul, const char *h, size_t hl, const unsigned char *b, size_t bl,
+                        int timeout_ms, int line) {
+  (void)m, (void)ml, (void)u, (void)ul, (void)h, (void)hl, (void)b, (void)bl, (void)timeout_ms, (void)line;
+  static long long next = 0;
+  return ++next;
+}
+int um_http_state(long long h, int line) { (void)h, (void)line; return 3; }
+int um_http_status(long long h, int line) { (void)h, (void)line; return 0; }
+void um_http_read(long long h, unsigned char **out, size_t *len, int line) { (void)h, (void)line; *out = 0; *len = 0; }
+int um_http_read_line(long long h, unsigned char **out, size_t *len, int line) { (void)h, (void)line; *out = 0; *len = 0; return 0; }
+void um_http_headers(long long h, unsigned char **out, size_t *len, int line) { (void)h, (void)line; *out = 0; *len = 0; }
+void um_http_error(long long h, unsigned char **out, size_t *len, int line) {
+  (void)h, (void)line;
+  size_t n = sizeof http_unsupported - 1;
+  unsigned char *p = um_alloc(n, 1);
+  memcpy(p, http_unsupported, n);
+  *out = p;
+  *len = n;
+}
+int um_http_wait(long long h, int timeout_ms, int line) { (void)h, (void)timeout_ms, (void)line; return 0; }
+void um_http_cancel(long long h, int line) { (void)h, (void)line; }
+void um_http_close(long long h, int line) { (void)h, (void)line; }
+
 #ifdef UM_PLUGIN
 // ---- プラグイン（--target wasm32-plugin）----
 // ホストのプログラムに組み込んで使う wasm。import を持たない。ホストは次の export を使う:

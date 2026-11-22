@@ -375,6 +375,16 @@ function usesMedia(ll: string): boolean {
   return ll.includes('declare i64 @um_media_open(');
 }
 
+const RUNTIME_HTTP = join(import.meta.dirname, '..', 'runtime', 'http.c');
+
+/**
+ * 生成した LLVM IR が HTTP の組み込みを使っているか（codegen は使ったときだけ宣言を出す）。
+ * 使っていれば runtime/http.c をリンクする（Windows は OS の WinHTTP、macOS・Linux は実行時に OS の libcurl を読み込む）。
+ */
+function usesHttp(ll: string): boolean {
+  return ll.includes('declare i64 @um_http_start(');
+}
+
 /** FFmpeg が見つかるか（テストで、見つからなければ動画・音声のテストを飛ばすのに使う）。 */
 export function ffmpegAvailable(): boolean {
   try {
@@ -438,6 +448,8 @@ const RUNTIME_WASM_C = join(import.meta.dirname, '..', 'runtime', 'wasm_rt.c');
  * ウィンドウと同じく、プログラムがこのファイルの名前を使うときだけ加える（使わないプログラムは FFmpeg をリンクしない）。
  */
 const MEDIA_PRELUDE = join(import.meta.dirname, '..', 'runtime', 'media.um');
+/** HTTP の標準の型と関数（httpPoll、HttpState、httpRequest など）。UM で書いてある。使うときだけ加える。 */
+const HTTP_PRELUDE = join(import.meta.dirname, '..', 'runtime', 'http.um');
 
 /** ファイル番号を、宣言とその中のメソッドに付ける。 */
 function tag(d: Decl, file: number): void {
@@ -522,7 +534,7 @@ export function parseProgram(src: string, file?: string): Module {
   const defined = new Set(merged.decls.filter((d) => d.kind !== 'const').map((d) => d.name));
   const prelude = parse(readFileSync(PRELUDE, 'utf8'), 'prelude.um');
   const standard = [...prelude.decls];
-  for (const [path, label] of [[WINDOW_PRELUDE, 'window.um'], [WASM_PRELUDE, 'wasm.um'], [MEDIA_PRELUDE, 'media.um']]) {
+  for (const [path, label] of [[WINDOW_PRELUDE, 'window.um'], [WASM_PRELUDE, 'wasm.um'], [MEDIA_PRELUDE, 'media.um'], [HTTP_PRELUDE, 'http.um']]) {
     const extra = parse(readFileSync(path, 'utf8'), label);
     const names = extra.decls.map((d) => d.name).filter((n) => !defined.has(n));
     if (names.length === 0) continue;
@@ -686,6 +698,8 @@ export function build(
       if (wt) args.push(RUNTIME_WASMTIME, ...wt.args);
       const ff = usesMedia(ll) ? findFfmpeg() : null;
       if (ff) args.push(RUNTIME_MEDIA, ...ff.args);
+      // HTTP は OS の WinHTTP（winhttp.lib は http.c の #pragma comment でリンクする）。
+      if (usesHttp(ll)) args.push(RUNTIME_HTTP);
       const wgpu = wgpuEnabled(target) && usesWgpu(ll) ? findWgpu() : null;
       if (wgpu) args.push(RUNTIME_WGPU, ...wgpu.args);
       // リンクに足すファイル（llvm-rc で作ったリソース .res を渡すと、アイコンなどが exe に入る）。
@@ -713,6 +727,8 @@ export function build(
     // Linux の media.c は dlopen を使う（ハードウェアの展開のライブラリがあるかを確かめる）。glibc 2.34 より前は libdl にある。
     if (usesMedia(ll)) args.push(RUNTIME_MEDIA, ...findFfmpeg().args, ...(process.platform === 'linux' ? ['-ldl'] : []));
     if (wgpuEnabled(target) && usesWgpu(ll)) args.push(RUNTIME_WGPU, ...findWgpu().args);
+    // HTTP は OS の libcurl を実行時に dlopen で読み込む（リンクはしない。glibc 2.34 より前は dlopen が libdl にある）。
+    if (usesHttp(ll)) args.push(RUNTIME_HTTP, ...(process.platform === 'linux' ? ['-ldl'] : []));
     args.push(...extra);
     clang(args, quiet);
     return { output: out, objectOnly: false };

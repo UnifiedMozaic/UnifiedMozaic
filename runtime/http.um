@@ -1,0 +1,70 @@
+// HTTP(S) の標準の型と関数。組み込みの httpStart / httpState / httpRead など（runtime/http.c）を、
+// enum と struct で使えるようにまとめる。プログラムがこのファイルの名前（httpPoll、HttpState、HttpPhase、httpRequest など）を
+// 使うときだけ、ドライバが標準の関数として加える。
+//
+// 使い方（画面を止めずに、届いた分を毎コマ取り出す）:
+//   const id = httpRequest("POST", url, ["Content-Type: application/json"], body, 0);
+//   // 毎コマ:
+//   const s = httpPoll(id);              // 届いた本文（前回から後の分）と状態
+//   text = text + s.body;
+//   if (s.finished) {
+//     if (s.phase != HttpPhase.Done) { eprint(s.error); }
+//     httpClose(id);
+//   }
+//
+// SSE（text/event-stream）や改行区切りの JSON は、組み込みの httpReadLine(id) で1行ずつ取り出す
+// （null なら、まだ1行そろっていない）。
+
+// 要求の段階。
+enum HttpPhase {
+  Waiting,    // 接続・送信・応答の頭を待っている
+  Receiving,  // 状態コードと頭が届き、本文を受け取っている
+  Done,       // 本文をすべて受け取った（状態コードが 404 などでも、受け取れたなら Done）
+  Failed,     // 接続できない・途中で切れた・時間切れなど（理由は error）
+  Cancelled,  // httpCancel で中止した
+}
+
+// httpPoll の結果。
+struct HttpState {
+  phase: HttpPhase;
+  status: i32;       // HTTP の状態コード（応答の頭が届くまでは 0）
+  body: string;      // 前回の httpPoll（か httpRead）から後に届いた本文
+  finished: bool;    // もう何も届かない（Done / Failed / Cancelled で、本文を取り出し終えた）
+  error: string;     // Failed / Cancelled の理由（ほかは空）
+}
+
+function httpPhaseOf(code: i32): HttpPhase {
+  if (code == 1) {
+    return HttpPhase.Receiving;
+  }
+  if (code == 2) {
+    return HttpPhase.Done;
+  }
+  if (code == 3) {
+    return HttpPhase.Failed;
+  }
+  if (code == 4) {
+    return HttpPhase.Cancelled;
+  }
+  return HttpPhase.Waiting;
+}
+
+// 状態を調べ、届いた本文を取り出す。待たない。
+function httpPoll(id: i64): HttpState {
+  // 状態を先に読む（終わっていたなら、そのあとの httpRead が残りをすべて取り出す）。
+  const code = httpState(id);
+  const body = httpRead(id);
+  return { phase: httpPhaseOf(code), status: httpStatus(id), body: body, finished: code >= 2, error: httpError(id) };
+}
+
+// 要求を始める。headers は "名前: 値" の並び。timeoutMs は待ちの上限（0 は 60 秒）。
+function httpRequest(method: string, url: string, headers: string[], body: string, timeoutMs: i32): i64 {
+  let joined = "";
+  for (const h of headers) {
+    if (joined.length > 0) {
+      joined = joined + "\n";
+    }
+    joined = joined + h;
+  }
+  return httpStart(method, url, joined, body, timeoutMs);
+}

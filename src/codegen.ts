@@ -26,6 +26,7 @@ const PANIC_PLUGIN_BUFFER = 15;
 // 13 = wasm の番号（モジュール・インスタンス）か配列の範囲が正しくない、14 = 使っている最中の wasm のインスタンスを解放した
 // （runtime/wasm.c が停止する）。
 // 20 = 動画・音声の番号（読み手・書き手）が正しくない、21 = 使っている最中の読み手・書き手を閉じた（runtime/media.c が停止する）。
+// 22 = HTTP の要求の番号が正しくない（閉じた番号など。runtime/http.c が停止する）。
 /** グループの大きさの上限（Metal の1グループのスレッド数の上限）。 */
 const MAX_GROUP_SIZE = 1024;
 
@@ -1093,6 +1094,8 @@ class ModuleGen {
   usesWasm = false;
   /** 動画・音声の組み込み（mediaOpen など）を使ったか。使ったときだけランタイムの宣言を出す。 */
   usesMedia = false;
+  /** HTTP の組み込み（httpStart など）を使ったか。使ったときだけランタイムの宣言を出す。 */
+  usesHttp = false;
   /** GPU で実行する kernel。名前 → 番号と、WGSL を入れたグローバル定数。 */
   gpuKernels = new Map<string, { id: number; global: string; bytes: number }>();
   /** プログラムのどこかに f16 が現れるか。現れるときだけ変換の関数を出す。 */
@@ -1760,6 +1763,17 @@ class ModuleGen {
       out.push(`declare i32 @um_media_write_audio(i64, ptr, ${u}, ${u}, i32, i64, i32) #0`, 'declare i32 @um_media_finish(i64, i32) #0');
       out.push('declare void @um_media_writer_text(i64, ptr, ptr, i32) #0', 'declare void @um_media_encoders(i32, ptr, ptr) #0');
       out.push('declare void @um_media_error(ptr, ptr) #0', 'declare void @um_media_version(ptr, ptr) #0');
+    }
+    // HTTP（runtime/http.c。wasm32 は runtime/wasm_rt.c の失敗するだけの実装）。使ったときだけ宣言する。
+    // ドライバはこの宣言を見て http.c をリンクする。
+    if (this.usesHttp) {
+      const u = this.usz;
+      out.push(`declare i64 @um_http_start(ptr, ${u}, ptr, ${u}, ptr, ${u}, ptr, ${u}, i32, i32) #0`);
+      out.push('declare i32 @um_http_state(i64, i32) #0', 'declare i32 @um_http_status(i64, i32) #0');
+      out.push('declare void @um_http_read(i64, ptr, ptr, i32) #0', 'declare i32 @um_http_read_line(i64, ptr, ptr, i32) #0');
+      out.push('declare void @um_http_headers(i64, ptr, ptr, i32) #0', 'declare void @um_http_error(i64, ptr, ptr, i32) #0');
+      out.push('declare i32 @um_http_wait(i64, i32, i32) #0');
+      out.push('declare void @um_http_cancel(i64, i32) #0', 'declare void @um_http_close(i64, i32) #0');
     }
     // wasm では LLVM が f16 を整数のビット列として変換関数に渡すので、ランタイム（wasm_rt.c）が直接その関数を持つ。
     out.push('declare zeroext i8 @um_f8_enc(double) #0', 'declare zeroext i8 @um_f4_enc(double) #0');
@@ -3751,6 +3765,78 @@ class FnGen {
     if (name.startsWith('media')) {
       this.m.usesMedia = true;
       return this.mediaCall(e, name, outSlots, flag);
+    }
+    if (name.startsWith('http')) {
+      this.m.usesHttp = true;
+      return this.httpCall(e, name, outSlots, optional, flag);
+    }
+    throw new Error(`internal: builtin ${name}`);
+  }
+
+  /**
+   * HTTP の組み込み（runtime/http.c）。番号の検査はランタイムが行い、違反なら行番号つきで停止する。
+   * 通信の失敗は停止せず、要求の状態（httpState が 3）と理由（httpError）で知らせる。
+   */
+  httpCall(
+    e: Expr & { kind: 'call' }, name: string, outSlots: () => [string, string],
+    optional: (ok: string, d: string, l: string) => string, flag: (call: string) => string,
+  ): string {
+    const usz = this.m.usz;
+    const line = e.pos.line;
+    const text = (fn: string): string => {
+      const h = this.expr(e.args[0].expr);
+      const [d, l] = outSlots();
+      this.emit(`call void @${fn}(i64 ${h}, ptr ${d}, ptr ${l}, i32 ${line})`);
+      const data = this.tmp();
+      const len = this.tmp();
+      this.emit(`${data} = load ptr, ptr ${d}`);
+      this.emit(`${len} = load ${usz}, ptr ${l}`);
+      return this.arrayValue(data, len, len);
+    };
+    const int = (fn: string): string => {
+      const h = this.expr(e.args[0].expr);
+      const r = this.tmp();
+      this.emit(`${r} = call i32 @${fn}(i64 ${h}, i32 ${line})`);
+      return r;
+    };
+    switch (name) {
+      case 'httpStart': {
+        const parts = e.args.slice(0, 4).map((a) => this.heapParts(a.expr));
+        const timeout = this.expr(e.args[4].expr);
+        const [[m, ml], [u, ul], [h, hl], [b, bl]] = parts.map((p) => p());
+        const r = this.tmp();
+        this.emit(`${r} = call i64 @um_http_start(ptr ${m}, ${usz} ${ml}, ptr ${u}, ${usz} ${ul}, ptr ${h}, ${usz} ${hl}, ` +
+          `ptr ${b}, ${usz} ${bl}, i32 ${timeout}, i32 ${line})`);
+        return r;
+      }
+      case 'httpState':
+        return int('um_http_state');
+      case 'httpStatus':
+        return int('um_http_status');
+      case 'httpRead':
+        return text('um_http_read');
+      case 'httpHeaders':
+        return text('um_http_headers');
+      case 'httpError':
+        return text('um_http_error');
+      case 'httpReadLine': {
+        const h = this.expr(e.args[0].expr);
+        const [d, l] = outSlots();
+        const ok = this.tmp();
+        this.emit(`${ok} = call i32 @um_http_read_line(i64 ${h}, ptr ${d}, ptr ${l}, i32 ${line})`);
+        return optional(ok, d, l);
+      }
+      case 'httpWait': {
+        const h = this.expr(e.args[0].expr);
+        const t = this.expr(e.args[1].expr);
+        return flag(`@um_http_wait(i64 ${h}, i32 ${t}, i32 ${line})`);
+      }
+      case 'httpCancel':
+      case 'httpClose': {
+        const h = this.expr(e.args[0].expr);
+        this.emit(`call void @um_http_${name === 'httpCancel' ? 'cancel' : 'close'}(i64 ${h}, i32 ${line})`);
+        return '';
+      }
     }
     throw new Error(`internal: builtin ${name}`);
   }
