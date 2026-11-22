@@ -93,6 +93,7 @@ node src/cli.ts build examples/kernels.um --target host --emit-msl -o kernels   
 - [GPU execution with wgpu (Japanese)](docs/wgpu.ja.md) — `UM_WGPU=1`, buffer transfers, loading kernels at run time with `gpu.loadKernel`, performance
 - [Windows and input](docs/window.md) — opening a window, showing pixels, mouse and keyboard events (native, SDL3)
 - [Running WebAssembly](docs/wasm.md) — loading and calling isolated wasm modules, plugins written in UM (native, wasmtime)
+- [HTTP(S)](docs/http.md) — send HTTP and HTTPS requests on a background thread and read the response line by line as it arrives (streaming such as SSE; native, WinHTTP / libcurl)
 - [Video and audio (Japanese)](docs/media.ja.md) — file information, frame-accurate seeking, decoding (with hardware decoding), encoding to H.264 / AAC and more (native, FFmpeg)
 - [examples/](examples) — runnable programs; each one doubles as a test (`// expect:` lines)
 - [vscode-extension](https://github.com/UnifiedMozaic/vscode-extension) — VS Code extension (syntax highlighting, type checking on save, build and run)

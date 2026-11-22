@@ -93,6 +93,7 @@ node src/cli.ts build examples/kernels.um --target host --emit-msl -o kernels   
 - [wgpu での GPU 実行](docs/wgpu.ja.md) — `UM_WGPU=1`、Buffer の写し、実行時に kernel を読み込む `gpu.loadKernel`、速さ
 - [ウィンドウ](docs/window.ja.md) — ウィンドウを開いて画素を表示し、マウスとキーボードの入力を受け取る（ネイティブ、SDL3）
 - [WebAssembly の実行](docs/wasm.ja.md) — wasm のモジュールを隔離して読み込み、呼び出す。UM で書いたプラグイン（ネイティブ、wasmtime）
+- [HTTP(S)](docs/http.ja.md) — HTTP と HTTPS の要求を裏のスレッドで送り、応答を届いた分から1行ずつ読む（SSE などのストリーミング。ネイティブ、WinHTTP / libcurl）
 - [動画・音声](docs/media.ja.md) — 動画・音声のファイルの情報、コマ単位で正確なシーク、展開（ハードウェアの展開も）、H.264 / AAC などでの書き出し（ネイティブ、FFmpeg）
 - [examples/](examples) — 動くサンプル。どれもテストを兼ねます（`// expect:` の行）
 - [vscode-extension](https://github.com/UnifiedMozaic/vscode-extension) — VSCode 拡張（色分け、保存時の型検査、ビルドと実行）
