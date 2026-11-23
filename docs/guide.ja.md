@@ -663,7 +663,7 @@ const sh: Shared = { tt: new RacyBuffer<u64>(n), stop: new RacyBuffer<u32>(1) };
 - **kernel の `mut RacyBuffer` には、読み取り借用の `RacyBuffer` もそのまま渡せます**（`gpu.submit(k, n, mut sh.out, sh.inp)`。kernel は領域を差し替えられないため）。`dispatch` / `gpu.submit` / `gpu.ready` / `gpu.wait` / `gpu.flags` / `gpu.commit` はどのスレッドからでも呼べ（`gpu.flags` の印はスレッドごと）、券はどのスレッドで待ってもかまいません。
 - **`print` 1回の出力（1行）はほかのスレッドと混ざりません。** `readLine()` / `inputReady()` はメインスレッドだけで使えます（ほかで呼ぶと停止）。どのスレッドで停止しても、プログラム全体が止まります（メッセージは1回）。
 - 同時に存在できるスレッドは 256 本まで（超えると停止）。スタックは 64 MiB（`UM_THREAD_STACK_MB` で変更）。起動と合流の手間は1本 10〜15 マイクロ秒（Apple M4）。
-- **kernel を CPU で並列に実行するスレッドプール**は、既定で論理 CPU 数のスレッド（呼んだスレッドを含む。最大 64）を使います。`UM_THREADS` で数を変えられます。プールのスレッドは仕事のあと 100 マイクロ秒は寝ずに次を待ちます（`UM_POOL_SPIN_US` で変更。0 ならすぐ寝る）。プールは同時に1つの仕事だけなので、ほかのスレッドが使っている最中の `cpu.dispatch` は、呼んだスレッドだけで実行します。
+- **kernel を CPU で並列に実行するスレッドプール**は、既定で論理 CPU 数のスレッド（呼んだスレッドを含む。最大 64）を使います。`UM_THREADS` で数を変えられます。プールのスレッドは仕事のあと 20 マイクロ秒は寝ずに次を待ちます（`UM_POOL_SPIN_US` で変更。0 ならすぐ寝る。長くすると、小さな dispatch を間を空けずにくり返す使い方では速くなることがありますが、仕事のない間も CPU を使います）。プールは同時に1つの仕事だけなので、ほかのスレッドが使っている最中の `cpu.dispatch` は、呼んだスレッドだけで実行します。
 - **wasm32 にはスレッドがありません。** 書き方はすべて受け付け、合流の時点（`thread.join` か自動の合流）で関数をその場で最後まで実行します（`spawnEach` は要素の順、`thread.cpus()` は 1）。ほかのスレッドの結果を待って回るプログラム（集めて GPU に投げる係など）は wasm32 では終わりません。
 
 例: [examples/threads.um](../examples/threads.um)、[examples/racy_shared.um](../examples/racy_shared.um)、[examples/racy_buffer.um](../examples/racy_buffer.um)。
