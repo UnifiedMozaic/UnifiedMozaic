@@ -28,11 +28,15 @@
 #include <pthread.h>
 #include <sched.h>
 #include <dirent.h>
+#include <spawn.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #endif
+// processRun が子に渡す環境（posix_spawn）。
+extern char **environ;
 #endif
 
 #include "f16.h"
@@ -1883,3 +1887,486 @@ void um_path_query(int32_t kind, const char *path, size_t plen, unsigned char **
   free(c);
 #endif
 }
+
+// ---- プロセスとファイルの操作（processRun / processStart / processId / fileRename / fileRemove / dirRemove） ----
+// path はプログラムの場所。区切り（Windows は \ か /、POSIX は /）を含まない名前は PATH から探す。
+// 引数の文字列（args）が 0 のバイトを含めば、始めずに失敗にする（OS に渡すとそこで切れてしまうため）。
+
+static int um_args_ok(const um_bytes *args, size_t n) {
+  for (size_t i = 0; i < n; i++)
+    if (args[i].len && memchr(args[i].data, 0, args[i].len)) return 0;
+  return 1;
+}
+
+#ifdef _WIN32
+// コマンドライン（UTF-8 のまま組み立て、最後に UTF-16 にする）。
+typedef struct {
+  char *p;
+  size_t n, cap;
+} um_cmdline;
+
+static void cmd_put(um_cmdline *b, char c) {
+  if (b->n == b->cap) {
+    size_t next = b->cap ? b->cap * 2 : 256;
+    char *p = realloc(b->p, next);
+    if (!p) um_panic(5, 0);
+    b->p = p;
+    b->cap = next;
+  }
+  b->p[b->n++] = c;
+}
+
+// 1つの引数を、CommandLineToArgvW（と MSVC の C ランタイム）が元の文字列に戻せる形で足す。
+// 空白・タブ・改行・" を含むか空なら " で囲む。" の前の \ の並びは倍にして \" にし、閉じる " の前の \ の並びも倍にする。
+// ほかの \ はそのまま（"C:\dir\" や "\\server\x" も正しく渡る）。UTF-8 の多バイトの文字は ASCII の記号と重ならない。
+static void cmd_arg(um_cmdline *b, const unsigned char *s, size_t n) {
+  int plain = n > 0;
+  for (size_t i = 0; i < n && plain; i++)
+    if (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\v' || s[i] == '"') plain = 0;
+  if (plain) {
+    for (size_t i = 0; i < n; i++) cmd_put(b, (char)s[i]);
+    return;
+  }
+  cmd_put(b, '"');
+  for (size_t i = 0;; i++) {
+    size_t bs = 0;
+    while (i < n && s[i] == '\\') {
+      bs++;
+      i++;
+    }
+    if (i == n) {
+      for (size_t k = 0; k < bs * 2; k++) cmd_put(b, '\\');
+      break;
+    }
+    for (size_t k = 0; k < (s[i] == '"' ? bs * 2 + 1 : bs); k++) cmd_put(b, '\\');
+    cmd_put(b, (char)s[i]);
+  }
+  cmd_put(b, '"');
+}
+
+// プログラムを始める。成功なら 1 で、*proc にプロセスのハンドルを書く（閉じるのは呼んだ側）。
+// wait（processRun）: 標準入出力のハンドルだけを子に引き継ぐ（ほかの継承できるハンドルは渡さない）。親がコンソールを
+//   持てばそれを共有し、持たなければ（GUI のプログラム）CREATE_NO_WINDOW で隠したコンソールを作らせる。どちらでも窓は現れない。
+// !wait（processStart）: 何も引き継がず、隠したコンソール（CREATE_NO_WINDOW）と新しいプロセスグループで始め、親が終わっても
+//   （親のコンソールが閉じても、Ctrl+C でも）残るようにする。親のジョブからも外れるよう頼む（断られたら外さずに始める）。
+//   GUI のプログラムには CREATE_NO_WINDOW は効かず、ふつうに窓を開く。
+static int win_spawn(const char *path, size_t plen, const um_bytes *args, size_t nargs, int wait, HANDLE *proc) {
+  *proc = NULL;
+  char *z = path_copy(path, plen);
+  if (!z || !um_args_ok(args, nargs) || strchr(z, '"')) {
+    free(z);
+    return 0;
+  }
+  // プログラム名（argv[0]）は " で囲むだけ（CommandLineToArgvW は最初の語の \ を特別に扱わない。名前に " は使えない）。
+  um_cmdline b = {0};
+  cmd_put(&b, '"');
+  for (size_t i = 0; i < plen; i++) cmd_put(&b, z[i]);
+  cmd_put(&b, '"');
+  for (size_t i = 0; i < nargs; i++) {
+    cmd_put(&b, ' ');
+    cmd_arg(&b, args[i].data, args[i].len);
+  }
+  cmd_put(&b, 0);
+  WCHAR *cmd = os_wide(b.p);
+  free(b.p);
+  // 区切りを含む名前はその場所のファイルだけを使う（探さない）。含まなければ CreateProcessW が探す（.exe を補う）。
+  int has_sep = strchr(z, '\\') || strchr(z, '/');
+  WCHAR *app = has_sep ? os_wide(z) : NULL;
+  free(z);
+  if (!cmd || (has_sep && !app)) {
+    free(cmd);
+    free(app);
+    return 0;
+  }
+
+  STARTUPINFOEXW si;
+  memset(&si, 0, sizeof si);
+  si.StartupInfo.cb = sizeof si;
+  DWORD flags = CREATE_UNICODE_ENVIRONMENT;
+  BOOL inherit = FALSE;
+  HANDLE dup[3];
+  int ndup = 0;
+  LPPROC_THREAD_ATTRIBUTE_LIST attrs = NULL;
+  if (wait) {
+    if (!GetConsoleWindow()) flags |= CREATE_NO_WINDOW;
+    // 標準入出力を、継承できる写しにして子に渡す（同じハンドルは1つにまとめる。一覧に重なりは許されない）。
+    DWORD ids[3] = {STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE};
+    HANDLE src[3], mine[3];
+    for (int i = 0; i < 3; i++) {
+      src[i] = GetStdHandle(ids[i]);
+      mine[i] = NULL;
+      if (!src[i] || src[i] == INVALID_HANDLE_VALUE) continue;
+      for (int j = 0; j < i; j++)
+        if (src[j] == src[i]) mine[i] = mine[j];
+      if (!mine[i] && DuplicateHandle(GetCurrentProcess(), src[i], GetCurrentProcess(), &mine[i], 0, TRUE, DUPLICATE_SAME_ACCESS))
+        dup[ndup++] = mine[i];
+    }
+    if (ndup > 0) {
+      SIZE_T size = 0;
+      InitializeProcThreadAttributeList(NULL, 1, 0, &size);
+      attrs = malloc(size);
+      if (attrs && InitializeProcThreadAttributeList(attrs, 1, 0, &size)) {
+        if (UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, dup, (SIZE_T)ndup * sizeof(HANDLE), NULL, NULL)) {
+          si.lpAttributeList = attrs;
+          si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+          si.StartupInfo.hStdInput = mine[0];
+          si.StartupInfo.hStdOutput = mine[1];
+          si.StartupInfo.hStdError = mine[2];
+          flags |= EXTENDED_STARTUPINFO_PRESENT;
+          inherit = TRUE;
+        } else {
+          DeleteProcThreadAttributeList(attrs);
+          free(attrs);
+          attrs = NULL;
+        }
+      } else {
+        free(attrs);
+        attrs = NULL;
+      }
+    }
+  } else {
+    flags |= CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP;
+  }
+
+  PROCESS_INFORMATION pi;
+  memset(&pi, 0, sizeof pi);
+  BOOL ok = FALSE;
+  if (!wait) ok = CreateProcessW(app, cmd, NULL, NULL, FALSE, flags | CREATE_BREAKAWAY_FROM_JOB, NULL, NULL, &si.StartupInfo, &pi);
+  if (!ok) ok = CreateProcessW(app, cmd, NULL, NULL, inherit, flags, NULL, NULL, &si.StartupInfo, &pi);
+  if (attrs) {
+    DeleteProcThreadAttributeList(attrs);
+    free(attrs);
+  }
+  for (int i = 0; i < ndup; i++) CloseHandle(dup[i]);
+  free(cmd);
+  free(app);
+  if (!ok) return 0;
+  CloseHandle(pi.hThread);
+  *proc = pi.hProcess;
+  return 1;
+}
+
+int32_t um_process_run(const char *path, size_t plen, const um_bytes *args, size_t nargs) {
+  HANDLE h;
+  if (!win_spawn(path, plen, args, nargs, 1, &h)) return -1;
+  DWORD code = (DWORD)-1;
+  if (WaitForSingleObject(h, INFINITE) != WAIT_OBJECT_0 || !GetExitCodeProcess(h, &code)) code = (DWORD)-1;
+  CloseHandle(h);
+  return (int32_t)code;
+}
+
+int32_t um_process_start(const char *path, size_t plen, const um_bytes *args, size_t nargs) {
+  HANDLE h;
+  if (!win_spawn(path, plen, args, nargs, 0, &h)) return 0;
+  CloseHandle(h);
+  return 1;
+}
+
+int32_t um_process_id(void) { return (int32_t)GetCurrentProcessId(); }
+
+// 長い名前（MAX_PATH を超える深いフォルダ）も扱えるよう、絶対パスにして \\?\ を付ける（新しく確保する）。作れなければ NULL。
+// 終わりの区切りは除く（"link\" ではリンクの先を調べてしまうため。根の "C:\" は残す）。
+static WCHAR *os_wide_long(const char *z) {
+  WCHAR *w = os_wide(z);
+  if (!w) return NULL;
+  DWORD need = GetFullPathNameW(w, 0, NULL, NULL);
+  WCHAR *full = need ? malloc((size_t)need * sizeof(WCHAR)) : NULL;
+  if (need && !full) um_panic(5, 0);
+  DWORD n = need ? GetFullPathNameW(w, need, full, NULL) : 0;
+  free(w);
+  if (n == 0 || n >= need) {
+    free(full);
+    return NULL;
+  }
+  // すでに \\?\ か \\.\ ならそのまま。\\server\share は \\?\UNC\server\share にする。
+  if (full[0] == L'\\' && full[1] == L'\\' && (full[2] == L'?' || full[2] == L'.')) return full;
+  int unc = full[0] == L'\\' && full[1] == L'\\';
+  const WCHAR *prefix = unc ? L"\\\\?\\UNC" : L"\\\\?\\";
+  const WCHAR *rest = unc ? full + 1 : full;
+  size_t pl = wcslen(prefix), rl = wcslen(rest);
+  while (rl > 3 && rest[rl - 1] == L'\\') rl--;
+  WCHAR *out = malloc((pl + rl + 1) * sizeof(WCHAR));
+  if (!out) um_panic(5, 0);
+  memcpy(out, prefix, pl * sizeof(WCHAR));
+  memcpy(out + pl, rest, rl * sizeof(WCHAR));
+  out[pl + rl] = 0;
+  free(full);
+  return out;
+}
+
+int32_t um_file_rename(const char *from, size_t flen, const char *to, size_t tlen) {
+  char *a = path_copy(from, flen), *b = path_copy(to, tlen);
+  WCHAR *wa = a ? os_wide_long(a) : NULL, *wb = b ? os_wide_long(b) : NULL;
+  free(a);
+  free(b);
+  int ok = wa && wb && MoveFileExW(wa, wb, MOVEFILE_REPLACE_EXISTING);
+  free(wa);
+  free(wb);
+  return ok;
+}
+
+// ファイルを消す。読み取り専用の印が付いていれば外してから消す。
+static int win_delete_file(const WCHAR *w) {
+  if (DeleteFileW(w)) return 1;
+  DWORD attr = GetFileAttributesW(w);
+  if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY) || !(attr & FILE_ATTRIBUTE_READONLY)) return 0;
+  if (!SetFileAttributesW(w, attr & ~(DWORD)FILE_ATTRIBUTE_READONLY)) return 0;
+  if (DeleteFileW(w)) return 1;
+  SetFileAttributesW(w, attr);
+  return 0;
+}
+
+// 空のフォルダ（かフォルダを指すリンク）を消す。読み取り専用の印は外す。ほかのプログラム（ウイルス対策など）が中のファイルを
+// 開いていると、消したファイルがしばらく残ってフォルダが空にならないことがあるので、少し待って何度か試す。
+static int win_remove_dir(const WCHAR *w, DWORD attr) {
+  if (attr & FILE_ATTRIBUTE_READONLY) SetFileAttributesW(w, attr & ~(DWORD)FILE_ATTRIBUTE_READONLY);
+  for (int i = 0; i < 20; i++) {
+    if (RemoveDirectoryW(w)) return 1;
+    DWORD e = GetLastError();
+    if (e != ERROR_DIR_NOT_EMPTY && e != ERROR_SHARING_VIOLATION && e != ERROR_ACCESS_DENIED) return 0;
+    Sleep(10);
+  }
+  return 0;
+}
+
+// dir（\\?\ の付いた絶対パス）の中身を消してから dir を消す。シンボリックリンクとジャンクションは
+// たどらずにリンクそのものを消す（木の外のファイルを消さない）。
+static int win_rm_tree(const WCHAR *dir, DWORD attr) {
+  size_t dl = wcslen(dir);
+  WCHAR *pat = malloc((dl + 3) * sizeof(WCHAR));
+  if (!pat) um_panic(5, 0);
+  memcpy(pat, dir, dl * sizeof(WCHAR));
+  size_t k = dl;
+  if (k > 0 && pat[k - 1] != L'\\') pat[k++] = L'\\';
+  size_t base = k;
+  pat[k++] = L'*';
+  pat[k] = 0;
+  int ok = 1;
+  WIN32_FIND_DATAW fd;
+  HANDLE h = FindFirstFileExW(pat, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0);
+  if (h != INVALID_HANDLE_VALUE) {
+    do {
+      if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+      size_t nl = wcslen(fd.cFileName);
+      WCHAR *child = malloc((base + nl + 1) * sizeof(WCHAR));
+      if (!child) um_panic(5, 0);
+      memcpy(child, pat, base * sizeof(WCHAR));
+      memcpy(child + base, fd.cFileName, (nl + 1) * sizeof(WCHAR));
+      DWORD a = fd.dwFileAttributes;
+      // dwReserved0 は、リパースポイントの種類。OneDrive の置き場所などほかの種類は、ふつうのフォルダとして中を消す。
+      int link = (a & FILE_ATTRIBUTE_REPARSE_POINT) && (fd.dwReserved0 == IO_REPARSE_TAG_SYMLINK || fd.dwReserved0 == IO_REPARSE_TAG_MOUNT_POINT);
+      if (a & FILE_ATTRIBUTE_DIRECTORY) {
+        if (!(link ? win_remove_dir(child, a) : win_rm_tree(child, a))) ok = 0;
+      } else if (!win_delete_file(child)) {
+        ok = 0;
+      }
+      free(child);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+  }
+  free(pat);
+  return win_remove_dir(dir, attr) && ok;
+}
+
+int32_t um_file_remove(const char *path, size_t plen) {
+  char *z = path_copy(path, plen);
+  WCHAR *w = z ? os_wide_long(z) : NULL;
+  free(z);
+  int ok = w && win_delete_file(w);
+  free(w);
+  return ok;
+}
+
+int32_t um_dir_remove(const char *path, size_t plen) {
+  char *z = path_copy(path, plen);
+  WCHAR *w = z ? os_wide_long(z) : NULL;
+  free(z);
+  if (!w) return 0;
+  int ok = 0;
+  DWORD attr = GetFileAttributesW(w);
+  if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
+    // フォルダを指すリンクそのものなら、リンクだけを消す。
+    ok = (attr & FILE_ATTRIBUTE_REPARSE_POINT) ? win_remove_dir(w, attr) : win_rm_tree(w, attr);
+  }
+  free(w);
+  return ok;
+}
+
+#else
+
+// execv に渡す引数の並び（0 で終わる写し。argv[0] は path）。
+static char **os_argv(char *path, const um_bytes *args, size_t n) {
+  char **v = malloc((n + 2) * sizeof *v);
+  if (!v) um_panic(5, 0);
+  v[0] = path;
+  for (size_t i = 0; i < n; i++) {
+    v[i + 1] = malloc(args[i].len + 1);
+    if (!v[i + 1]) um_panic(5, 0);
+    if (args[i].len) memcpy(v[i + 1], args[i].data, args[i].len);
+    v[i + 1][args[i].len] = 0;
+  }
+  v[n + 1] = NULL;
+  return v;
+}
+
+static void os_argv_free(char **v, size_t n) {
+  for (size_t i = 0; i < n; i++) free(v[i + 1]);
+  free(v);
+}
+
+// 終わるのを待ち、終了コードを返す（シグナルで終わったら 128 + シグナルの番号、待てなければ -1）。
+static int32_t os_wait(pid_t pid) {
+  int st;
+  while (waitpid(pid, &st, 0) < 0)
+    if (errno != EINTR) return -1;
+  if (WIFEXITED(st)) return WEXITSTATUS(st);
+  if (WIFSIGNALED(st)) return 128 + WTERMSIG(st);
+  return -1;
+}
+
+int32_t um_process_run(const char *path, size_t plen, const um_bytes *args, size_t nargs) {
+  char *z = path_copy(path, plen);
+  if (!z || !um_args_ok(args, nargs)) {
+    free(z);
+    return -1;
+  }
+  char **argv = os_argv(z, args, nargs);
+  pid_t pid;
+  int r = strchr(z, '/') ? posix_spawn(&pid, z, NULL, NULL, argv, environ) : posix_spawnp(&pid, z, NULL, NULL, argv, environ);
+  os_argv_free(argv, nargs);
+  free(z);
+  return r == 0 ? os_wait(pid) : -1;
+}
+
+// 二度 fork して、孫に新しいセッション（setsid）でプログラムを実行させる。子はすぐ終わって親が回収するので、
+// 孫は親から切り離され（init の子になり）、ゾンビも残らない。孫の標準入出力は /dev/null にする
+// （親の出力先のパイプを持ったままにして、読む側を待たせないため）。exec の失敗は、exec で閉じるパイプで親に知らせる。
+// fork のあとの子では、シグナルに対して安全な関数（setsid / fork / open / dup2 / exec / write / _exit）だけを呼ぶ。
+int32_t um_process_start(const char *path, size_t plen, const um_bytes *args, size_t nargs) {
+  char *z = path_copy(path, plen);
+  if (!z || !um_args_ok(args, nargs)) {
+    free(z);
+    return 0;
+  }
+  char **argv = os_argv(z, args, nargs);
+  int search = strchr(z, '/') == NULL;
+  int ok = 0;
+  int fds[2];
+  if (pipe(fds) == 0) {
+    fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+    fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+    pid_t pid = fork();
+    if (pid == 0) {
+      close(fds[0]);
+      setsid();
+      pid_t g = fork();
+      if (g != 0) {
+        if (g < 0) {
+          int e = errno;
+          (void)!write(fds[1], &e, sizeof e);
+        }
+        _exit(0);
+      }
+      int nul = open("/dev/null", O_RDWR);
+      if (nul >= 0) {
+        dup2(nul, 0);
+        dup2(nul, 1);
+        dup2(nul, 2);
+        if (nul > 2) close(nul);
+      }
+      if (search) execvp(z, argv);
+      else execv(z, argv);
+      int e = errno;
+      (void)!write(fds[1], &e, sizeof e);
+      _exit(127);
+    }
+    close(fds[1]);
+    if (pid > 0) {
+      os_wait(pid);
+      int e = 0;
+      ssize_t n;
+      while ((n = read(fds[0], &e, sizeof e)) < 0 && errno == EINTR) {
+      }
+      ok = n == 0;  // 何も届かずに閉じた = exec できた
+    }
+    close(fds[0]);
+  }
+  os_argv_free(argv, nargs);
+  free(z);
+  return ok;
+}
+
+int32_t um_process_id(void) { return (int32_t)getpid(); }
+
+int32_t um_file_rename(const char *from, size_t flen, const char *to, size_t tlen) {
+  char *a = path_copy(from, flen), *b = path_copy(to, tlen);
+  int ok = a && b && rename(a, b) == 0;
+  free(a);
+  free(b);
+  return ok;
+}
+
+int32_t um_file_remove(const char *path, size_t plen) {
+  char *z = path_copy(path, plen);
+  if (!z) return 0;
+  struct stat st;
+  int ok = lstat(z, &st) == 0 && !S_ISDIR(st.st_mode) && unlink(z) == 0;
+  free(z);
+  return ok;
+}
+
+// dfd の中のフォルダ name を、中身ごと消す。リンクはたどらない（O_NOFOLLOW で開き、中のリンクはリンクだけを消す）。
+// 中の名前を先にすべて読んでから消す（読みながら消すと名前を飛ばすファイルシステムがあるため）。
+static int os_rm_tree(int dfd, const char *name) {
+  int fd = openat(dfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  if (fd < 0) return 0;
+  DIR *d = fdopendir(fd);
+  if (!d) {
+    close(fd);
+    return 0;
+  }
+  um_bytes *names = NULL;
+  size_t n = 0, cap = 0;
+  struct dirent *e;
+  while ((e = readdir(d)) != NULL) {
+    if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+    um_names_push(&names, &n, &cap, e->d_name, strlen(e->d_name) + 1);  // 0 の終わりも写す
+  }
+  int ok = 1;
+  int cfd = dirfd(d);
+  for (size_t i = 0; i < n; i++) {
+    const char *c = (const char *)names[i].data;
+    struct stat st;
+    if (fstatat(cfd, c, &st, AT_SYMLINK_NOFOLLOW) != 0) ok = 0;
+    else if (S_ISDIR(st.st_mode)) ok &= os_rm_tree(cfd, c);
+    else if (unlinkat(cfd, c, 0) != 0) ok = 0;
+    um_free(names[i].data);
+  }
+  free(names);
+  closedir(d);
+  if (unlinkat(dfd, name, AT_REMOVEDIR) != 0) ok = 0;
+  return ok;
+}
+
+int32_t um_dir_remove(const char *path, size_t plen) {
+  char *z = path_copy(path, plen);
+  if (!z) return 0;
+  // 終わりの "/" は除く（"link/" はリンクの先のフォルダを指してしまう）。
+  size_t n = plen;
+  while (n > 1 && z[n - 1] == '/') z[--n] = 0;
+  int ok = 0;
+  struct stat st;
+  if (lstat(z, &st) == 0) {
+    if (S_ISDIR(st.st_mode)) {
+      ok = os_rm_tree(AT_FDCWD, z);
+    } else if (S_ISLNK(st.st_mode)) {
+      // フォルダを指すリンクそのものなら、リンクだけを消す。
+      struct stat t;
+      ok = stat(z, &t) == 0 && S_ISDIR(t.st_mode) && unlink(z) == 0;
+    }
+  }
+  free(z);
+  return ok;
+}
+
+#endif
