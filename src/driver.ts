@@ -71,6 +71,7 @@ export function exePath(path: string): string {
 }
 const RUNTIME_METAL = join(import.meta.dirname, '..', 'runtime', 'metal.m');
 const RUNTIME_WINDOW = join(import.meta.dirname, '..', 'runtime', 'window.c');
+const RUNTIME_MENU_MACOS = join(import.meta.dirname, '..', 'runtime', 'menu_macos.m');
 /** 音の出力（audioOpen など）。ウィンドウと同じく SDL3 を使い、window.c と一緒にリンクする。 */
 const RUNTIME_AUDIO = join(import.meta.dirname, '..', 'runtime', 'audio.c');
 const RUNTIME_WGPU = join(import.meta.dirname, '..', 'runtime', 'wgpu.c');
@@ -722,7 +723,12 @@ export function build(
     if (metalEnabled(target) && process.platform === 'darwin') {
       args.push('-fobjc-arc', RUNTIME_METAL, '-framework', 'Metal', '-framework', 'Foundation');
     }
-    if (usesWindow(ll)) args.push(RUNTIME_WINDOW, RUNTIME_AUDIO, ...findSdl3().args);
+    if (usesWindow(ll)) {
+      args.push(RUNTIME_WINDOW, RUNTIME_AUDIO, ...findSdl3().args);
+      if (process.platform === 'darwin') {
+        args.push('-fobjc-arc', RUNTIME_MENU_MACOS, '-framework', 'AppKit');
+      }
+    }
     if (usesWasm(ll)) args.push(RUNTIME_WASMTIME, ...findWasmtime().args);
     // Linux の media.c は dlopen を使う（ハードウェアの展開のライブラリがあるかを確かめる）。glibc 2.34 より前は libdl にある。
     if (usesMedia(ll)) args.push(RUNTIME_MEDIA, ...findFfmpeg().args, ...(process.platform === 'linux' ? ['-ldl'] : []));

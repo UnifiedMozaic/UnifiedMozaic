@@ -99,6 +99,18 @@ enum CursorShape {
   Pointer,      // 手（リンク・ボタン）
 }
 
+// OS のメニューバー（macOS）の標準の動作。イベントは届かず、OS がそのまま処理する。
+enum MenuRole {
+  Services,       // サービス（サブメニュー）
+  Hide,           // このアプリを隠す（Cmd+H）
+  HideOthers,     // ほかを隠す（Opt+Cmd+H）
+  ShowAll,        // すべてを表示
+  Minimize,       // しまう（Cmd+M）
+  Zoom,           // 拡大／縮小
+  Fullscreen,     // フルスクリーンにする（Ctrl+Cmd+F）
+  BringAllFront,  // すべてを手前に移動
+}
+
 // ウィンドウのイベント。window は windowOpen が返した番号。座標はウィンドウの左上が (0, 0) のウィンドウの座標。
 enum WindowEvent {
   Close(window: i32),                                     // 閉じるボタン（閉じるかどうかはプログラムが決める）
@@ -131,6 +143,7 @@ enum WindowEvent {
   StateChanged(window: i32, state: WindowState),          // 最大化・最小化・元に戻す・全画面の出入り
   Exposed(window: i32),                                   // 描き直しが要る
   DisplaysChanged,                                        // ディスプレイの増減・配置・倍率の変化
+  Menu(id: string),                                       // メニューバーの項目が選ばれた（id は windowMenuItem に渡したもの）
 }
 
 // SDL のキーコードを Key にする。
@@ -223,6 +236,7 @@ function pollWindowEvent(timeoutMs: i32): WindowEvent | null {
     case 23: return WindowEvent.StateChanged(w, windowStateOf(ev[2]));
     case 24: return WindowEvent.Exposed(w);
     case 25: return WindowEvent.DisplaysChanged;
+    case 26: return WindowEvent.Menu(windowGetText(2, 0, 0));
   }
   return WindowEvent.Quit;
 }
@@ -515,6 +529,106 @@ function windowSaveFileDialog(window: i32, title: string, location: string, filt
 function windowOpenFolderDialog(window: i32, title: string, location: string, many: bool): i32 | null {
   windowDialogPrepare(title, location, []);
   return windowDialogRequest(windowCtl1(42, window, many ? 1 : 0));
+}
+
+// ---- OS の名前とメニューバー（macOS） ----
+// OS のメニューバー（macOS の画面の上の帯）を組み立てる。macOS の本物の画面（windowHasNativeMenuBar() が true）のときだけ
+// 働き、Windows・Linux・offscreen では何もしない（false を返す）。選ばれた項目は WindowEvent.Menu(id) で届く。
+
+// 動いている OS の名前（"macos"・"windows"・"linux"）。
+function windowPlatform(): string {
+  return windowGetText(6, 0, 0);
+}
+
+// OS のメニューバーが使えるか（macOS で、offscreen / dummy でないとき true）。
+function windowHasNativeMenuBar(): bool {
+  return windowCtl0(50, 0) != 0;
+}
+
+// メニューバーの組み立てを始める（前に貯めていた途中のものは捨てる）。
+function windowMenuBegin(): void {
+  windowCtl0(51, 0);
+}
+
+// トップレベルのメニューを始める（"ファイル"・"編集" など）。終えたら windowMenuEndMenu を呼ぶ。
+function windowMenuBeginMenu(title: string): void {
+  windowSetText(50, 0, 0, title);
+}
+
+// macOS のアプリのメニュー（メニューバーの左端、太字のアプリ名のメニュー）を始める。終えたら windowMenuEndMenu を呼ぶ。
+function windowMenuBeginAppMenu(title: string): void {
+  windowSetText(50, 0, 1, title);
+}
+
+// macOS の標準の「ウィンドウ」メニューを始める（開いている窓の一覧などを OS が足す）。終えたら windowMenuEndMenu を呼ぶ。
+function windowMenuBeginWindowMenu(title: string): void {
+  windowSetText(50, 0, 2, title);
+}
+
+// サブメニューを始める。終えたら windowMenuEndMenu を呼ぶ。
+function windowMenuBeginSubMenu(title: string): void {
+  windowSetText(50, 0, 3, title);
+}
+
+// いま組み立てているメニュー（またはサブメニュー）を閉じる。
+function windowMenuEndMenu(): void {
+  windowCtl0(52, 0);
+}
+
+// 区切りの線を足す。
+function windowMenuSep(): void {
+  windowCtl0(53, 0);
+}
+
+// 項目を 1 つ足す。選ばれると WindowEvent.Menu(id) が届く。
+// key はショートカットのキーの名前（"S"・"Z"・"F1"・"Left"・"," など。なければ ""）、
+// mods は修飾キーのビット（1: Shift、2: Ctrl、4: Alt/Option、8: Meta/Command）。
+function windowMenuItem(id: string, label: string, key: string, mods: i32, enabled: bool, checked: bool): void {
+  let flags = (mods & 15) << 2;
+  if (enabled) {
+    flags = flags | 1;
+  }
+  if (checked) {
+    flags = flags | 2;
+  }
+  windowSetText(51, 0, flags as i64, `${id}\t${label}\t${key}`);
+}
+
+function menuRoleCode(r: MenuRole): i64 {
+  let code: i64 = 0;
+  match (r) {
+    MenuRole.Services => { code = 1; }
+    MenuRole.Hide => { code = 2; }
+    MenuRole.HideOthers => { code = 3; }
+    MenuRole.ShowAll => { code = 4; }
+    MenuRole.Minimize => { code = 5; }
+    MenuRole.Zoom => { code = 6; }
+    MenuRole.Fullscreen => { code = 7; }
+    MenuRole.BringAllFront => { code = 8; }
+  }
+  return code;
+}
+
+// OS の標準の動作の項目（MenuRole）を足す。
+function windowMenuRole(role: MenuRole, label: string): void {
+  windowSetText(52, 0, menuRoleCode(role), label);
+}
+
+// 組み立てたメニューバーを OS に反映する（macOS の本物の画面なら true）。
+function windowMenuCommit(): bool {
+  return windowCtl0(54, 0) != 0;
+}
+
+// 反映済みのメニューバーの項目の有効／無効とチェックの印だけを変える（id が見つかれば true）。
+function windowMenuSetItemState(id: string, enabled: bool, checked: bool): bool {
+  let flags = 0;
+  if (enabled) {
+    flags = flags | 1;
+  }
+  if (checked) {
+    flags = flags | 2;
+  }
+  return windowSetText(53, 0, flags as i64, id) != 0;
 }
 
 // ---- 時刻 ----

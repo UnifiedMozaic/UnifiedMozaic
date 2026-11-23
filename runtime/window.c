@@ -53,6 +53,7 @@ enum {
   EV_STATE = 23,          // 最大化・最小化・元に戻す・全画面の出入り。a = 状態のビット（WF_*）
   EV_EXPOSED = 24,        // 描き直しが要る（隠れていた部分が見えた、描画の装置が作り直されたなど）
   EV_DISPLAYS = 25,       // ディスプレイの増減・配置・倍率の変化（ウィンドウは 0）
+  EV_MENU = 26,           // メニューバーの項目が選ばれた（文字列 0 = 項目の ID）
 };
 #define EV_FIELDS 6
 
@@ -139,6 +140,17 @@ int32_t um_window_open(const char *title, size_t title_len, int32_t width, int32
   SDL_Renderer *ren = NULL;
   // 高密度の画面（Retina など）では、描画の面を画素の大きさで作る（座標はウィンドウの座標のまま）。
   int ok = SDL_CreateWindowAndRenderer(name, width, height, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY, &win, &ren);
+#ifdef __APPLE__
+  // Homebrew の SDL3 は SDL_OPENGLES=ON でビルドされており、EGL のない macOS では offscreen ドライバが
+  // ウィンドウを作れない。そのときは同じ画面なしの dummy ドライバに切り替えて開き直す。
+  if (!ok && SDL_GetCurrentVideoDriver() && strcmp(SDL_GetCurrentVideoDriver(), "offscreen") == 0) {
+    SDL_QuitSubSystem(SDL_INIT_VIDEO);
+    SDL_SetHintWithPriority(SDL_HINT_VIDEO_DRIVER, "dummy", SDL_HINT_OVERRIDE);
+    if (SDL_Init(SDL_INIT_VIDEO)) {
+      ok = SDL_CreateWindowAndRenderer(name, width, height, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY, &win, &ren);
+    }
+  }
+#endif
   SDL_free(name);
   if (!ok) return 0;
   SDL_SetRenderVSync(ren, 1);  // 表示を画面の更新に合わせる（毎フレーム描き直すループが CPU を使い切らないように）
@@ -429,7 +441,31 @@ enum {
   WC_DIALOG_SAVE = 41,
   WC_DIALOG_FOLDER = 42,   // io[0] = 1 で複数選べる
   WC_DIALOG_RESET = 43,    // 貯めたダイアログの設定を捨てる
+  WC_HAS_NATIVE_MENU = 50, // → OS のメニューバー（macOS）が使えれば 1
+  WC_MENU_BEGIN = 51,      // メニューバーの組み立てを始める
+  WC_MENU_END = 52,        // いま組み立てているメニュー／サブメニューを閉じる
+  WC_MENU_SEP = 53,        // 区切り線を足す
+  WC_MENU_COMMIT = 54,     // 組み立てたメニューバーを OS に反映する → 反映できたら 1
 };
+
+static Uint32 menu_user_event_type;
+
+static Uint32 ensure_menu_event(void) {
+  if (!menu_user_event_type) menu_user_event_type = SDL_RegisterEvents(1);
+  return menu_user_event_type;
+}
+
+#ifdef __APPLE__
+int32_t um_mac_menu_has_native(void);
+void um_mac_menu_begin(void);
+void um_mac_menu_begin_menu(int32_t kind, const char *title);
+void um_mac_menu_end(void);
+void um_mac_menu_sep(void);
+void um_mac_menu_item(int32_t flags, const char *packed);
+void um_mac_menu_role(int32_t role, const char *label);
+int32_t um_mac_menu_commit(Uint32 event_type);
+int32_t um_mac_menu_set_state(int32_t flags, const char *id);
+#endif
 
 // 音の出力（runtime/audio.c）。op は 100 番台。
 int64_t um_audio_ctl(int32_t op, int32_t stream, int64_t *io, size_t len, int32_t line);
@@ -454,7 +490,8 @@ int64_t um_window_ctl(int32_t op, int32_t window, int64_t *io, size_t len, int32
   switch (op) {
     case WC_DISPLAY_COUNT: case WC_DISPLAY_BOUNDS: case WC_DISPLAY_USABLE: case WC_CURSOR: case WC_SHOW_CURSOR:
     case WC_IME_COMPOSITION: case WC_CLIPBOARD_HAS: case WC_DIALOG_OPEN: case WC_DIALOG_SAVE: case WC_DIALOG_FOLDER:
-    case WC_DIALOG_RESET:
+    case WC_DIALOG_RESET: case WC_HAS_NATIVE_MENU: case WC_MENU_BEGIN: case WC_MENU_END: case WC_MENU_SEP:
+    case WC_MENU_COMMIT:
       break;
     default:
       win = lookup(window, line)->win;
@@ -560,6 +597,29 @@ int64_t um_window_ctl(int32_t op, int32_t window, int64_t *io, size_t len, int32
     case WC_DIALOG_RESET:
       clear_staged();
       return 1;
+#ifdef __APPLE__
+    case WC_HAS_NATIVE_MENU:
+      return um_mac_menu_has_native();
+    case WC_MENU_BEGIN:
+      um_mac_menu_begin();
+      return 1;
+    case WC_MENU_END:
+      um_mac_menu_end();
+      return 1;
+    case WC_MENU_SEP:
+      um_mac_menu_sep();
+      return 1;
+    case WC_MENU_COMMIT:
+      return ensure_video() && um_mac_menu_commit(ensure_menu_event());
+#else
+    case WC_HAS_NATIVE_MENU:
+    case WC_MENU_COMMIT:
+      return 0;
+    case WC_MENU_BEGIN:
+    case WC_MENU_END:
+    case WC_MENU_SEP:
+      return 1;
+#endif
   }
   um_panic(UM_PANIC_WINDOW_ARGS, line);
 }
@@ -600,8 +660,12 @@ enum {
   WS_DIALOG_LOCATION = 4,  // 次に開くダイアログの最初のフォルダかファイル
   WS_DIALOG_FILTER = 5,    // 次に開くダイアログの絞り込みを足す。"名前|mp4;mov" の形（拡張子は ; で区切る。* はすべて）
   WS_DIALOG_ACCEPT = 6,    // 次に開くダイアログの決定のボタンの文字
+  WS_MENU_BEGIN_MENU = 50, // a = 0 トップメニュー、1 アプリのメニュー、2 ウィンドウのメニュー、3 サブメニュー。text = 題名
+  WS_MENU_ITEM = 51,       // a = flags（bit 0: enabled, bit 1: checked, bit 2..5: mods）。text = "id\tlabel\tkey"
+  WS_MENU_ROLE = 52,       // a = role（MenuRole の番号）。text = 題名
+  WS_MENU_SET_STATE = 53,  // a = flags（bit 0: enabled, bit 1: checked）。text = id → 見つかれば 1
   WS_TEST_EVENT = 90,      // 試験用: SDL のイベントを作って積む。a = 12 ドロップのファイル、13 ドロップの文字、16 IME の編集中、
-                           // 11 ドロップの始まり、15 ドロップの終わり。text = 文字列。位置は (10, 20)、編集の選択は (1, 2)
+                           // 11 ドロップの始まり、15 ドロップの終わり、26 メニューの項目。text = 文字列。位置は (10, 20)、編集の選択は (1, 2)
 };
 
 // 試験用のイベントの文字列。SDL はイベントの中のポインタの先を写さないので、取り出すまで残しておく（直近の 16 個）。
@@ -633,6 +697,16 @@ static int64_t push_test_event(int32_t window, int64_t kind, const char *text, i
       e.edit.start = 1;
       e.edit.length = 2;
       return SDL_PushEvent(&e);
+    case EV_MENU: {
+      Uint32 t = ensure_menu_event();
+      if (!t) return 0;
+      char *copy = SDL_strdup(text);
+      if (!copy) return 0;
+      e.type = t;
+      e.user.data1 = copy;
+      if (!SDL_PushEvent(&e)) { SDL_free(copy); return 0; }
+      return 1;
+    }
     default:
       um_panic(UM_PANIC_WINDOW_ARGS, line);
   }
@@ -690,6 +764,32 @@ int64_t um_window_set_text(int32_t op, int32_t window, int64_t a, const char *te
       SDL_free(s);
       return r;
     }
+    case WS_MENU_BEGIN_MENU:
+#ifdef __APPLE__
+      um_mac_menu_begin_menu((int32_t)a, s);
+#endif
+      SDL_free(s);
+      return 1;
+    case WS_MENU_ITEM:
+#ifdef __APPLE__
+      um_mac_menu_item((int32_t)a, s);
+#endif
+      SDL_free(s);
+      return 1;
+    case WS_MENU_ROLE:
+#ifdef __APPLE__
+      um_mac_menu_role((int32_t)a, s);
+#endif
+      SDL_free(s);
+      return 1;
+    case WS_MENU_SET_STATE: {
+      int64_t r = 0;
+#ifdef __APPLE__
+      r = um_mac_menu_set_state((int32_t)a, s);
+#endif
+      SDL_free(s);
+      return r;
+    }
   }
   SDL_free(s);
   um_panic(UM_PANIC_WINDOW_ARGS, line);
@@ -711,11 +811,22 @@ enum {
   WG_DISPLAY_NAME = 3,  // a = ディスプレイの番号
   WG_TITLE = 4,         // ウィンドウの題名
   WG_ERROR = 5,         // SDL の最後の失敗の理由（どのスレッドからも呼べる。そのスレッドのもの）
+  WG_PLATFORM = 6,      // 動いている OS の名前（"macos"・"windows"・"linux"）
 };
 
 void um_window_get_text(int32_t op, int32_t window, int64_t a, unsigned char **out, size_t *len, int32_t line) {
   if (op == WG_ERROR) {
     give_string(SDL_GetError(), out, len);
+    return;
+  }
+  if (op == WG_PLATFORM) {
+#if defined(_WIN32)
+    give_string("windows", out, len);
+#elif defined(__APPLE__)
+    give_string("macos", out, len);
+#else
+    give_string("linux", out, len);
+#endif
     return;
   }
   main_only(line);
@@ -936,6 +1047,13 @@ static int translate(const SDL_Event *e, int32_t *out) {
         out[3] = r->filter;
         for (int i = 0; i < r->count; i++) add_event_string(r->paths[i]);
         free_result(r);
+        return 1;
+      }
+      if (menu_user_event_type && e->type == menu_user_event_type) {
+        char *cmd = e->user.data1;
+        out[0] = EV_MENU;
+        add_event_string(cmd);
+        SDL_free(cmd);
         return 1;
       }
       return 0;
