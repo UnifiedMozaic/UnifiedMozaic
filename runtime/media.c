@@ -32,6 +32,7 @@
 #include "win32.h"
 #else
 #include <pthread.h>
+#include <unistd.h>
 #endif
 #if !defined(_WIN32) && !defined(__APPLE__)
 #include <dlfcn.h>
@@ -136,6 +137,40 @@ static void media_init(void) {
   log_verbose = v && v[0] == '1';
   av_log_set_callback(log_callback);
   if (log_verbose) av_log_set_level(AV_LOG_VERBOSE);
+}
+
+// 環境変数の整数（なければ・読めなければ -1）。
+static int env_int(const char *name) {
+  const char *v = getenv(name);
+  if (!v || !v[0]) return -1;
+  char *end = NULL;
+  long n = strtol(v, &end, 10);
+  if (*end != 0 || n < 0 || n > 256) return -1;
+  return (int)n;
+}
+
+// 論理 CPU の数と上限の小さいほう。
+static int cpus_up_to(int cap) {
+  long cpus = sysconf(_SC_NPROCESSORS_ONLN);
+  if (cpus < 1) cpus = 1;
+  return cpus < cap ? (int)cpus : cap;
+}
+
+// ソフトウェアの展開のスレッドの数。FFmpeg の既定（0 = 論理 CPU の数）だと、24 の CPU で読み手 1 つに 24 本となり、
+// 編集の再生のように読み手を同時にいくつも開くと、スレッドが 200 近くになって待ち合わせの手間で CPU を食う。
+// 1080p の H.264 は 8 本で 24 本とほぼ同じ速さ（約 510 コマ毎秒）が出るので、既定は min(論理 CPU, 8)。
+// UM_MEDIA_THREADS で変えられる（0 なら FFmpeg に任せる = 論理 CPU の数）。
+static int decode_threads(void) {
+  int n = env_int("UM_MEDIA_THREADS");
+  return n >= 0 ? n : cpus_up_to(8);
+}
+
+// 画素の変換（swscale）のスレッドの数。1080p を Argb32 にする変換は 1 本だと 40 コマ毎秒ほどで再生に足りないが、
+// 4 本で約 130 コマ毎秒になり、60 コマ毎秒の再生にも余る。既定は min(論理 CPU, 4)。
+// UM_SWS_THREADS で変えられる（0 なら CPU の数に合わせる）。
+static int sws_threads(void) {
+  int n = env_int("UM_SWS_THREADS");
+  return n >= 0 ? n : cpus_up_to(4);
 }
 
 static void begin(void) {
@@ -361,14 +396,14 @@ static enum AVColorRange guess_range(enum AVColorRange r, enum AVPixelFormat f) 
 }
 
 // 画素の変換（拡大縮小と色の変換）。libswscale の新しい API（sws_scale_frame）を使う: 色の行列と範囲はフレームの
-// 情報から決まり、1 枚を複数のスレッドで分けて変換する。src と dst の色域・伝達特性は同じにする（色の管理はしない）。
+// 情報から決まる（スレッドの数は sws_threads）。src と dst の色域・伝達特性は同じにする（色の管理はしない）。
 // dst の画素は呼ぶ側の領域（data / lines）に書く。成功なら 1。
 static int scale_into(SwsContext **ctx, int flags, const AVFrame *src, enum AVPixelFormat dfmt, int dw, int dh,
                       uint8_t *data[4], int lines[4], enum AVColorSpace dcs, enum AVColorRange drange) {
   if (!*ctx) {
     *ctx = sws_alloc_context();
     if (!*ctx) um_panic(5, 0);
-    (*ctx)->threads = 0;  // CPU の数に合わせる
+    (*ctx)->threads = sws_threads();
   }
   (*ctx)->flags = (unsigned)flags;
   AVFrame *dst = av_frame_alloc();
@@ -590,7 +625,7 @@ static int open_decoder(um_reader *r, const char *hw) {
     // ハードウェアの展開は1スレッドで足りる（コマのスレッドは遅延を増やすだけ）。
     r->dec->thread_count = 1;
   } else {
-    r->dec->thread_count = 0;  // CPU の数に合わせる
+    r->dec->thread_count = decode_threads();
     r->dec->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
   }
   err = avcodec_open2(r->dec, codec, NULL);
