@@ -185,6 +185,7 @@ enum WindowEvent {
   StateChanged(window: i32, state: WindowState),          // 最大化・最小化・元に戻す・全画面の出入り
   Exposed(window: i32),                                   // 描き直しが要る
   DisplaysChanged,                                        // ディスプレイの増減・配置・倍率の変化
+  Menu(id: string),                                       // メニューバーの項目が選ばれた（id は windowMenuItem に渡したもの）
 }
 ```
 
@@ -240,6 +241,27 @@ const req = windowOpenFileDialog(win, "素材を読み込む", "", filters, true
 ```
 
 ダイアログが出ている間も、プログラムのイベントの輪は回り続けます（描き直しや再生を止めなくてよい）。
+
+## メニューバー（macOS）
+
+macOS の画面の上のメニューバー（`NSMenu`）を組み立てます。macOS の本物の画面（`windowHasNativeMenuBar()` が `true`）のときだけ働き、
+Windows・Linux・`offscreen` では何もしません（`false` を返します）。選ばれた項目は `WindowEvent.Menu(id)` で届きます。
+
+| 関数 | 説明 |
+| --- | --- |
+| `windowPlatform(): string` | 動いている OS の名前（`"macos"`・`"windows"`・`"linux"`） |
+| `windowHasNativeMenuBar(): bool` | OS のメニューバーが使えるか（macOS で、`offscreen` / `dummy` でないとき `true`） |
+| `windowMenuBegin(): void` | メニューバーの組み立てを始める |
+| `windowMenuBeginAppMenu(title: string): void` | macOS のアプリのメニュー（左端の太字のメニュー）を始める |
+| `windowMenuBeginMenu(title: string): void` | トップレベルのメニュー（`"ファイル"`・`"編集"` など）を始める |
+| `windowMenuBeginWindowMenu(title: string): void` | macOS 標準の「ウィンドウ」メニューを始める |
+| `windowMenuBeginSubMenu(title: string): void` | サブメニューを始める |
+| `windowMenuEndMenu(): void` | いま組み立てているメニュー（またはサブメニュー）を閉じる |
+| `windowMenuSep(): void` | 区切りの線を足す |
+| `windowMenuItem(id, label, key: string, mods: i32, enabled, checked: bool): void` | 項目を 1 つ足す。選ばれると `WindowEvent.Menu(id)` が届く。`mods` は `1` Shift・`2` Ctrl・`4` Alt/Option・`8` Meta/Command |
+| `windowMenuRole(role: MenuRole, label: string): void` | OS 標準の動作（`Services`・`Hide`・`HideOthers`・`ShowAll`・`Minimize`・`Zoom`・`Fullscreen`・`BringAllFront`）を足す |
+| `windowMenuCommit(): bool` | 組み立てたメニューバーを OS に反映する |
+| `windowMenuSetItemState(id: string, enabled, checked: bool): bool` | 反映済みの項目の有効／無効とチェックの印だけを変える |
 
 ## ファイルのドロップ
 

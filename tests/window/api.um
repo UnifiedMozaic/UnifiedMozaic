@@ -18,6 +18,8 @@
 // expect: drop text hello 10 20
 // expect: drop complete 10 20
 // expect: editing へんかん 1 2
+// expect: menu file.save
+// expect: menu ok
 // expect: presented 3
 // expect: ticks ok
 // expect: slept ok
@@ -83,8 +85,9 @@ export function main(): i32 {
   windowSetText(90, win, 13, "hello");
   windowSetText(90, win, 15, "");
   windowSetText(90, win, 16, "へんかん");
+  windowSetText(90, win, 26, "file.save");
   let seen = 0;
-  while (seen < 5) {
+  while (seen < 6) {
     const e = pollWindowEvent(100);
     if (e == null) {
       print("timed out");
@@ -96,9 +99,30 @@ export function main(): i32 {
       WindowEvent.DropText(w, text, x, y) => { print(`drop text ${text} ${x} ${y}`); seen++; }
       WindowEvent.DropComplete(w, x, y) => { print(`drop complete ${x} ${y}`); seen++; }
       WindowEvent.TextEditing(w, text, start, length) => { print(`editing ${text} ${start} ${length}`); seen++; }
+      WindowEvent.Menu(id) => { print(`menu ${id}`); seen++; }
       _ => {}
     }
   }
+
+  // OS の名前とメニューバー（画面なしの試験では windowHasNativeMenuBar と windowMenuCommit は false）。
+  const plat = windowPlatform();
+  windowMenuBegin();
+  windowMenuBeginAppMenu("App");
+  windowMenuRole(MenuRole.Hide, "隠す");
+  windowMenuEndMenu();
+  windowMenuBeginMenu("ファイル");
+  windowMenuItem("file.save", "保存", "S", 8, true, false);
+  windowMenuSep();
+  windowMenuBeginSubMenu("最近");
+  windowMenuItem("file.recent:0", "a.mzc", "", 0, true, true);
+  windowMenuEndMenu();
+  windowMenuEndMenu();
+  windowMenuBeginWindowMenu("ウィンドウ");
+  windowMenuRole(MenuRole.Minimize, "しまう");
+  windowMenuEndMenu();
+  const committed = windowMenuCommit();
+  const stateUpdated = windowMenuSetItemState("file.save", false, false);
+  check((plat == "macos" || plat == "windows" || plat == "linux") && !windowHasNativeMenuBar() && !committed && !stateUpdated, "menu");
 
   // 全体を表示してから、変わった矩形だけを表示する。
   windowSetVSync(win, false);
