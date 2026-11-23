@@ -1728,6 +1728,9 @@ class ModuleGen {
     out.push('declare i32 @um_file_seek(i32, i64, i32) #0', 'declare i32 @um_file_length(i32, ptr, i32) #0', 'declare void @um_file_close(i32, i32) #0');
     out.push(`declare i32 @um_list_dir(ptr, ${this.usz}, ptr, ptr) #0`, `declare i32 @um_make_dir(ptr, ${this.usz}) #0`, `declare i32 @um_is_dir(ptr, ${this.usz}) #0`);
     out.push(`declare void @um_path_query(i32, ptr, ${this.usz}, ptr, ptr) #0`);
+    out.push(`declare i32 @um_process_run(ptr, ${this.usz}, ptr, ${this.usz}) #0`, `declare i32 @um_process_start(ptr, ${this.usz}, ptr, ${this.usz}) #0`);
+    out.push('declare i32 @um_process_id() #0', `declare i32 @um_file_rename(ptr, ${this.usz}, ptr, ${this.usz}) #0`);
+    out.push(`declare i32 @um_file_remove(ptr, ${this.usz}) #0`, `declare i32 @um_dir_remove(ptr, ${this.usz}) #0`);
     if (this.target === 'native') out.push('declare void @um_set_args(i32, ptr) #0');
     // ウィンドウ（runtime/window.c）。使ったときだけ宣言する。ドライバはこの宣言を見て window.c と SDL3 をリンクする。
     if (this.usesWindow) {
@@ -3646,6 +3649,36 @@ class FnGen {
         this.emit(`${data} = load ptr, ptr ${d}`);
         this.emit(`${len} = load ${usz}, ptr ${l}`);
         return this.arrayValue(data, len, len);
+      }
+      // プロセスとファイルの操作。
+      case 'processRun':
+      case 'processStart': {
+        const pathParts = this.heapParts(e.args[0].expr);
+        const argParts = this.heapParts(e.args[1].expr);
+        const [path, plen] = pathParts();
+        const [list, n] = argParts();
+        const call = `@um_process_${name === 'processRun' ? 'run' : 'start'}(ptr ${path}, ${usz} ${plen}, ptr ${list}, ${usz} ${n})`;
+        if (name === 'processStart') return flag(call);
+        const r = this.tmp();
+        this.emit(`${r} = call i32 ${call}`);
+        return r;
+      }
+      case 'processId': {
+        const r = this.tmp();
+        this.emit(`${r} = call i32 @um_process_id()`);
+        return r;
+      }
+      case 'fileRename': {
+        const fromParts = this.heapParts(e.args[0].expr);
+        const toParts = this.heapParts(e.args[1].expr);
+        const [from, flen] = fromParts();
+        const [to, tlen] = toParts();
+        return flag(`@um_file_rename(ptr ${from}, ${usz} ${flen}, ptr ${to}, ${usz} ${tlen})`);
+      }
+      case 'fileRemove':
+      case 'dirRemove': {
+        const [path, plen] = this.heapParts(e.args[0].expr)();
+        return flag(`@um_${name === 'fileRemove' ? 'file_remove' : 'dir_remove'}(ptr ${path}, ${usz} ${plen})`);
       }
       // ウィンドウ（runtime/window.c）。メインスレッドの確認と引数の検査はランタイムが行い、違反なら行番号つきで停止する。
       case 'windowOpen': {

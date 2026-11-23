@@ -186,6 +186,7 @@ export function simdInfo(t: Ty | undefined): { elem: Ty & { k: 'int' | 'float' }
 const IO_BUILTINS = new Set(['readLine', 'inputReady', 'clock', 'stringFromBytes', 'readFile', 'writeFile', 'fileSize', 'readFileRange', 'appendFile', 'args', 'eprint',
   'readFileInto', 'fileOpen', 'fileRead', 'fileReadAt', 'fileWrite', 'fileSeek', 'fileLength', 'fileClose',
   'listDir', 'makeDir', 'isDir', 'cwd', 'exePath', 'exeDir', 'absPath', 'envVar',
+  'processRun', 'processStart', 'processId', 'fileRename', 'fileRemove', 'dirRemove',
   'windowOpen', 'windowClose', 'windowPoll', 'windowPresent', 'windowPresentRect', 'windowUpdateRect', 'windowSetIcon', 'windowCtl', 'windowCtlF', 'windowSetText', 'windowGetText',
   'audioWrite',
   'wasmCompile', 'wasmFreeModule', 'wasmExportList', 'wasmInstantiate', 'wasmFreeInstance', 'wasmInvoke', 'wasmRead', 'wasmWrite',
@@ -2745,6 +2746,13 @@ class Checker {
    *   isDir(path: string): bool
    *   cwd(): string / exePath(): string / exeDir(): string / absPath(path: string): string（作れなければ空）
    *   envVar(name: string): string             環境変数の値（ないか空の名前なら空）。
+   * プロセスとファイルの操作（どのスレッドからも呼べる。wasm32 ではホストの口を通り、口がなければ失敗）:
+   *   processRun(path: string, args: string[]): i32     プログラムを実行して終わるのを待ち、終了コードを返す（始められなければ -1）。
+   *   processStart(path: string, args: string[]): bool  待たずに切り離して始める（このプロセスが終わっても残る）。
+   *   processId(): i32                                  このプロセスの番号。
+   *   fileRename(from: string, to: string): bool        名前を変える・移す（ファイルなら to を置き換える）。
+   *   fileRemove(path: string): bool                    ファイルを消す。
+   *   dirRemove(path: string): bool                     フォルダを中身ごと消す（リンクはたどらない）。
    * ウィンドウ（ネイティブだけ。メインスレッドから呼ぶ。runtime/window.c が SDL3 で実装する）:
    *   windowOpen(title: string, width: i32, height: i32): i32 | null  ウィンドウを開き、その番号を返す。
    *   windowClose(window: i32): void       ウィンドウを閉じる。
@@ -2851,6 +2859,12 @@ class Checker {
       exeDir: { params: [], ret: STR },
       absPath: { params: [['path', STR]], ret: STR },
       envVar: { params: [['name', STR]], ret: STR },
+      processRun: { params: [['path', STR], ['args', { k: 'heap', elem: STR }]], ret: I32 },
+      processStart: { params: [['path', STR], ['args', { k: 'heap', elem: STR }]], ret: BOOL },
+      processId: { params: [], ret: I32 },
+      fileRename: { params: [['from', STR], ['to', STR]], ret: BOOL },
+      fileRemove: { params: [['path', STR]], ret: BOOL },
+      dirRemove: { params: [['path', STR]], ret: BOOL },
       windowOpen: { params: [['title', STR], ['width', I32], ['height', I32]], ret: this.optionalOf(I32, e.pos) },
       windowClose: { params: [['window', I32]], ret: VOID },
       windowPoll: { params: [['event', { k: 'heap', elem: I32, buffer: true }], ['timeoutMs', I32]], ret: BOOL, mut: [0] },
