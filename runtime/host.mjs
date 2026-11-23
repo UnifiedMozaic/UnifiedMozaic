@@ -247,6 +247,12 @@ class GpuRunner {
  *   exePath?: string,
  *   absPath?: (path: string) => string,
  *   env?: Record<string, string | undefined>,
+ *   processRun?: (path: string, args: string[]) => number,
+ *   processStart?: (path: string, args: string[]) => boolean,
+ *   processId?: number,
+ *   fileRename?: (from: string, to: string) => boolean,
+ *   fileRemove?: (path: string) => boolean,
+ *   dirRemove?: (path: string) => boolean,
  * }} [options] print の出力先（関数を直接渡してもよい）と GPU の設定、入出力の口。
  *   gpu: false で GPU を使わない。gpuThreshold: 自動判断で GPU に回す最小の要素数（既定 4096）。
  *   readLine: プログラムの readLine() に渡す次の1行（改行を除く）を返す。もうなければ null。同期的に返すこと。
@@ -269,6 +275,9 @@ class GpuRunner {
  *   cwd / exePath: プログラムの cwd() / exePath() が返す文字列。渡さなければ "/" と ""。exeDir() は exePath の最後の区切りより前。
  *   absPath: プログラムの absPath()。渡さなければ cwd とつないで "." と ".." を取り除く（"/" で区切る）。
  *   env: プログラムの envVar() が読む環境変数（名前 → 値）。渡さなければ、どの名前も空。
+ *   processRun / processStart: プログラムの processRun() / processStart()。processRun は終了コードを返す。
+ *     渡さなければ -1 / false。processId: processId() が返す数。渡さなければ 0。
+ *   fileRename / fileRemove / dirRemove: プログラムの fileRename() / fileRemove() / dirRemove()。渡さなければ false。
  * @returns {Promise<WebAssembly.Exports & { um_gpu?: { available: boolean, dispatches: () => number } }>}
  */
 export async function instantiate(bytes, options = {}) {
@@ -302,6 +311,24 @@ export async function instantiate(bytes, options = {}) {
     } catch {
       return null;
     }
+  };
+
+  // string[] の要素（{ 場所, 長さ, 容量 } の 32 ビットの数が3つずつ）を文字列の配列にする。
+  // 0 のバイトを含む文字列と UTF-8 として読めない文字列があれば null（ネイティブと同じく、始めずに失敗にする）。空の文字列はよい。
+  const argsOf = (ptr, n) => {
+    const view = new DataView(instance.exports.memory.buffer);
+    const out = [];
+    for (let i = 0; i < (n >>> 0); i++) {
+      const at = (Number(ptr) >>> 0) + i * 12;
+      const bytes = mem(view.getUint32(at, true), view.getUint32(at + 4, true)).slice();
+      if (bytes.includes(0)) return null;
+      try {
+        out.push(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes));
+      } catch {
+        return null;
+      }
+    }
+    return out;
   };
 
   // 書き足す。appendFile の口がなければ、readFile / writeFile の口で全体を書き直す。
@@ -598,6 +625,60 @@ export async function instantiate(bytes, options = {}) {
         return prepare(options.absPath ? String(options.absPath(path)) : resolvePath(cwd, path));
       } catch {
         return -1;
+      }
+    },
+    // プロセスとファイルの操作。口がなければ失敗（processRun は -1、processId は 0、ほかは false）。
+    um_host_process_run: (ptr, len, args, n) => {
+      const path = pathOf(ptr, len);
+      const list = argsOf(args, n);
+      if (path === null || list === null || !options.processRun) return -1;
+      try {
+        const code = Number(options.processRun(path, list));
+        return Number.isInteger(code) ? code | 0 : -1;
+      } catch {
+        return -1;
+      }
+    },
+    um_host_process_start: (ptr, len, args, n) => {
+      const path = pathOf(ptr, len);
+      const list = argsOf(args, n);
+      if (path === null || list === null || !options.processStart) return 0;
+      try {
+        return options.processStart(path, list) ? 1 : 0;
+      } catch {
+        return 0;
+      }
+    },
+    um_host_process_id: () => {
+      const id = Number(options.processId ?? 0);
+      return Number.isInteger(id) ? id | 0 : 0;
+    },
+    um_host_file_rename: (from, flen, to, tlen) => {
+      const a = pathOf(from, flen);
+      const b = pathOf(to, tlen);
+      if (a === null || b === null || !options.fileRename) return 0;
+      try {
+        return options.fileRename(a, b) ? 1 : 0;
+      } catch {
+        return 0;
+      }
+    },
+    um_host_file_remove: (ptr, len) => {
+      const path = pathOf(ptr, len);
+      if (path === null || !options.fileRemove) return 0;
+      try {
+        return options.fileRemove(path) ? 1 : 0;
+      } catch {
+        return 0;
+      }
+    },
+    um_host_dir_remove: (ptr, len) => {
+      const path = pathOf(ptr, len);
+      if (path === null || !options.dirRemove) return 0;
+      try {
+        return options.dirRemove(path) ? 1 : 0;
+      } catch {
+        return 0;
       }
     },
     um_gpu_available: () => (runner ? 1 : 0),

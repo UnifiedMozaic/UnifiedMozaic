@@ -432,6 +432,23 @@ void um_path_query(int kind, const char *path, size_t plen, unsigned char **out,
   take_pending(um_host_path(kind, path, plen), out, len);
 }
 
+// ---- プロセスとファイルの操作（processRun / processStart / processId / fileRename / fileRemove / dirRemove）----
+// ホスト（runtime/host.mjs）の口を呼ぶ。口がなければ失敗（processRun は -1、processId は 0、ほかは false）を返す。
+// args は string[] の要素の並び（{ 場所, 長さ, 容量 } が個数ぶん）で、ホストがメモリから直接読む。
+int um_host_process_run(const char *path, size_t plen, const um_bytes *args, size_t n) __attribute__((import_module("env"), import_name("um_host_process_run")));
+int um_host_process_start(const char *path, size_t plen, const um_bytes *args, size_t n) __attribute__((import_module("env"), import_name("um_host_process_start")));
+int um_host_process_id(void) __attribute__((import_module("env"), import_name("um_host_process_id")));
+int um_host_file_rename(const char *from, size_t flen, const char *to, size_t tlen) __attribute__((import_module("env"), import_name("um_host_file_rename")));
+int um_host_file_remove(const char *path, size_t plen) __attribute__((import_module("env"), import_name("um_host_file_remove")));
+int um_host_dir_remove(const char *path, size_t plen) __attribute__((import_module("env"), import_name("um_host_dir_remove")));
+
+int um_process_run(const char *path, size_t plen, const um_bytes *args, size_t n) { return um_host_process_run(path, plen, args, n); }
+int um_process_start(const char *path, size_t plen, const um_bytes *args, size_t n) { return um_host_process_start(path, plen, args, n) > 0; }
+int um_process_id(void) { return um_host_process_id(); }
+int um_file_rename(const char *from, size_t flen, const char *to, size_t tlen) { return um_host_file_rename(from, flen, to, tlen) > 0; }
+int um_file_remove(const char *path, size_t plen) { return um_host_file_remove(path, plen) > 0; }
+int um_dir_remove(const char *path, size_t plen) { return um_host_dir_remove(path, plen) > 0; }
+
 // ---- スレッド ----
 // wasm32 にはスレッドがないので、thread.spawn / spawnEach は控えておくだけにし、合流の時点（thread.join か
 // ブロックの終わりの自動の合流）でその場で最後まで実行する（spawnEach は要素の順）。起動の時点で実行しないのは、

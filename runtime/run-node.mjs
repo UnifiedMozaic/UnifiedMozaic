@@ -4,9 +4,13 @@
 // 標準入力の行は readLine() に、ファイルの読み書きは readFile() / writeFile() にそのままつなぐ
 // （ネイティブのバイナリと同じく、プログラムが指定したファイルを読み書きできる）。
 // 開いたままのファイル・フォルダ・cwd / exePath（exePath は .wasm の場所）・absPath・環境変数（envVar）もつなぐ。
+// プロセス（processRun / processStart / processId）とファイルの名前の変更・削除（fileRename / fileRemove / dirRemove）もつなぐ。
+import { spawn, spawnSync } from 'node:child_process';
 import {
-  appendFileSync, closeSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync, writeFileSync, writeSync,
+  appendFileSync, closeSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync,
+  writeFileSync, writeSync,
 } from 'node:fs';
+import { constants } from 'node:os';
 import { resolve } from 'node:path';
 import { instantiate, UmPanic } from './host.mjs';
 
@@ -191,6 +195,60 @@ const exports = await instantiate(readFileSync(file), {
   exePath: resolve(file),
   absPath: (path) => resolve(path),
   env: process.env,
+  // 終わるのを待って終了コードを返す（始められなければ -1、シグナルで終わったら 128 + 番号。ネイティブと同じ）。
+  processRun: (path, args) => {
+    const r = spawnSync(path, args, { stdio: 'inherit', windowsHide: true });
+    if (r.error) return -1;
+    if (r.status !== null) return r.status;
+    return r.signal ? 128 + (constants.signals[r.signal] ?? 0) : -1;
+  },
+  // 待たずに切り離して始める（このプロセスが終わっても残る。標準入出力はつながない）。
+  processStart: (path, args) => {
+    const child = spawn(path, args, { detached: true, stdio: 'ignore', windowsHide: true });
+    child.on('error', () => {});
+    if (child.pid === undefined) return false;
+    child.unref();
+    return true;
+  },
+  processId: process.pid,
+  fileRename: (from, to) => {
+    try {
+      renameSync(from, to);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  fileRemove: (path) => {
+    try {
+      if (lstatSync(path).isDirectory()) return false;
+      unlinkSync(path);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  // 中身ごと消す。リンクはたどらない（フォルダを指すリンクそのものなら、リンクだけを消す）。
+  dirRemove: (path) => {
+    try {
+      const st = lstatSync(path);
+      if (st.isSymbolicLink()) {
+        if (!statSync(path).isDirectory()) return false;
+        // Windows のフォルダへのリンク（ジャンクションを含む）は rmdir で消す。
+        try {
+          unlinkSync(path);
+        } catch {
+          rmdirSync(path);
+        }
+        return true;
+      }
+      if (!st.isDirectory()) return false;
+      rmSync(path, { recursive: true });
+      return true;
+    } catch {
+      return false;
+    }
+  },
   args: programArgs,
   eprint: (line) => process.stderr.write(line + '\n'),
 });
