@@ -86,7 +86,7 @@ Windows で exe にアイコンを付けるには、`llvm-rc`（LLVM に入っ�
 | 式 | 四則演算と剰余、比較、`&&` / `\|\|` / `!`、条件式 `a ? b : c`、`x ?? 既定値`、ビット演算とシフト、`as` による変換、関数とメソッドの呼び出し、`new`、`this`、フィールドと添字、オブジェクトリテラル、配列リテラル、`new Array<T>(n)`、`xs.length`、テンプレート文字列 `` `x = ${x}` ``、`String(x)` |
 | 配列のメソッド | `push`、`pop`、`clear`、`clone`、一括の書き込み `fill(v)` / `fill(v, start, end)`（Buffer / RacyBuffer にも。下の「一括の書き込み」） |
 | 組み込み | `print(x)`（数、`bool`、文字列）、`dispatch` / `cpu.dispatch` / `gpu.dispatch`、グループで実行する `dispatchGroups`（下の「グループ（共有配列・barrier）と kernel の中のアトミック演算」）、`gpu.submit` / `gpu.ready` / `gpu.wait`、`gpu.flags` / `gpu.commit` / `gpu.untracked`（下の「Metal（Mac）での GPU 実行」）、実行時に WGSL の kernel を読み込む `gpu.loadKernel` / `gpu.runKernel`（[wgpu での GPU 実行](wgpu.ja.md)）、`thread.*`（下の「スレッド」）、`Math.sqrt` / `floor` / `ceil` / `abs` / `min` / `max`、ビット演算の `Math.popcount` / `clz` / `ctz`、マスクつきシフト `Math.shl` / `Math.shr`（下の「マスクつきシフトと範囲チェックの除去」）、先読み `Math.prefetch(arr, i)`（下の「先読み」）、SIMD の `Simd.*`（下の「SIMD のベクトル」） |
-| 入出力の組み込み | `readLine()`、`inputReady()`、`clock()`、`stringFromBytes(bytes)`、`readFile(path)`、`writeFile(path, bytes)`、`fileSize(path)`、`readFileRange(path, offset, length)`、`appendFile(path, bytes)`、`readFileInto(...)`、開いたままのファイル `fileOpen` / `fileRead` / `fileReadAt` / `fileWrite` / `fileSeek` / `fileLength` / `fileClose`、フォルダ `listDir` / `makeDir` / `isDir`、パス `cwd()` / `exePath()` / `exeDir()` / `absPath(path)`、環境変数 `envVar(name)`、`args()`、`eprint(text)`（下の「入出力」） |
+| 入出力の組み込み | `readLine()`、`inputReady()`、`clock()`、`stringFromBytes(bytes)`、`readFile(path)`、`writeFile(path, bytes)`、`fileSize(path)`、`readFileRange(path, offset, length)`、`appendFile(path, bytes)`、`readFileInto(...)`、開いたままのファイル `fileOpen` / `fileRead` / `fileReadAt` / `fileWrite` / `fileSeek` / `fileLength` / `fileClose`、フォルダ `listDir` / `makeDir` / `isDir`、パス `cwd()` / `exePath()` / `exeDir()` / `absPath(path)`、環境変数 `envVar(name)`、名前の変更と削除 `fileRename` / `fileRemove` / `dirRemove`、プロセス `processRun` / `processStart` / `processId`、`args()`、`eprint(text)`（下の「入出力」） |
 | ネイティブだけの組み込み | ウィンドウ（`windowOpen` など。[window.ja.md](window.ja.md)）、WebAssembly のモジュールの実行（`wasmLoad` / `wasmNew` / `wasmCall` など。[wasm.ja.md](wasm.ja.md)）、動画・音声の読み書き（`mediaOpenVideo` / `mediaFrame` / `mediaSamples` / `mediaCreate` など。FFmpeg を使う。[media.ja.md](media.ja.md)）、HTTP(S) の要求（`httpStart` / `httpReadLine` / `httpPoll` など。裏のスレッドで送受信し、届いた分から読む。[http.ja.md](http.ja.md)） |
 
 それぞれの書き方は、下の各節と「そのほかの機能」の例にあります。
@@ -256,10 +256,41 @@ if (out != null) {
 | `envVar(name: string): string` | 環境変数の値。ない変数・空の名前・0 のバイトを含む名前なら空。設定の置き場所を `envVar("APPDATA")`（Windows）や `envVar("HOME")` から作るときなどに使います。Windows では名前も値も UTF-16 から UTF-8 に直します。 |
 
 - **パスは OS の形のまま返します。** Windows では `C:\Users\...` のように `\` で区切り、macOS と Linux では `/` で区切ります。
-- **消す操作（ファイルやフォルダの削除）はありません。**
+- **名前の変更と削除は、下の「名前の変更・削除とプロセス」にあります。**
 - **wasm32 の口**: `listDir(path)`、`makeDir(path)`、`isDir(path)`（渡さなければ `null` / `false` / `false`）、`cwd`（文字列か関数。既定 `"/"`）、`exePath`（文字列。既定 `""`）、`absPath(path)`（渡さなければ `cwd` とつないで `/` で区切って正規化）、`env`（名前 → 値のオブジェクト。渡さなければ `envVar` はいつも空）。`runtime/run-node.mjs` は Node の `fs` と `process.cwd()`・`process.env` につなぎ、`exePath()` は `.wasm` の場所を返します。
 
 例: [examples/dirs_and_paths.um](../examples/dirs_and_paths.um)。
+
+### 名前の変更・削除とプロセス
+
+自動更新のように、新しいファイルを置いて古いものと入れ替え、別のプログラムを始めるための組み込みです。どのスレッドからも呼べます。
+
+```ts
+// 落としてきた新しい版の名前を変えてから、更新の手順を受け持つプログラムを切り離して始め、自分は終わる。
+const updater = exeDir() + "/updater.exe";
+const updaterArgs: string[] = [String(processId()), exeDir()];
+if (fileRename("app.new", "app.next") && processStart(updater, updaterArgs)) {
+  return 0;
+}
+```
+
+| 関数 | 動作 |
+| --- | --- |
+| `processRun(path: string, args: string[]): i32` | プログラムを始めて終わるのを待ち、その終了コードを返します。始められなければ `-1`。`args` は `argv[1]` からの引数です（プログラム名は `path` から付けます）。子の標準入力・出力・エラー出力は、このプログラムのものをそのまま使います。POSIX ではシグナルで終わったとき `128 + シグナルの番号` を返します。 |
+| `processStart(path: string, args: string[]): bool` | プログラムを始めて、待たずに戻ります。始められたら `true`。子はこのプログラムから切り離され、このプログラムが終わっても動き続けます（標準入出力はつながず、終わるのを待つことも終了コードを得ることもできません）。 |
+| `processId(): i32` | このプロセスの番号（Windows は `GetCurrentProcessId`、POSIX は `getpid`）。 |
+| `fileRename(from: string, to: string): bool` | ファイルかフォルダの名前を変えます（別のフォルダへの移動も）。`to` にファイルがあれば置き換えます（`to` にフォルダがあれば失敗）。同じドライブ・ファイルシステムの中だけで、中身を写すことはしません。 |
+| `fileRemove(path: string): bool` | ファイルを消します。ないファイルとフォルダは `false`。リンクなら、リンクそのものを消します。Windows では読み取り専用の印を外して消します。 |
+| `dirRemove(path: string): bool` | フォルダを中身ごと消します。ないフォルダとファイルは `false`。中のシンボリックリンクとジャンクション（Windows）はたどらず、リンクそのものだけを消すので、木の外のファイルは消しません。`path` 自体がフォルダを指すリンクなら、リンクだけを消します。一部を消せなかったときも、消せたものは消えたまま `false` を返します。 |
+
+- **`path` は実行ファイルの場所です。** 区切り（Windows は `\` か `/`、macOS と Linux は `/`）を含まない名前は `PATH` から探します（Windows では `.exe` を補い、`CreateProcessW` の順で探します）。区切りを含む名前は、そのファイルだけを使います（Windows では拡張子まで書きます）。シェルは通さないので、`*` や `%PATH%` などはそのまま引数になります。
+- **引数はそのまま子の `argv` に届きます。** Windows では、空白・`"`・`\` を含む引数や空の引数も、`CommandLineToArgvW`（と C ランタイム）の決まりに合わせて囲みとエスケープを付け、UTF-16 にして `CreateProcessW` に渡します（日本語の名前と引数も使えます）。`path` や引数に 0 のバイトを含む文字列があれば、始めずに失敗にします。
+- **Windows ではコンソールの窓を出しません。** `processRun` は、このプログラムがコンソールを持てばそれを子と共有し、持たなければ（GUI のプログラム）`CREATE_NO_WINDOW` で隠したコンソールを子に作らせます。子に引き継ぐハンドルは標準入出力だけです。`processStart` は `CREATE_NO_WINDOW` と新しいプロセスグループで始め、ハンドルを何も引き継がず、親のジョブからも外れるよう頼みます（許されていなければ外さずに始めます）。GUI のプログラムはどちらでもふつうに窓を開きます。
+- **macOS と Linux では、`processRun` は `posix_spawn`（名前だけなら `posix_spawnp`）と `waitpid` を使います。** `processStart` は二度 `fork` して孫を新しいセッション（`setsid`）で `exec` し、子はすぐに回収するので、ゾンビは残りません。孫の標準入出力は `/dev/null` にします。`exec` に失敗したことも分かります（`false`）。
+- **`fileRename` / `fileRemove` / `dirRemove` は、Windows では `MoveFileExW`（`MOVEFILE_REPLACE_EXISTING`）/ `DeleteFileW` / `RemoveDirectoryW` を使い、名前を絶対パスにして `\\?\` を付けるので、`MAX_PATH` を超える深い名前も扱えます。** ほかのプログラム（ウイルス対策など）が中のファイルを開いていてフォルダがすぐに空にならないときは、少し待って何度か試します。macOS と Linux では `rename` / `unlink` / `unlinkat` を使います。
+- **wasm32 の口**: `processRun(path, args)`（終了コードを返す）、`processStart(path, args)`、`processId`（数）、`fileRename(from, to)`、`fileRemove(path)`、`dirRemove(path)`。渡さなければ `-1` / `false` / `0` / `false` / `false` / `false` です。`runtime/run-node.mjs` は Node の `child_process`（`spawnSync` と、`detached` の `spawn`）と `fs`（`renameSync` / `unlinkSync` / `rmSync`）につなぎます。
+
+例: [examples/rename_and_remove.um](../examples/rename_and_remove.um)、[tests/process/process.um](../tests/process/process.um)。
 
 ## 所有権
 
