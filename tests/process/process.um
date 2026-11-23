@@ -1,0 +1,90 @@
+// processRun / processStart / processId（tests/run.ts がネイティブで実行する）。子は同じ実行ファイルを、引数を変えて始めたもの。
+// 引数なしで始めると親として試験を行い、下の expect の行を出す。tests/run.ts は、名前に日本語と空白を含むフォルダに
+// 実行ファイルを置いて始める（UTF-8 / UTF-16 の名前の受け渡しを確かめるため）。
+// 子は標準出力に何も書かない（親の出力と混ざらないように）。
+// expect: 42
+// expect: 7
+// expect: -1
+// expect: -1
+// expect: true
+// expect: true
+// expect: true
+// expect: false
+
+// 引用符・\・空白・空の文字列などの、Windows のコマンドラインで間違えやすい引数。
+function tricky(): string[] {
+  return ["", "a b", "quote\"in", "back\\slash\\", "end\\\\", "\\\"", "  ", "日本語 テキスト", "tab\there", "x\\\\\"y", "C:\\dir\\", "%PATH%", "^&|<>"];
+}
+
+// 終わりの時刻まで、何もせずに待つ。
+function waitUntil(t: f64): void {
+  while (clock() < t) {
+  }
+}
+
+export function main(): i32 {
+  const a = args();
+  if (a.length > 0) {
+    const mode = a[0].clone();
+    if (mode == "child") {
+      // 引数が1つも崩れずに届いたら 42。
+      const want = tricky();
+      if (a.length != want.length + 1) {
+        return 1;
+      }
+      for (let i = 0; i < want.length; i++) {
+        if (a[i + 1] != want[i]) {
+          return 2;
+        }
+      }
+      return 42;
+    }
+    if (mode == "exit") {
+      return 7;
+    }
+    if (mode == "mark" || mode == "late") {
+      // late は、始めた親が終わったあとに書くよう、少し待つ。
+      if (mode == "late") {
+        waitUntil(clock() + 1.5);
+      }
+      const ok: u8[] = [111, 107];
+      writeFile(a[1], ok);
+      return 0;
+    }
+    if (mode == "startlate") {
+      // 切り離した子を始めて、すぐに終わる（tests/run.ts が、待たされずに戻ることと、あとで印が書かれることを確かめる）。
+      const child: string[] = ["late", a[1].clone()];
+      return processStart(exePath(), child) ? 0 : 1;
+    }
+    return 3;
+  }
+
+  let childArgs: string[] = ["child"];
+  for (const s of tricky()) {
+    childArgs.push(s.clone());
+  }
+  print(processRun(exePath(), childArgs));
+  const exit: string[] = ["exit"];
+  print(processRun(exePath(), exit));
+  const none: string[] = [];
+  // 始められないプログラム（ない場所と、PATH にない名前）は -1。
+  print(processRun("um_no_such_dir/um_no_such_program", none));
+  print(processRun("um_no_such_program_on_path_x", none));
+  print(processId() > 0);
+
+  // 待たずに始めた子が印のファイルを書くのを待つ（20 秒まで）。
+  const marker = absPath("um_process_marker.txt");
+  fileRemove(marker);
+  const mark: string[] = ["mark", marker.clone()];
+  print(processStart(exePath(), mark));
+  const limit = clock() + 20.0;
+  let found = false;
+  while (!found && clock() < limit) {
+    found = fileSize(marker) != null;
+    waitUntil(clock() + 0.01);
+  }
+  print(found);
+  fileRemove(marker);
+  print(processStart("um_no_such_dir/um_no_such_program", none));
+  return 0;
+}

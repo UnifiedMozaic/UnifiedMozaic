@@ -25,6 +25,8 @@
 //                      1行を2回に分けて書く）。ネイティブだけ。
 //   tests/threads/*.um スレッド（ネイティブだけ）。`// expect:` か `// panic:` と照合する。`// sorted` があれば出力を
 //                      並べ替えてから比べる。メモリ検査つきと、ThreadSanitizer（データ競合の検出）つきでも実行する。
+//   tests/process/process.um
+//                      processRun / processStart / processId（ネイティブ）。子は同じ実行ファイルを引数を変えて始める（窓は出さない）。
 //   tests/errors/*.um  `// error: コード` の診断がすべて出ることを確認。
 //   tests/panics/*.um  `// panic: メッセージ` で停止することを確認。
 //   examples/wasm/*.um WebAssembly の組み込み（wasmtime。ネイティブだけ）。`// expect:` と照合する。
@@ -43,7 +45,7 @@
 // 失敗には数えない（CI の特定の環境でだけ起きる、UM のせいではない失敗のため。.github/ci/known-failures-*.txt）。
 
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { CompileError, CompileErrors } from '../src/diag.ts';
@@ -193,6 +195,40 @@ async function runWasm(src: string, tag: string): Promise<{ out: string[]; panic
       return true;
     },
     isDir: (path: string) => dirs.has(norm(path)),
+    // 名前の変更（ファイルは置き換える。フォルダは中の名前ごと移す）と削除。
+    fileRename: (from: string, to: string) => {
+      const a = norm(from);
+      const b = norm(to);
+      if (!dirs.has(parent(b)) || dirs.has(b)) return false;
+      const data = disk.get(a);
+      if (data) {
+        disk.delete(a);
+        disk.set(b, data);
+        return true;
+      }
+      if (!dirs.has(a) || disk.has(b) || b.startsWith(a + '/')) return false;
+      for (const d of [...dirs]) {
+        if (d === a || d.startsWith(a + '/')) {
+          dirs.delete(d);
+          dirs.add(b + d.slice(a.length));
+        }
+      }
+      for (const [k, v] of [...disk]) {
+        if (k.startsWith(a + '/')) {
+          disk.delete(k);
+          disk.set(b + k.slice(a.length), v);
+        }
+      }
+      return true;
+    },
+    fileRemove: (path: string) => disk.delete(norm(path)),
+    dirRemove: (path: string) => {
+      const d = norm(path);
+      if (!dirs.has(d) || d === '/') return false;
+      for (const k of [...dirs]) if (k === d || k.startsWith(d + '/')) dirs.delete(k);
+      for (const k of [...disk.keys()]) if (k.startsWith(d + '/')) disk.delete(k);
+      return true;
+    },
     cwd: '/um',
     exePath: '/um/bin/prog.wasm',
     eprint: () => {},
@@ -779,6 +815,124 @@ if (windows) {
     } catch (e) {
       fail(wname, String(e));
     }
+  }
+}
+
+// プロセス（processRun / processStart / processId）。tests/process/process.um をネイティブで作り、名前に日本語と空白を含む
+// フォルダに置いて実行する（子は同じ実行ファイル。窓は出さない）。続けて、切り離した子（processStart）が、親が終わったあとも
+// 残って印のファイルを書くことと、親の標準出力のパイプを持ち続けない（spawnSync が子を待たずに戻る）ことを確かめる。
+// wasm32 では口がなければ失敗の値を返し、口があればそれを呼ぶことを確かめる。
+{
+  const file = 'tests/process/process.um';
+  const src = readFileSync(join(root, file), 'utf8');
+  const want = directives(src, 'expect');
+  const name = `${file} [host]`;
+  try {
+    const dir = join(tmp, 'プロセス の 試験');
+    mkdirSync(dir, { recursive: true });
+    const exe = build(compileToLL(src, 'host'), 'host', join(dir, 'process.bin')).output;
+    const r = runChild(exe, [], { encoding: 'utf8', cwd: tmp });
+    const out = r.stdout.split('\n').map((l) => l.replace(/\r$/, '')).filter((l) => l !== '');
+    if (r.status === 0 && same(out, want)) ok(name);
+    else fail(name, `status ${r.status}\nexpected: ${want.join(' | ')}\nactual:   ${out.join(' | ')}\n${r.stderr}`);
+
+    const lname = 'processStart leaves a detached child that outlives the parent [host]';
+    const marker = join(tmp, 'process_late_marker.txt');
+    rmSync(marker, { force: true });
+    const t0 = performance.now();
+    const s = runChild(exe, ['startlate', marker], { encoding: 'utf8', cwd: tmp });
+    const elapsed = performance.now() - t0;
+    const early = existsSync(marker);
+    let late = false;
+    for (let i = 0; i < 200 && !late; i++) {
+      await new Promise((res) => setTimeout(res, 50));
+      late = existsSync(marker);
+    }
+    // 子は 1.5 秒待ってから書くので、親がそれより前に戻り、印がまだないなら、親は子を待っていない。
+    if (s.status === 0 && elapsed < 1400 && !early && late) ok(lname);
+    else fail(lname, `status ${s.status}, parent took ${elapsed.toFixed(0)} ms, marker before return: ${early}, marker later: ${late}`);
+  } catch (e) {
+    fail(name, String(e));
+  }
+
+  if (hasWasm) {
+    const wsrc = [
+      'export function main(): i32 {',
+      '  const a: string[] = ["x y", "日本語", ""];',
+      '  print(processRun("prog", a));',
+      '  print(processStart("prog", a));',
+      '  print(processId());',
+      '  print(fileRename("a", "b"));',
+      '  print(fileRemove("a"));',
+      '  print(dirRemove("d"));',
+      '  return 0;',
+      '}',
+    ].join('\n');
+    const wname = 'process and file builtins call the instantiate options and fail without them [wasm32]';
+    try {
+      const wasm = join(tmp, 'process.wasm');
+      build(compileToLL(wsrc, 'wasm32'), 'wasm32', wasm);
+      const bare: string[] = [];
+      await ((await instantiate(readFileSync(wasm), { gpu: false, print: (s: string) => bare.push(s) })).main as () => unknown)();
+      const calls: string[] = [];
+      const out: string[] = [];
+      const exports = await instantiate(readFileSync(wasm), {
+        gpu: false,
+        print: (s: string) => out.push(s),
+        processRun: (p: string, a: string[]) => (calls.push(`run ${p} ${JSON.stringify(a)}`), 5),
+        processStart: (p: string, a: string[]) => (calls.push(`start ${p} ${a.length}`), true),
+        processId: 1234,
+        fileRename: (a: string, b: string) => (calls.push(`rename ${a} ${b}`), true),
+        fileRemove: (p: string) => (calls.push(`remove ${p}`), true),
+        dirRemove: (p: string) => (calls.push(`rmdir ${p}`), true),
+      });
+      await (exports.main as () => unknown)();
+      const wantBare = ['-1', 'false', '0', 'false', 'false', 'false'];
+      const wantOut = ['5', 'true', '1234', 'true', 'true', 'true'];
+      const wantCalls = ['run prog ["x y","日本語",""]', 'start prog 3', 'rename a b', 'remove a', 'rmdir d'];
+      if (same(bare, wantBare) && same(out, wantOut) && same(calls, wantCalls)) ok(wname);
+      else fail(wname, `without options: ${bare.join(' ')}\nwith options: ${out.join(' ')}\ncalls: ${calls.join(' | ')}`);
+    } catch (e) {
+      fail(wname, String(e));
+    }
+  }
+}
+
+// dirRemove はリンクをたどらない。木の中に外のフォルダを指すリンク（Windows はジャンクション。管理者の権限が要らない）を置き、
+// 木を消しても外のファイルが残ることを確かめる。消す名前そのものがリンクなら、リンクだけを消す。
+{
+  const name = 'dirRemove does not follow links out of the tree [host]';
+  try {
+    const src = [
+      'export function main(): i32 {',
+      '  const a = args();',
+      '  print(dirRemove(a[0]));',
+      '  print(isDir(a[0]));',
+      '  return 0;',
+      '}',
+    ].join('\n');
+    const exe = build(compileToLL(src, 'host'), 'host', join(tmp, 'dir_remove_links.bin')).output;
+    const base = join(tmp, 'dir_remove_links');
+    rmSync(base, { recursive: true, force: true });
+    const outside = join(base, 'outside');
+    const tree = join(base, 'tree');
+    mkdirSync(outside, { recursive: true });
+    mkdirSync(join(tree, 'sub', 'deep'), { recursive: true });
+    writeFileSync(join(outside, 'keep.txt'), 'keep');
+    writeFileSync(join(tree, 'sub', 'deep', 'x.txt'), 'x');
+    writeFileSync(join(tree, 'y.txt'), 'y');
+    symlinkSync(outside, join(tree, 'sub', 'link'), windows ? 'junction' : 'dir');
+    symlinkSync(outside, join(base, 'rootlink'), windows ? 'junction' : 'dir');
+    const r1 = runChild(exe, [tree], { encoding: 'utf8', cwd: tmp });
+    const r2 = runChild(exe, [join(base, 'rootlink')], { encoding: 'utf8', cwd: tmp });
+    const o1 = r1.stdout.split(/\r?\n/).filter((l) => l !== '');
+    const o2 = r2.stdout.split(/\r?\n/).filter((l) => l !== '');
+    const kept = existsSync(join(outside, 'keep.txt'));
+    const gone = !existsSync(tree) && !existsSync(join(base, 'rootlink'));
+    if (same(o1, ['true', 'false']) && same(o2, ['true', 'false']) && kept && gone) ok(name);
+    else fail(name, `tree: ${o1.join(' ')}, link: ${o2.join(' ')}, outside kept: ${kept}, removed: ${gone}`);
+  } catch (e) {
+    fail(name, String(e));
   }
 }
 

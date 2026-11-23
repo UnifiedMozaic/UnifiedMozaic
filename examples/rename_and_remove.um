@@ -1,0 +1,61 @@
+// ファイルとフォルダの名前の変更（fileRename）と削除（fileRemove / dirRemove）。
+// 日本語の名前も、そのまま UTF-8 の文字列で渡す。
+// expect: true
+// expect: true
+// expect: true
+// expect: hello
+// expect: true
+// expect: true
+// expect: true
+// expect: true
+// expect: 2
+// expect: true
+// expect: false
+// expect: false
+// expect: true
+// expect: true
+// expect: false
+// expect: false
+
+export function main(): i32 {
+  // 前の実行の残りがあれば消す（結果は見ない）。
+  dirRemove("um_example_rr");
+  const hello: u8[] = [104, 101, 108, 108, 111];
+  const bye: u8[] = [98, 121, 101];
+  print(makeDir("um_example_rr/中/奥"));
+  print(writeFile("um_example_rr/a.txt", hello) && writeFile("um_example_rr/中/b.txt", bye) && writeFile("um_example_rr/中/奥/c.txt", bye));
+
+  // 名前を変える。元の名前はなくなる。
+  print(fileRename("um_example_rr/a.txt", "um_example_rr/日本語 名前.txt"));
+  const moved = readFile("um_example_rr/日本語 名前.txt");
+  if (moved != null) {
+    print(stringFromBytes(moved));
+  }
+  print(fileSize("um_example_rr/a.txt") == null);
+  // ファイルの名前の変更は、あるファイルを置き換える。
+  print(fileRename("um_example_rr/日本語 名前.txt", "um_example_rr/中/b.txt"));
+  const replaced = readFile("um_example_rr/中/b.txt");
+  if (replaced != null) {
+    print(replaced.length == 5);
+  }
+  // フォルダの名前も変えられる。
+  print(fileRename("um_example_rr/中", "um_example_rr/sub"));
+  const names = listDir("um_example_rr/sub");
+  if (names != null) {
+    print(names.length);
+  }
+
+  // fileRemove はファイルだけを消す（ないファイルとフォルダは false）。
+  print(fileRemove("um_example_rr/sub/b.txt"));
+  print(fileRemove("um_example_rr/sub/b.txt"));
+  print(fileRemove("um_example_rr/sub"));
+  // dirRemove はフォルダを中身ごと消す（ファイルとないフォルダは false）。
+  print(dirRemove("um_example_rr"));
+  print(isDir("um_example_rr") == false);
+  print(dirRemove("um_example_rr"));
+  const one: u8[] = [1];
+  writeFile("um_example_rr_file", one);
+  print(dirRemove("um_example_rr_file"));
+  fileRemove("um_example_rr_file");
+  return 0;
+}
