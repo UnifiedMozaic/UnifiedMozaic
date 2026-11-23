@@ -163,7 +163,7 @@ enum WindowEvent {
   MouseMove(window: i32, x: i32, y: i32),
   MouseDown(window: i32, x: i32, y: i32, button: i32),    // button: 1 左、2 中、3 右
   MouseUp(window: i32, x: i32, y: i32, button: i32),
-  Wheel(window: i32, dx: i32, dy: i32),                   // 上・右が正
+  Wheel(window: i32, dx: i32, dy: i32, fx: f64, fy: f64), // 上・右が正。dx, dy はノッチ（整数）、fx, fy は細かい量（ノッチ単位の小数。トラックパッドの滑らかなスクロール）
   KeyDown(window: i32, key: Key, mods: Mods, repeat: bool),
   KeyUp(window: i32, key: Key, mods: Mods),
   Text(window: i32, codepoint: u32),                      // 入力された文字（IME の確定も含む）

@@ -53,7 +53,7 @@ enum WindowEvent {
   MouseMove(window: i32, x: i32, y: i32),
   MouseDown(window: i32, x: i32, y: i32, button: i32),    // 1 left, 2 middle, 3 right
   MouseUp(window: i32, x: i32, y: i32, button: i32),
-  Wheel(window: i32, dx: i32, dy: i32),                   // up / right are positive
+  Wheel(window: i32, dx: i32, dy: i32, fx: f64, fy: f64), // up / right are positive; dx, dy whole notches, fx, fy fine amount in notches (smooth trackpad scrolling)
   KeyDown(window: i32, key: Key, mods: Mods, repeat: bool),
   KeyUp(window: i32, key: Key, mods: Mods),
   Text(window: i32, codepoint: u32),                      // typed text, including IME input
