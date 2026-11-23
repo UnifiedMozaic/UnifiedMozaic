@@ -106,7 +106,7 @@ enum WindowEvent {
   MouseMove(window: i32, x: i32, y: i32),
   MouseDown(window: i32, x: i32, y: i32, button: i32),    // button: 1 左、2 中、3 右
   MouseUp(window: i32, x: i32, y: i32, button: i32),
-  Wheel(window: i32, dx: i32, dy: i32),                   // 上・右が正
+  Wheel(window: i32, dx: i32, dy: i32, fx: f64, fy: f64), // 上・右が正。dx, dy はノッチ（整数）、fx, fy は細かい量（ノッチ単位の小数。トラックパッドの滑らかなスクロール）
   KeyDown(window: i32, key: Key, mods: Mods, repeat: bool),
   KeyUp(window: i32, key: Key, mods: Mods),
   Text(window: i32, codepoint: u32),                      // 入力された文字（IME の確定も含む）
@@ -194,7 +194,7 @@ function pollWindowEvent(timeoutMs: i32): WindowEvent | null {
     case 3: return WindowEvent.MouseMove(w, ev[2], ev[3]);
     case 4: return WindowEvent.MouseDown(w, ev[2], ev[3], ev[4]);
     case 5: return WindowEvent.MouseUp(w, ev[2], ev[3], ev[4]);
-    case 6: return WindowEvent.Wheel(w, ev[2], ev[3]);
+    case 6: return WindowEvent.Wheel(w, ev[2], ev[3], (ev[4] as f64) / 1000.0, (ev[5] as f64) / 1000.0);
     case 7: return WindowEvent.KeyDown(w, keyOf(ev[2]), modsOf(ev[3]), ev[4] != 0);
     case 8: return WindowEvent.KeyUp(w, keyOf(ev[2]), modsOf(ev[3]));
     case 9: return WindowEvent.Text(w, ev[2] as u32);

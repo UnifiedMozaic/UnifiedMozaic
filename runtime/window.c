@@ -33,7 +33,7 @@ enum {
   EV_MOUSE_MOVE = 3,  // a = x, b = y
   EV_MOUSE_DOWN = 4,  // a = x, b = y, c = ボタン（1 左, 2 中, 3 右）
   EV_MOUSE_UP = 5,    // 同上
-  EV_WHEEL = 6,       // a = 横, b = 縦（ノッチ単位。上・右が正）
+  EV_WHEEL = 6,       // a = 横, b = 縦（ノッチ単位。上・右が正）, c = 横, d = 縦（細かい量。1/1000 ノッチ単位）
   EV_KEY_DOWN = 7,    // a = キー（SDL のキーコード）, b = 修飾キー, c = 押しっぱなしの繰り返しなら 1
   EV_KEY_UP = 8,      // a = キー, b = 修飾キー
   EV_TEXT = 9,        // a = 入力された文字（Unicode のコードポイント）
@@ -814,12 +814,16 @@ static int translate(const SDL_Event *e, int32_t *out) {
       out[4] = e->button.button;
       return out[1] != 0;
     case SDL_EVENT_MOUSE_WHEEL: {
-      int32_t flip = e->wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -1 : 1;
+      // SDL3 の x / y は OS の「ナチュラルスクロール」の設定をすでに反映している。direction が FLIPPED でも
+      // 符号を戻さない（戻すと Mac のトラックパッドで向きが逆になる）。
+      // a, b は SDL が貯めた整数のノッチ。c, d はトラックパッドの滑らかな量（1/1000 ノッチ単位）。
       out[0] = EV_WHEEL;
       out[1] = number_of(e->wheel.windowID);
-      out[2] = e->wheel.integer_x * flip;
-      out[3] = e->wheel.integer_y * flip;
-      return out[1] != 0 && (out[2] != 0 || out[3] != 0);
+      out[2] = e->wheel.integer_x;
+      out[3] = e->wheel.integer_y;
+      out[4] = (int32_t)SDL_lroundf(e->wheel.x * 1000.0f);
+      out[5] = (int32_t)SDL_lroundf(e->wheel.y * 1000.0f);
+      return out[1] != 0 && (out[2] != 0 || out[3] != 0 || out[4] != 0 || out[5] != 0);
     }
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP:
