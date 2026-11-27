@@ -995,7 +995,9 @@ const HELPERS: Record<string, string[]> = {
     '  var eb = i32((ub >> 23u) & 0xffu);',
     '  var ma = ua & 0x7fffffu;',
     '  var mb = ub & 0x7fffffu;',
-    '  let nan = bitcast<f32>(0x7fc00000u);',
+    // NaN は実行時の値（ua & 0u）を混ぜて作る。定数の bitcast で NaN を作ると、ブラウザ（Chrome の Tint）は
+    // 「NaN は f32 で表せない」としてシェーダのコンパイルを拒む（wgpu-native の naga は通す）。
+    '  let nan = bitcast<f32>(0x7fc00000u | (ua & 0u));',
     '  if ((ea == 255 && ma != 0u) || (eb == 255 && mb != 0u)) {',
     '    return nan;',
     '  }',
@@ -1079,7 +1081,7 @@ const HELPERS: Record<string, string[]> = {
     '    return a;',
     '  }',
     '  if ((ua & 0x80000000u) != 0u) {',
-    '    return bitcast<f32>(0x7fc00000u);',
+    '    return bitcast<f32>(0x7fc00000u | (ua & 0u));',  // 定数の NaN にしない（um_fdiv の説明）
     '  }',
     '  if (e == 255) {',
     '    return a;',
