@@ -3,8 +3,8 @@
 //   レイトレーシング（影と映り込み）の入り切り: T  終わり: Esc
 // シェーダ（光・市松模様・霧・レンガのテクスチャ）、宝石のインスタンス描画（8 つを 1 回の gpu.draw で）、深度テスト、
 // 三角関数と行列、キーとマウスの入力を使う。
-// 影と床への映り込みはレイトレーシング: 普通の描画で見える面を決め、その画素の fragment function の中で、光源と
-// 反射の向きに光線を飛ばす（箱と球との当たり判定。T で切り替え）。
+// 影と映り込みはレイトレーシングに任せる: 普通の描画は画素ごとに見える面を決めるだけで、その画素の fragment function
+// の中で、光源の向き（影）と反射の向き（映り込み。床・宝石・立方体）に光線を飛ばす（箱と正八面体との当たり判定。T で切り替え）。
 // 同じソースが、GPU（UM_WGPU=1）でも CPU でも、ネイティブでもブラウザ（--web）でも動く（docs/render.ja.md、docs/web.ja.md）。
 //   UM_WGPU=1 node src/cli.ts build examples/window/demo.um --target host -o demo && ./demo
 //   node src/cli.ts build examples/window/demo.um --web -o demo-web   （HTTP で開く）
@@ -103,6 +103,7 @@ struct Camera {
 struct Object {
   model: mat4<f32>;
   tint: vec3<f32>;
+  shine: f32;   // 映り込みの強さ（0 は映らない）。地面は 0.3 に決めてある
 }
 
 struct Scene {
@@ -118,6 +119,7 @@ struct VOut {
   color: vec3<f32>;
   uv: vec2<f32>;
   material: f32;
+  shine: f32;
 }
 
 // 頂点を物の変換とカメラで動かす（2 つの vertex function が使う）。
@@ -129,6 +131,7 @@ kernel function shade(v: Vertex, cam: Camera, obj: Object): VOut {
     world: vec3(wp.x, wp.y, wp.z),
     normal: vec3(wn.x, wn.y, wn.z),
     color: vec3(v.color.x * obj.tint.x, v.color.y * obj.tint.y, v.color.z * obj.tint.z),
+    shine: v.material > 0.5 && v.material < 1.5 ? 0.3 : obj.shine,
     uv: v.uv,
     material: v.material,
   };
@@ -147,83 +150,108 @@ vertex function vsMany(i: u32, inst: u32, verts: Buffer<Vertex>, cam: Camera, ob
 // ---- レイトレーシング ----
 // 光線を当てる物は、軸にそろった箱（壁・柱・立方体）と球（宝石）。場面が小さいので、毎回すべてと当たり判定をする。
 
+// 光線を当てる物は、箱（壁・柱・立方体）と宝石（正八面体）。どちらも y 軸のまわりに回っていてよい（cos と sin を持つ）。
+// どちらも「平行な 2 枚の板にはさまれた所」をいくつか重ねた形なので、同じ方法（slab 法）で当たり判定をする。
+// 場面が小さいので、毎回すべてと判定する。
+
 struct Box {
-  lo: vec3<f32>;
-  hi: vec3<f32>;
+  center: vec3<f32>;
+  half: vec3<f32>;   // 半分の大きさ
+  cosYaw: f32;
+  sinYaw: f32;
   color: vec3<f32>;
 }
 
-struct Ball {
+struct Gem {
   center: vec3<f32>;
-  radius: f32;
+  cosYaw: f32;
+  sinYaw: f32;
   color: vec3<f32>;
 }
 
 // 光線を当てる物の数と、レイトレーシングを使うか（1 で使う）。
 struct Trace {
   boxes: u32;
-  balls: u32;
+  gems: u32;
   enabled: u32;
 }
 
-// 光線（o から向き d）が箱に当たる距離。当たらないか tmax より遠ければ -1（slab 法）。
-kernel function hitBox(o: vec3<f32>, d: vec3<f32>, b: Box, tmax: f32): f32 {
+// 世界の向きを、y 軸のまわりに回った物の中の向きにする（mat4RotateY の逆）。
+kernel function toLocal(v: vec3<f32>, c: f32, s: f32): vec3<f32> {
+  return vec3(c * v.x - s * v.z, v.y, s * v.x + c * v.z);
+}
+
+// 物の中の向きを、世界の向きにする（mat4RotateY）。
+kernel function toWorld(v: vec3<f32>, c: f32, s: f32): vec3<f32> {
+  return vec3(c * v.x + s * v.z, v.y, -s * v.x + c * v.z);
+}
+
+// 物の中の座標で、光線（o から向き d）が「すべての k で -1 ≤ ns[k]・p ≤ 1」の形に当たる距離と、入った面の向き。
+// 返す vec4 の x が距離（当たらないか tmax より遠ければ -1）、yzw が面の向き（長さは 1 でない）。
+kernel function convexHit(o: vec3<f32>, d: vec3<f32>, ns: vec3<f32>[4], count: u32, tmax: f32): vec4<f32> {
   let t0: f32 = 0;
   let t1 = tmax;
-  const los: f32[3] = [b.lo.x, b.lo.y, b.lo.z];
-  const his: f32[3] = [b.hi.x, b.hi.y, b.hi.z];
-  const os: f32[3] = [o.x, o.y, o.z];
-  const ds: f32[3] = [d.x, d.y, d.z];
-  for (let k: u32 = 0; k < 3; k++) {
-    if (Math.abs(ds[k]) < 1.0e-8) {
-      // この軸には平行。始点が板の間になければ当たらない。
-      if (os[k] < los[k] || os[k] > his[k]) {
-        return -1;
+  let normal: vec3<f32> = vec3(0.0 as f32, 1, 0);
+  for (let k: u32 = 0; k < count; k++) {
+    const n = ns[k];
+    const num = vec3Dot(n, o);
+    const den = vec3Dot(n, d);
+    if (Math.abs(den) < 1.0e-8) {
+      // 板に平行。始点が板の間になければ当たらない。
+      if (num < -1 || num > 1) {
+        return vec4(-1.0 as f32, 0, 0, 0);
       }
     } else {
-      const inv = 1 / ds[k];
-      let ta = (los[k] - os[k]) * inv;
-      let tb = (his[k] - os[k]) * inv;
+      let ta = (-1 - num) / den;
+      let tb = (1 - num) / den;
       if (ta > tb) {
         const tmp = ta;
         ta = tb;
         tb = tmp;
       }
-      t0 = Math.max(t0, ta);
+      if (ta > t0) {
+        t0 = ta;
+        // 入った面は、光線に向いている側の板。
+        if (den < 0) {
+          normal = n;
+        } else {
+          normal = vec3(-n.x, -n.y, -n.z);
+        }
+      }
       t1 = Math.min(t1, tb);
       if (t0 > t1) {
-        return -1;
+        return vec4(-1.0 as f32, 0, 0, 0);
       }
     }
   }
-  return t0;
+  return vec4(t0, normal.x, normal.y, normal.z);
 }
 
-// 光線が球に当たる距離（手前の交点）。当たらなければ -1。d は長さ 1。
-kernel function hitBall(o: vec3<f32>, d: vec3<f32>, s: Ball, tmax: f32): f32 {
-  const oc = o - s.center;
-  const b = vec3Dot(oc, d);
-  const c = vec3Dot(oc, oc) - s.radius * s.radius;
-  const disc = b * b - c;
-  if (disc < 0) {
-    return -1;
-  }
-  const t = -b - Math.sqrt(disc);
-  if (t < 0 || t > tmax) {
-    return -1;
-  }
-  return t;
+// 箱に当たる距離と、世界の向きの面の法線。
+kernel function hitBox(o: vec3<f32>, d: vec3<f32>, b: Box, tmax: f32): vec4<f32> {
+  const ns: vec3<f32>[4] = [vec3(1 / b.half.x, 0, 0), vec3(0, 1 / b.half.y, 0), vec3(0, 0, 1 / b.half.z), vec3(0.0 as f32, 0, 0)];
+  const h = convexHit(toLocal(o - b.center, b.cosYaw, b.sinYaw), toLocal(d, b.cosYaw, b.sinYaw), ns, 3, tmax);
+  const n = toWorld(vec3(h.y, h.z, h.w), b.cosYaw, b.sinYaw);
+  return vec4(h.x, n.x, n.y, n.z);
+}
+
+// 宝石（|x| / 0.5 + |y| / 0.8 + |z| / 0.5 ≤ 1 の正八面体。addGem と同じ形）に当たる距離と、世界の向きの面の法線。
+kernel function hitGem(o: vec3<f32>, d: vec3<f32>, g: Gem, tmax: f32): vec4<f32> {
+  const ns: vec3<f32>[4] = [vec3(2.0 as f32, 1.25, 2), vec3(2.0 as f32, 1.25, -2), vec3(2.0 as f32, -1.25, 2), vec3(2.0 as f32, -1.25, -2)];
+  const h = convexHit(toLocal(o - g.center, g.cosYaw, g.sinYaw), toLocal(d, g.cosYaw, g.sinYaw), ns, 4, tmax);
+  const n = toWorld(vec3(h.y, h.z, h.w), g.cosYaw, g.sinYaw);
+  return vec4(h.x, n.x, n.y, n.z);
 }
 
 // 光線が tmax までに何かに当たるか（影の判定。当たれば、すぐやめる）。
-kernel function blocked(o: vec3<f32>, d: vec3<f32>, boxes: Buffer<Box>, balls: Buffer<Ball>, tr: Trace, tmax: f32): bool {
+kernel function blocked(o: vec3<f32>, d: vec3<f32>, boxes: Buffer<Box>, gems: Buffer<Gem>, tr: Trace, tmax: f32): bool {
   for (let i: u32 = 0; i < tr.boxes; i++) {
-    if (hitBox(o, d, boxes[i], tmax) >= 0) {
+    if (hitBox(o, d, boxes[i], tmax).x >= 0) {
       return true;
     }
   }
-  for (let i: u32 = 0; i < tr.balls; i++) {
-    if (hitBall(o, d, balls[i], tmax) >= 0) {
+  for (let i: u32 = 0; i < tr.gems; i++) {
+    if (hitGem(o, d, gems[i], tmax).x >= 0) {
       return true;
     }
   }
@@ -231,50 +259,39 @@ kernel function blocked(o: vec3<f32>, d: vec3<f32>, boxes: Buffer<Box>, balls: B
 }
 
 // 光線がいちばん近くで当たった物の、光の当たった色。当たらなければ w が 0。
-kernel function reflected(o: vec3<f32>, d: vec3<f32>, boxes: Buffer<Box>, balls: Buffer<Ball>, tr: Trace, light: vec3<f32>): vec4<f32> {
+kernel function reflected(o: vec3<f32>, d: vec3<f32>, boxes: Buffer<Box>, gems: Buffer<Gem>, tr: Trace, light: vec3<f32>): vec4<f32> {
   let best: f32 = 60;
   let color: vec3<f32> = vec3(0.0 as f32, 0, 0);
   let normal: vec3<f32> = vec3(0.0 as f32, 1, 0);
   let found = false;
   for (let i: u32 = 0; i < tr.boxes; i++) {
     const b = boxes[i];
-    const t = hitBox(o, d, b, best);
-    if (t >= 0 && t < best) {
-      best = t;
+    const h = hitBox(o, d, b, best);
+    if (h.x >= 0 && h.x < best) {
+      best = h.x;
       color = b.color;
+      normal = vec3(h.y, h.z, h.w);
       found = true;
-      // 当たった面の法線: 箱の中心から見て、いちばん外に出ている軸。
-      const p = o + d * t;
-      const c = (b.lo + b.hi) * 0.5;
-      const h = (b.hi - b.lo) * 0.5;
-      const q: vec3<f32> = vec3((p.x - c.x) / h.x, (p.y - c.y) / h.y, (p.z - c.z) / h.z);
-      if (Math.abs(q.x) >= Math.abs(q.y) && Math.abs(q.x) >= Math.abs(q.z)) {
-        normal = vec3(q.x > 0 ? 1.0 as f32 : -1, 0, 0);
-      } else if (Math.abs(q.y) >= Math.abs(q.z)) {
-        normal = vec3(0, q.y > 0 ? 1.0 as f32 : -1, 0);
-      } else {
-        normal = vec3(0, 0, q.z > 0 ? 1.0 as f32 : -1);
-      }
     }
   }
-  for (let i: u32 = 0; i < tr.balls; i++) {
-    const s = balls[i];
-    const t = hitBall(o, d, s, best);
-    if (t >= 0 && t < best) {
-      best = t;
-      color = s.color;
+  for (let i: u32 = 0; i < tr.gems; i++) {
+    const g = gems[i];
+    const h = hitGem(o, d, g, best);
+    if (h.x >= 0 && h.x < best) {
+      best = h.x;
+      color = g.color;
+      normal = vec3(h.y, h.z, h.w);
       found = true;
-      normal = vec3Normalize(o + d * t - s.center);
     }
   }
   if (!found) {
     return vec4(0.0 as f32, 0, 0, 0);
   }
-  const lit = Math.max(vec3Dot(normal, light), 0) * 0.75 + 0.25;
+  const lit = Math.max(vec3Dot(vec3Normalize(normal), light), 0) * 0.75 + 0.25;
   return vec4(color.x * lit, color.y * lit, color.z * lit, 1.0 as f32);
 }
 
-fragment function fs(v: VOut, scene: Scene, bricks: Buffer<u32>, boxes: Buffer<Box>, balls: Buffer<Ball>, tr: Trace): vec4<f32> {
+fragment function fs(v: VOut, scene: Scene, bricks: Buffer<u32>, boxes: Buffer<Box>, gems: Buffer<Gem>, tr: Trace): vec4<f32> {
   let base = v.color;
   if (v.material > 1.5) {
     // レンガのテクスチャ（32 × 32）。色は頂点の色に掛ける。
@@ -294,27 +311,33 @@ fragment function fs(v: VOut, scene: Scene, bricks: Buffer<u32>, boxes: Buffer<B
   if (tr.enabled != 0 && diffuse > 0) {
     // 影: 面から光源の向きへ光線を飛ばし、何かに当たれば光は届かない。
     const o = v.world + n * 0.02;
-    if (blocked(o, scene.light, boxes, balls, tr, 60)) {
+    if (blocked(o, scene.light, boxes, gems, tr, 60)) {
       diffuse = 0;
     }
   }
   const lit = diffuse * 0.75 + 0.25;
-  if (tr.enabled != 0 && v.material > 0.5 && v.material < 1.5) {
-    // 床への映り込み: 見る向きを床で跳ね返した光線が当たった物の色を、少し混ぜる。
+  let color: vec3<f32> = vec3(base.x * lit, base.y * lit, base.z * lit);
+  if (tr.enabled != 0 && v.shine > 0) {
+    // 映り込み: 見る向きを面で跳ね返した光線が当たった物の色（当たらなければ空の色）を、面の光沢の分だけ混ぜる。
     const view = vec3Normalize(v.world - scene.eye);
-    const r: vec3<f32> = vec3(view.x, -view.y, view.z);
-    const hit = reflected(v.world + vec3(0.0 as f32, 0.02, 0), r, boxes, balls, tr, scene.light);
+    const r = view - n * (2 * vec3Dot(view, n));
+    const hit = reflected(v.world + n * 0.02, r, boxes, gems, tr, scene.light);
+    let seen: vec3<f32> = scene.fog;
     if (hit.w > 0) {
-      const k: f32 = 0.3;
-      base = vec3(base.x * (1 - k) + hit.x / lit * k, base.y * (1 - k) + hit.y / lit * k, base.z * (1 - k) + hit.z / lit * k);
+      seen = vec3(hit.x, hit.y, hit.z);
     }
+    // 正面から見ると弱く、浅い角度から見るほど強く映る（フレネルの近似）。
+    const c = Math.max(-vec3Dot(view, n), 0);
+    const g = (1 - c) * (1 - c) * (1 - c);
+    const k = v.shine * (0.25 + 0.75 * g);
+    color = vec3(color.x * (1 - k) + seen.x * k, color.y * (1 - k) + seen.y * k, color.z * (1 - k) + seen.z * k);
   }
   // 遠いほど霧の色に近づける。
   const d = vec3Length(v.world - scene.eye);
   const f = Math.min(Math.max((d - 18) / 30, 0), 1);
-  const r = base.x * lit * (1 - f) + scene.fog.x * f;
-  const g = base.y * lit * (1 - f) + scene.fog.y * f;
-  const b = base.z * lit * (1 - f) + scene.fog.z * f;
+  const r = color.x * (1 - f) + scene.fog.x * f;
+  const g = color.y * (1 - f) + scene.fog.y * f;
+  const b = color.z * (1 - f) + scene.fog.z * f;
   return vec4(r, g, b, 1.0 as f32);
 }
 
@@ -523,14 +546,14 @@ export function main(): i32 {
   let gemObjs = new Buffer<Object>(GEMS as usize);
   // レイトレーシングの場面: 壁 4 つ・柱 4 つ（動かない）と立方体（毎フレーム）、宝石の球（毎フレーム）。
   let boxes = new Buffer<Box>(9);
-  boxes[0] = { lo: vec3(-ARENA - 0.6, 0, -ARENA - 0.6), hi: vec3(ARENA + 0.6, 1.2, -ARENA), color: wall };
-  boxes[1] = { lo: vec3(-ARENA - 0.6, 0, ARENA), hi: vec3(ARENA + 0.6, 1.2, ARENA + 0.6), color: wall };
-  boxes[2] = { lo: vec3(-ARENA - 0.6, 0, -ARENA), hi: vec3(-ARENA, 1.2, ARENA), color: wall };
-  boxes[3] = { lo: vec3(ARENA, 0, -ARENA), hi: vec3(ARENA + 0.6, 1.2, ARENA), color: wall };
+  boxes[0] = { center: vec3(0.0 as f32, 0.6, -ARENA - 0.3), half: vec3(ARENA + 0.6, 0.6, 0.3), cosYaw: 1, sinYaw: 0, color: wall };
+  boxes[1] = { center: vec3(0.0 as f32, 0.6, ARENA + 0.3), half: vec3(ARENA + 0.6, 0.6, 0.3), cosYaw: 1, sinYaw: 0, color: wall };
+  boxes[2] = { center: vec3(-ARENA - 0.3, 0.6, 0), half: vec3(0.3 as f32, 0.6, ARENA), cosYaw: 1, sinYaw: 0, color: wall };
+  boxes[3] = { center: vec3(ARENA + 0.3, 0.6, 0), half: vec3(0.3 as f32, 0.6, ARENA), cosYaw: 1, sinYaw: 0, color: wall };
   for (let k: u32 = 0; k < 4; k++) {
-    boxes[4 + k] = { lo: vec3(PILLAR_X[k] - PILLAR_H, 0, PILLAR_Z[k] - PILLAR_H), hi: vec3(PILLAR_X[k] + PILLAR_H, 4, PILLAR_Z[k] + PILLAR_H), color: vec3(0.62 as f32, 0.38, 0.4) };
+    boxes[4 + k] = { center: vec3(PILLAR_X[k], 2.0, PILLAR_Z[k]), half: vec3(PILLAR_H, 2.0, PILLAR_H), cosYaw: 1, sinYaw: 0, color: vec3(0.62 as f32, 0.38, 0.4) };
   }
-  let balls = new Buffer<Ball>(GEMS as usize);
+  let gemShapes = new Buffer<Gem>(GEMS as usize);
 
   const sky: vec3<f32> = vec3(0.62 as f32, 0.78, 0.95);
   const clear: u32 = 0xFF000000 | (((sky.x * 255) as u32) << 16) | (((sky.y * 255) as u32) << 8) | ((sky.z * 255) as u32);
@@ -626,31 +649,33 @@ export function main(): i32 {
     const scene: Scene = { light: vec3Normalize(vec3(0.5 as f32, 1, 0.35)), fog: sky, eye: eye };
 
     // 光線を当てる場面を今の位置にする（立方体と、残っている宝石）。
-    boxes[8] = { lo: vec3(game.x - 0.5, game.y, game.z - 0.5), hi: vec3(game.x + 0.5, game.y + 1, game.z + 0.5), color: vec3(0.95 as f32, 0.45, 0.3) };
+    boxes[8] = { center: vec3(game.x, game.y + 0.5, game.z), half: vec3(0.5 as f32, 0.5, 0.5), cosYaw: Math.cos(game.yaw), sinYaw: Math.sin(game.yaw), color: vec3(0.95 as f32, 0.45, 0.3) };
     let nb: u32 = 0;
     for (let k: u32 = 0; k < GEMS; k++) {
       if (!game.taken[k]) {
         const bob = Math.sin(time * 2.5 + (k as f32)) * 0.25 + 1.2;
-        balls[nb] = { center: vec3(game.gemX[k], bob, game.gemZ[k]), radius: 0.45, color: vec3(0.35 as f32, 0.85, 1) };
+        // 描くときと同じ位置と回転（下の gemObjs）。
+        const spin = time * 1.8 + (k as f32);
+        gemShapes[nb] = { center: vec3(game.gemX[k], bob, game.gemZ[k]), cosYaw: Math.cos(spin), sinYaw: Math.sin(spin), color: vec3(0.35 as f32, 0.85, 1) };
         nb++;
       }
     }
-    const tr: Trace = { boxes: 9, balls: nb, enabled: game.raytrace ? 1 : 0 };
-    gpu.draw(mut frame, world.length as u32, vs(world, cam, { model: mat4Identity(), tint: white }), fs(scene, bricks, boxes, balls, tr));
-    const player: Object = { model: mat4Mul(mat4Translate(game.x, game.y, game.z), mat4RotateY(game.yaw)), tint: white };
-    gpu.draw(mut frame, cube.length as u32, vs(cube, cam, player), fs(scene, bricks, boxes, balls, tr));
+    const tr: Trace = { boxes: 9, gems: nb, enabled: game.raytrace ? 1 : 0 };
+    gpu.draw(mut frame, world.length as u32, vs(world, cam, { model: mat4Identity(), tint: white, shine: 0 }), fs(scene, bricks, boxes, gemShapes, tr));
+    const player: Object = { model: mat4Mul(mat4Translate(game.x, game.y, game.z), mat4RotateY(game.yaw)), tint: white, shine: 0.2 };
+    gpu.draw(mut frame, cube.length as u32, vs(cube, cam, player), fs(scene, bricks, boxes, gemShapes, tr));
     // 残っている宝石を、インスタンスで 1 回の draw で描く。
     let left: u32 = 0;
     for (let k: u32 = 0; k < GEMS; k++) {
       if (!game.taken[k]) {
         const bob = Math.sin(time * 2.5 + (k as f32)) * 0.25 + 1.2;
         const spin = mat4RotateY(time * 1.8 + (k as f32));
-        gemObjs[left] = { model: mat4Mul(mat4Translate(game.gemX[k], bob, game.gemZ[k]), spin), tint: white };
+        gemObjs[left] = { model: mat4Mul(mat4Translate(game.gemX[k], bob, game.gemZ[k]), spin), tint: white, shine: 0.45 };
         left++;
       }
     }
     if (left > 0) {
-      gpu.draw(mut frame, gem.length as u32, left, vsMany(gem, cam, gemObjs), fs(scene, bricks, boxes, balls, tr));
+      gpu.draw(mut frame, gem.length as u32, left, vsMany(gem, cam, gemObjs), fs(scene, bricks, boxes, gemShapes, tr));
     }
     gpu.endFrame(mut frame);
 
