@@ -586,7 +586,9 @@ export function compileToLL(src: string, target: TargetName, sanitize: boolean |
   const appleArm = process.env.UM_GENERIC_SIMD !== '1' &&
     (target === 'arm64-macos' || (target === 'host' && process.platform === 'darwin' && process.arch === 'arm64'));
   const windows = target === 'host' && process.platform === 'win32';
-  return generate(prog, t.kind, sanitize, metal, appleArm, windows, target === 'wasm32-plugin', wgpu);
+  // UM_SHADER_FAST_MATH=1: 描画のシェーダ（vertex / fragment function）は GPU のふつうの計算を使う（docs/render.ja.md）。
+  const fastShaders = process.env.UM_SHADER_FAST_MATH === '1';
+  return generate(prog, t.kind, sanitize, metal, appleArm, windows, target === 'wasm32-plugin', wgpu, fastShaders);
 }
 
 /**

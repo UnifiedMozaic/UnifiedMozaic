@@ -5,6 +5,7 @@
 //   - vertex と fragment に値の引数（ずらす量と色）を渡す
 // 色は三角形ごとに一つ（補間しない）なので、GPU による違いが出ない。三角形の辺は画素の中心を通らない位置に置く。
 // cpu-build
+// fast-math
 // expect: ........................
 // expect: ....RRRRRRRRRRRRRRRRRR..
 // expect: ....RRRRRRRRRRRRRRRR....

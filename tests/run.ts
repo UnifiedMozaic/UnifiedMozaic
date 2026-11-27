@@ -1291,16 +1291,26 @@ for (const f of files('tests/wgpu')) {
           if (!text) throw new Error(`no WGSL for kernel '${name}'`);
           writeFileSync(join(tmp, `${name}.wgsl`), text);
         }
-        const exe = join(tmp, `${tag}_wgpu.bin`);
-        build(compileToLL(src, 'host', false, join(root, f)), 'host', exe);
+        // `// fast-math` があれば、描画のシェーダを GPU のふつうの計算にしたビルド（UM_SHADER_FAST_MATH=1）でも照合する。
+        const variants: [string, boolean][] = [['', false]];
+        if (/^\/\/ fast-math\s*$/m.test(src)) variants.push([', fast math', true]);
+        for (const [variant, fast] of variants) {
+        const exe = join(tmp, `${tag}_wgpu${fast ? '_fast' : ''}.bin`);
+        if (fast) process.env.UM_SHADER_FAST_MATH = '1';
+        try {
+          build(compileToLL(src, 'host', false, join(root, f)), 'host', exe);
+        } finally {
+          delete process.env.UM_SHADER_FAST_MATH;
+        }
         for (const be of backends.length > 0 ? backends : ['']) {
-          const label = be ? `${f} [wgpu ${be}]` : `${f} [wgpu]`;
+          const label = be ? `${f} [wgpu ${be}${variant}]` : `${f} [wgpu${variant}]`;
           const env = { ...process.env, ...(be ? { UM_WGPU_BACKEND: be } : {}) };
           const r = spawnSync(exe, [], { encoding: 'utf8', input: stdinText(src), cwd: tmp, env, timeout: 300000 });
           const out = r.stdout.split('\n').filter((l) => l !== '');
           if (r.status !== 0) fail(label, `exit ${r.status}: ${r.stderr.trim().slice(0, 1500)}`);
           else if (same(out, want)) ok(label);
           else fail(label, `expected: ${want.join(' ')}\nactual:   ${out.join(' ')}`);
+        }
         }
       } catch (e) {
         fail(`${f} [wgpu]`, String(e));

@@ -114,6 +114,11 @@ class Emitter {
   workgroupVars: string[] = [];
   /** 共有配列をグループの始めに 0 で埋める文（um_main の先頭に置く）。 */
   workgroupInit: string[] = [];
+  /**
+   * GPU のふつうの計算を使うか（描画のシェーダで UM_SHADER_FAST_MATH=1 のとき）。浮動小数点の割り算・平方根を
+   * GPU の命令のままにし、掛け算・足し算・引き算を FMA にまとめたり組み替えたりしてよいことにする。速いが、CPU と結果が少し変わる。
+   */
+  fast = false;
   /** 使った補助関数（um_fdiv など）。使ったものだけを出す。 */
   uses = new Set<string>();
   /** RacyBuffer の比較交換の関数（Buffer のグローバル変数の名前 → WGSL）。使ったものだけを出す。 */
@@ -439,6 +444,10 @@ class Emitter {
           const rt = e.right.ty as Ty & { k: 'int' };
           return `(${l} ${e.op} (${rt.signed ? `u32(${r})` : r} & 31u))`;
         }
+        // 速い計算（fast）では、浮動小数点の四則演算は GPU の命令のまま。
+        if (this.fast && ty.k === 'float' && (e.op === '/' || e.op === '*' || e.op === '+' || e.op === '-')) {
+          return `(${l} ${e.op} ${r})`;
+        }
         // 正しく丸める割り算、FMA にまとめない掛け算、ドライバの誤りを避ける余り（ファイルの先頭の説明）。
         if (ty.k === 'float' && (e.op === '/' || e.op === '*')) {
           const fn = e.op === '/' ? 'um_fdiv' : 'um_fmul';
@@ -528,6 +537,7 @@ class Emitter {
           case 'group.count':
             return 'um_params.count';
           case 'sqrt':
+            if (this.fast) return `sqrt(${a[0]})`;
             this.uses.add('um_fsqrt');
             return `um_fsqrt(${a[0]})`;
           case 'floor':
@@ -956,8 +966,11 @@ function vecInfo(prog: Program, t: Ty): { n: number; elem: Ty } | null {
 }
 
 /** vertex function と fragment function の組から、描画のシェーダの WGSL を作る（Emitter.render）。 */
-export function emitWgslRender(prog: Program, vs: FnDecl, fs: FnDecl, kind: { indexed: boolean; instanced: boolean } = { indexed: false, instanced: false }): WgslKernel {
-  return new Emitter(prog).render(vs, fs, kind);
+export function emitWgslRender(prog: Program, vs: FnDecl, fs: FnDecl, kind: { indexed: boolean; instanced: boolean } = { indexed: false, instanced: false },
+  fast = false): WgslKernel {
+  const e = new Emitter(prog);
+  e.fast = fast;
+  return e.render(vs, fs, kind);
 }
 
 /** 補助関数の WGSL（Emitter.uses に入れた名前ごと）。 */

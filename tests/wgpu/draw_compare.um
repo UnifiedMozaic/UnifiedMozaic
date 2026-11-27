@@ -6,6 +6,7 @@
 // 出力: 塗るかどうかが分かれた画素が全体の 1% 未満か、両方が塗って色が 3 / 255 より違う画素が 0.5% 未満か、
 //       塗られた画素の数が近いか。
 // cpu-build
+// fast-math
 // expect: true
 // expect: true
 // expect: true

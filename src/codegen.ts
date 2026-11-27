@@ -1125,6 +1125,8 @@ class ModuleGen {
   usesGpuRuntime = false;
   /** 描画のシェーダ（vertex と fragment の組。キーは "vs|fs"）。runtime/wgpu.c は番号ごとにパイプラインを作る。 */
   renderShaders = new Map<string, { id: number; global: string; bytes: number }>();
+  /** 描画のシェーダで GPU のふつうの計算を使うか（UM_SHADER_FAST_MATH=1。kernel の dispatch には関わらない）。 */
+  fastShaders = false;
 
   /** wgpu の経路で、GPU を使う呼び出し（GPU で実行しうる dispatch、gpu.loadKernel）があるか。なければ wgpu をリンクしない。 */
   wgpuUsed(): boolean {
@@ -1407,7 +1409,7 @@ class ModuleGen {
     const key = `${vs}|${fs}|${tag}`;
     let k = this.renderShaders.get(key);
     if (!k) {
-      const source = emitWgslRender(this.prog, this.prog.fns.get(vs)!.decl, this.prog.fns.get(fs)!.decl, kind).source;
+      const source = emitWgslRender(this.prog, this.prog.fns.get(vs)!.decl, this.prog.fns.get(fs)!.decl, kind, this.fastShaders).source;
       const bytes = Buffer.from(source, 'utf8');
       let text = '';
       for (const b of bytes) {
@@ -5543,6 +5545,8 @@ class FnGen {
 }
 
 export function generate(prog: Program, target: TargetKind, sanitize: boolean | 'thread' = false, metal = false, appleArm = false, windows = false, plugin = false,
-  wgpu = false): string {
-  return new ModuleGen(prog, target, sanitize, metal, appleArm, windows, plugin, wgpu).generate();
+  wgpu = false, fastShaders = false): string {
+  const m = new ModuleGen(prog, target, sanitize, metal, appleArm, windows, plugin, wgpu);
+  m.fastShaders = fastShaders;
+  return m.generate();
 }

@@ -143,6 +143,22 @@ GPU のない環境でも同じプログラムが動くよう、コンパイラ�
 
 CPU の描画は画素ごとに fragment function を呼ぶので、GPU よりずっと遅くなります（試作・テスト・GPU のない環境のためのもの）。
 
+## 速いシェーダの計算（UM_SHADER_FAST_MATH=1）
+
+ふつう、シェーダ（vertex function と fragment function、そこから呼ぶ kernel function）の浮動小数点の計算は、kernel と同じく CPU と同じ値になるように WGSL にします（割り算と平方根を整数の演算で正しく丸め、掛け算と足し算を FMA にまとめさせず、組み替えさせない）。そのぶん、割り算や平方根の多いシェーダは重くなります。
+
+ビルドのときに `UM_SHADER_FAST_MATH=1` を付けると、**描画のシェーダだけ** GPU のふつうの計算を使います。
+
+```sh
+UM_SHADER_FAST_MATH=1 UM_WGPU=1 node src/cli.ts build game.um --target host -o game
+UM_SHADER_FAST_MATH=1 node src/cli.ts build game.um --web -o game-web
+```
+
+- 割り算と平方根は GPU の命令のまま（WebGPU は数 ULP の誤差を許す）。掛け算と足し算は FMA にまとめたり、順を組み替えたりしてよい。
+- 速くなるが、GPU の絵と CPU の絵が少し変わる（色が 1 / 255 ほど違う画素が出る）。どの画素を塗るかは、もともと GPU が決めるので、描画の結果はこの指定がなくてもビットまで同じにはならない。
+- **kernel（`dispatch`）は変わらない。** 正確な計算のまま、CPU と GPU で同じ値になる。
+- CPU で描くとき（GPU がないとき）の計算は変わらない。
+
 ## 仕組み（GPU）
 
 vertex function と fragment function の組を、1 つの WGSL のモジュール（`@vertex fn um_vs` と `@fragment fn um_fs`）にします（`src/wgsl.ts` の `render`）。束縛の並びは kernel と同じで、binding 0 が `UmParams`（頂点の数、0、Buffer ごとの長さ、値の引数）、binding 1 からが Buffer です。引数は vertex の引数、fragment の引数の順に並びます。画像の色は `BGRA8Unorm`（読み戻すと 0xAARRGGBB の `u32` と同じバイトの並び）、深度は `Depth32Float` のテクスチャです（`runtime/wgpu.c` の `um_gpu_image_begin` など）。
