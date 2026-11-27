@@ -548,7 +548,7 @@ export function parseProgram(src: string, file?: string): Module {
     if (texts.some((t) => used.test(t))) standard.push(...extra.decls);
   }
   // 描画: 標準の関数と、gpu.draw の vs と fs の組ごとの描画の関数（src/render.ts の drawSources）。
-  if (texts.some((t) => /\bgpu\s*\.\s*(beginImage|draw|endImage|beginFrame|endFrame)\b/.test(t))) {
+  if (texts.some((t) => /\bgpu\s*\.\s*(beginImage|draw|drawIndexed|endImage|beginFrame|endFrame)\b/.test(t))) {
     standard.push(...parse(readFileSync(RENDER_PRELUDE, 'utf8'), 'render.um').decls);
     if (texts.some((t) => /\bgpu\s*\.\s*(beginFrame|endFrame)\b/.test(t))) {
       standard.push(...parse(readFileSync(RENDER_WINDOW_PRELUDE, 'utf8'), 'render.um').decls);

@@ -1402,17 +1402,18 @@ class ModuleGen {
   }
 
   /** 描画のシェーダ（vertex function と fragment function の組）を WGSL にし、文字列定数として埋め込む。同じ組は1回だけ。 */
-  renderShader(vs: string, fs: string): { id: number; global: string; bytes: number } {
-    const key = `${vs}|${fs}`;
+  renderShader(vs: string, fs: string, kind: { indexed: boolean; instanced: boolean }): { id: number; global: string; bytes: number } {
+    const tag = `${kind.indexed ? 'X' : ''}${kind.instanced ? 'I' : ''}`;
+    const key = `${vs}|${fs}|${tag}`;
     let k = this.renderShaders.get(key);
     if (!k) {
-      const source = emitWgslRender(this.prog, this.prog.fns.get(vs)!.decl, this.prog.fns.get(fs)!.decl).source;
+      const source = emitWgslRender(this.prog, this.prog.fns.get(vs)!.decl, this.prog.fns.get(fs)!.decl, kind).source;
       const bytes = Buffer.from(source, 'utf8');
       let text = '';
       for (const b of bytes) {
         text += b >= 0x20 && b < 0x7f && b !== 0x22 && b !== 0x5c ? String.fromCharCode(b) : `\\${b.toString(16).toUpperCase().padStart(2, '0')}`;
       }
-      const global = `@um.render.${vs}.${fs}`;
+      const global = `@um.render.${vs}.${fs}${tag ? `.${tag}` : ''}`;
       this.globals.push(`${global} = private unnamed_addr constant [${bytes.length} x i8] c"${text}"`);
       k = { id: this.renderShaders.size, global, bytes: bytes.length };
       this.renderShaders.set(key, k);
@@ -1695,7 +1696,7 @@ class ModuleGen {
       imports.push('i32 um_gpu_available()', 'i32 um_gpu_pick(i32, i32)', 'void um_gpu_dispatch(i32, ptr, i32, i32, ptr, i32, ptr, i32)');
       imports.push('void um_gpu_group(i32)');
       // 描画（runtime/web.mjs の RenderRunner）。
-      imports.push('i32 um_gpu_image_begin(i32, i32, i32)', 'void um_gpu_draw(i32, i32, ptr, i32, i32, ptr, i32, ptr, i32)', `void um_gpu_image_end(i32, ptr, ${this.usz})`);
+      imports.push('i32 um_gpu_image_begin(i32, i32, i32)', 'void um_gpu_draw(i32, i32, ptr, i32, i32, i32, ptr, i32, ptr, i32)', `void um_gpu_image_end(i32, ptr, ${this.usz})`);
       imports.push('i32 um_gpu_frame_begin(i32, ptr, i32, i32, i32, i32)', 'void um_gpu_frame_end(i32)');
     }
     if (this.gpu === 'wgpu') {
@@ -1708,7 +1709,7 @@ class ModuleGen {
         out.push('declare i64 @um_gpu_submit(i32, ptr, i32, i32, ptr, i32, ptr, i32) #0', 'declare i32 @um_gpu_ready(i64) #0', 'declare void @um_gpu_wait(i64) #0');
         out.push(`declare i32 @um_gpu_load(ptr, ${this.usz}) #0`, 'declare i32 @um_gpu_run(i32, i32, ptr, i32, ptr, i32) #0');
         out.push('declare i32 @um_gpu_set_flags(i32) #0', 'declare i32 @um_gpu_pick_bufs(i32, i32, ptr, i32) #0');
-        out.push('declare i32 @um_gpu_image_begin(i32, i32, i32) #0', 'declare void @um_gpu_draw(i32, i32, ptr, i32, i32, ptr, i32, ptr, i32) #0');
+        out.push('declare i32 @um_gpu_image_begin(i32, i32, i32) #0', 'declare void @um_gpu_draw(i32, i32, ptr, i32, i32, i32, ptr, i32, ptr, i32) #0');
         out.push(`declare void @um_gpu_image_end(i32, ptr, ${this.usz}) #0`);
         out.push('declare i32 @um_gpu_frame_begin(i32, ptr, i32, i32, i32, i32) #0', 'declare void @um_gpu_frame_end(i32) #0');
       } else {
@@ -4817,17 +4818,33 @@ class FnGen {
       this.emit(`call void @um_gpu_image_end(i32 ${img}, ptr ${data}, ${this.m.usz} ${len})`);
       return '';
     }
-    const node = e as unknown as { vs: string; fs: string; vsArgc: number };
+    // 引数: [画像, 頂点の数か番号の Buffer, インスタンスの数, vs の引数..., fs の引数...]
+    const node = e as unknown as { vs: string; fs: string; vsArgc: number; indexed: boolean; instanced: boolean };
+    const kind = { indexed: node.indexed, instanced: node.instanced };
     const vs = this.m.prog.fns.get(node.vs)!;
     const fs = this.m.prog.fns.get(node.fs)!;
-    const shader = this.m.renderShader(node.vs, node.fs);
+    const shader = this.m.renderShader(node.vs, node.fs, kind);
     const img = this.expr(e.args[0].expr);
-    const count = this.expr(e.args[1].expr);
-    const rest = e.args.slice(2);
-    const params: FnSig['params'] = [...vs.params.slice(1), ...fs.params.slice(1)];
-    const args = this.prepArgs({ key: '', name: '', params, ret: { k: 'void' }, exported: false, decl: this.d }, rest).map((a) => a());
+    let count = '';
+    if (!kind.indexed) count = this.expr(e.args[1].expr);
+    const indices: FnSig['params'] = kind.indexed ? [{ name: 'um_indices', mode: 'none', ty: e.args[1].expr.ty! }] : [];
+    const params: FnSig['params'] = [...indices, ...vs.params.slice(kind.instanced ? 2 : 1), ...fs.params.slice(1)];
+    const all = kind.indexed ? [e.args[1], ...e.args.slice(3)] : e.args.slice(3);
+    const thunks = this.prepArgs({ key: '', name: '', params, ret: { k: 'void' }, exported: false, decl: this.d }, all);
+    const instances = this.expr(e.args[2].expr);
+    const args = thunks.map((a) => a());
+    if (kind.indexed) {
+      // 描く頂点の数は番号の数。
+      const [, len] = this.heapParts(e.args[1].expr)();
+      if (this.m.usz === 'i32') {
+        count = len;
+      } else {
+        count = this.tmp();
+        this.emit(`${count} = trunc ${this.m.usz} ${len} to i32`);
+      }
+    }
     const [block, bytes, table, nbufs] = this.gpuArgs(params, args);
-    this.emit(`call void @um_gpu_draw(i32 ${img}, i32 ${shader.id}, ptr ${shader.global}, i32 ${shader.bytes}, i32 ${count}, ptr ${block}, i32 ${bytes}, ptr ${table}, i32 ${nbufs})`);
+    this.emit(`call void @um_gpu_draw(i32 ${img}, i32 ${shader.id}, ptr ${shader.global}, i32 ${shader.bytes}, i32 ${count}, i32 ${instances}, ptr ${block}, i32 ${bytes}, ptr ${table}, i32 ${nbufs})`);
     return '';
   }
 

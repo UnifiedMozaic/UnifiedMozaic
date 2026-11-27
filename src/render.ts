@@ -43,7 +43,7 @@ const IMAGE: Ty = { k: 'struct', name: 'GpuImage' };
 /** 標準の関数（runtime/render.um）と、コンパイラが作る描画の関数のファイルの名前。gpu.raw* はこの中でだけ使える。 */
 export const RENDER_FILES = ['render.um', 'render-draw.um'];
 
-export const RENDER_NAMES = ['beginImage', 'draw', 'endImage', 'beginFrame', 'endFrame', 'rawBeginImage', 'rawDraw', 'rawEndImage', 'rawBeginFrame', 'rawEndFrame'];
+export const RENDER_NAMES = ['beginImage', 'draw', 'drawIndexed', 'endImage', 'beginFrame', 'endFrame', 'rawBeginImage', 'rawDraw', 'rawDrawIndexed', 'rawEndImage', 'rawBeginFrame', 'rawEndFrame'];
 
 /** `gpu.beginImage` / `gpu.draw` / `gpu.endImage`（と gpu.raw*）の呼び出しか（同じ名前の変数があれば違う）。 */
 export function isRenderCall(e: Expr & { kind: 'mcall' }, lookup: (name: string) => unknown): boolean {
@@ -57,7 +57,12 @@ function builtin(c: RenderChecker, name: string, params: { name: string; mode: '
 }
 
 /** `vs(...)` / `fs(...)` の指定を検査し、シェーダの関数を返す。 */
-function stageArg(c: RenderChecker, a: Arg, stage: 'vertex' | 'fragment'): { sig: FnSig; args: Arg[] } {
+/**
+ * vs(...) / fs(...) の指定を検査し、シェーダの関数を返す。skip は GPU が渡す先頭の引数の数
+ * （fragment は受け取る値の 1 つ、vertex は頂点の番号の 1 つ、インスタンスのある描画では番号とインスタンスの番号の 2 つ）。
+ * skip が null なら（標準の関数の中の gpu.rawDraw）、渡された引数の数から決める。
+ */
+function stageArg(c: RenderChecker, a: Arg, stage: 'vertex' | 'fragment', skip: number | null = 1): { sig: FnSig; args: Arg[]; instanced: boolean } {
   const e = a.expr;
   const example = stage === 'vertex' ? '`vs(verts, camera)`' : '`fs(camera)`';
   if (a.mode !== 'none' || e.kind !== 'call') {
@@ -69,10 +74,28 @@ function stageArg(c: RenderChecker, a: Arg, stage: 'vertex' | 'fragment'): { sig
     c.err('type-mismatch', `'${e.callee}' is not a ${stage} function`, e.pos,
       `declare it as \`${stage} function ${e.callee}(${stage === 'vertex' ? 'i: u32' : 'v: VOut'}, ...): ${stage === 'vertex' ? 'VOut' : 'vec4<f32>'}\``);
   }
-  // 第1引数（頂点の番号 / 受け取る値）は GPU が渡すので、残りの引数を検査する。
-  const rest: FnSig = { ...sig, params: sig.params.slice(1) };
+  const n = skip ?? (e.args.length === sig.params.length - 2 ? 2 : 1);
+  if (n === 2) {
+    const inst = sig.params[1];
+    if (!inst || !tyEq(inst.ty, U32)) {
+      c.err('type-mismatch', `an instanced draw passes the instance number to the vertex function, but '${sig.name}' does not take it`, e.pos,
+        `declare it as the second parameter: \`vertex function ${sig.name}(i: u32, inst: u32, ...)\``);
+    }
+  }
+  // 先頭の引数（頂点の番号・インスタンスの番号 / 受け取る値）は GPU が渡すので、残りの引数を検査する。
+  const rest: FnSig = { ...sig, params: sig.params.slice(n) };
   c.checkArgs(rest, e.args, e.pos, undefined, true);
-  return { sig, args: e.args };
+  return { sig, args: e.args, instanced: n === 2 };
+}
+
+/** 描画の形。indexed: 頂点の番号を Buffer<u32> から読む（gpu.drawIndexed）。instanced: インスタンスの数を渡す。 */
+export interface DrawKind {
+  indexed: boolean;
+  instanced: boolean;
+}
+
+function kindTag(k: DrawKind): string {
+  return `${k.indexed ? 'X' : ''}${k.instanced ? 'I' : ''}`;
 }
 
 export function inferRender(c: RenderChecker, e: Expr & { kind: 'mcall' }): Ty {
@@ -90,19 +113,25 @@ export function inferRender(c: RenderChecker, e: Expr & { kind: 'mcall' }): Ty {
     node.callee = `gpu${e.name[0].toUpperCase()}${e.name.slice(1)}`;
     return c.checkExpr(e as unknown as Expr);
   }
-  // gpu.draw(mut image, vertexCount, vs(...), fs(...))
-  if (e.args.length !== 4) {
-    c.err('arg-count', `\`gpu.draw\` takes 4 arguments but ${e.args.length} were given`, e.pos,
-      'write `gpu.draw(mut image, vertexCount, vs(...), fs(...))`');
+  // gpu.draw(mut image, vertexCount, [instances,] vs(...), fs(...)) / gpu.drawIndexed(mut image, indices, [instances,] vs(...), fs(...))
+  const indexed = e.name === 'drawIndexed';
+  const usage = indexed ? '`gpu.drawIndexed(mut image, indices, vs(...), fs(...))` or `gpu.drawIndexed(mut image, indices, instances, vs(...), fs(...))`'
+    : '`gpu.draw(mut image, vertexCount, vs(...), fs(...))` or `gpu.draw(mut image, vertexCount, instances, vs(...), fs(...))`';
+  if (e.args.length !== 4 && e.args.length !== 5) {
+    c.err('arg-count', `\`gpu.${e.name}\` takes 4 or 5 arguments but ${e.args.length} were given`, e.pos, `write ${usage}`);
   }
-  builtin(c, 'gpu.draw', [{ name: 'image', mode: 'mut', ty: IMAGE }, { name: 'vertexCount', mode: 'none', ty: U32 }], VOID, e.args.slice(0, 2), e.pos);
-  const v = stageArg(c, e.args[2], 'vertex');
-  const f = stageArg(c, e.args[3], 'fragment');
-  matchStages(c, v.sig, f.sig, e.args[3].expr.pos);
-  // vs と fs の組ごとの描画の関数（drawSource。GPU か CPU で描く）の呼び出しにする。
+  const instanced = e.args.length === 5;
+  const head: { name: string; mode: 'none' | 'mut'; ty: Ty }[] = [{ name: 'image', mode: 'mut', ty: IMAGE },
+    indexed ? { name: 'indices', mode: 'none', ty: PIXELS } : { name: 'vertexCount', mode: 'none', ty: U32 }];
+  if (instanced) head.push({ name: 'instances', mode: 'none', ty: U32 });
+  builtin(c, `gpu.${e.name}`, head, VOID, e.args.slice(0, head.length), e.pos);
+  const v = stageArg(c, e.args[head.length], 'vertex', instanced ? 2 : 1);
+  const f = stageArg(c, e.args[head.length + 1], 'fragment');
+  matchStages(c, v.sig, f.sig, e.args[head.length + 1].expr.pos);
+  // vs と fs の組と描画の形ごとの描画の関数（drawSource。GPU か CPU で描く）の呼び出しにする。
   node.kind = 'call';
-  node.callee = drawName(v.sig.name, f.sig.name);
-  node.args = [e.args[0], e.args[1], ...v.args, ...f.args];
+  node.callee = drawName(v.sig.name, f.sig.name, { indexed, instanced });
+  node.args = [...e.args.slice(0, head.length), ...v.args, ...f.args];
   return c.checkExpr(e as unknown as Expr);
 }
 
@@ -143,22 +172,28 @@ function inferRaw(c: RenderChecker, e: Expr & { kind: 'mcall' }, node: { kind: s
     node.callee = '__gpu_image_end';
     return VOID;
   }
-  builtin(c, 'gpu.rawDraw', [{ name: 'image', mode: 'none', ty: I32 }, { name: 'vertexCount', mode: 'none', ty: U32 }], VOID, e.args.slice(0, 2), e.pos);
-  const v = stageArg(c, e.args[2], 'vertex');
-  const f = stageArg(c, e.args[3], 'fragment');
-  matchStages(c, v.sig, f.sig, e.args[3].expr.pos);
-  node.kind = 'call';
-  node.callee = '__gpu_draw';
-  node.vs = v.sig.name;
-  node.fs = f.sig.name;
-  node.vsArgc = v.args.length;
-  node.args = [e.args[0], e.args[1], ...v.args, ...f.args];
+  // gpu.rawDraw(image, vertexCount, instances, vs(...), fs(...)) / gpu.rawDrawIndexed(image, indices, instances, vs(...), fs(...))
+  const indexed = e.name === 'rawDrawIndexed';
+  builtin(c, `gpu.${e.name}`, [{ name: 'image', mode: 'none', ty: I32 }, indexed ? { name: 'indices', mode: 'none', ty: PIXELS } : { name: 'vertexCount', mode: 'none', ty: U32 },
+    { name: 'instances', mode: 'none', ty: U32 }], VOID, e.args.slice(0, 3), e.pos);
+  const v = stageArg(c, e.args[3], 'vertex', null);
+  const f = stageArg(c, e.args[4], 'fragment');
+  matchStages(c, v.sig, f.sig, e.args[4].expr.pos);
+  const n = node as typeof node & { indexed?: boolean; instanced?: boolean };
+  n.kind = 'call';
+  n.callee = '__gpu_draw';
+  n.vs = v.sig.name;
+  n.fs = f.sig.name;
+  n.vsArgc = v.args.length;
+  n.indexed = indexed;
+  n.instanced = v.instanced;
+  n.args = [e.args[0], e.args[1], e.args[2], ...v.args, ...f.args];
   return VOID;
 }
 
 /** vs と fs の組の描画の関数の名前。 */
-export function drawName(vs: string, fs: string): string {
-  return `umRenderDraw__${vs}__${fs}`;
+export function drawName(vs: string, fs: string, kind: DrawKind): string {
+  return `umRenderDraw${kindTag(kind)}__${vs}__${fs}`;
 }
 
 /** 型の書き方を UM のソースの文字列にする（シェーダの引数の型を、描画の関数の引数に写す）。 */
@@ -189,7 +224,8 @@ function isFlat(t: TypeNode): boolean {
  * 組が見つからないか、vs / fs / 受け渡す struct の宣言が見つからなければ、その組は作らない（型検査がエラーを出す）。
  */
 export function drawSources(decls: Decl[]): string {
-  const pairs = new Map<string, [string, string]>();
+  // vs と fs の組 → 使われた描画の形。
+  const pairs = new Map<string, { vs: string; fs: string; kinds: Map<string, DrawKind> }>();
   const walk = (x: unknown): void => {
     if (!x || typeof x !== 'object') return;
     if (Array.isArray(x)) {
@@ -199,10 +235,16 @@ export function drawSources(decls: Decl[]): string {
     const n = x as Record<string, unknown> & { kind?: string };
     if (n.kind === 'mcall') {
       const m = n as unknown as Expr & { kind: 'mcall' };
-      if (m.recv.kind === 'ident' && m.recv.name === 'gpu' && m.name === 'draw' && m.args.length === 4) {
-        const a = m.args[2].expr;
-        const b = m.args[3].expr;
-        if (a.kind === 'call' && b.kind === 'call') pairs.set(drawName(a.callee, b.callee), [a.callee, b.callee]);
+      if (m.recv.kind === 'ident' && m.recv.name === 'gpu' && (m.name === 'draw' || m.name === 'drawIndexed') && (m.args.length === 4 || m.args.length === 5)) {
+        const a = m.args[m.args.length - 2].expr;
+        const b = m.args[m.args.length - 1].expr;
+        if (a.kind === 'call' && b.kind === 'call') {
+          const key = `${a.callee}|${b.callee}`;
+          const pair = pairs.get(key) ?? { vs: a.callee, fs: b.callee, kinds: new Map() };
+          pairs.set(key, pair);
+          const kind = { indexed: m.name === 'drawIndexed', instanced: m.args.length === 5 };
+          pair.kinds.set(kindTag(kind), kind);
+        }
       }
     }
     for (const [k, v] of Object.entries(n)) {
@@ -217,7 +259,7 @@ export function drawSources(decls: Decl[]): string {
     if (d.kind === 'struct') structs.set(d.name, d);
   }
   let out = '';
-  for (const [vsName, fsName] of pairs.values()) {
+  for (const { vs: vsName, fs: fsName, kinds } of pairs.values()) {
     const vs = fns.get(vsName);
     const fs = fns.get(fsName);
     if (!vs || !fs || vs.stage !== 'vertex' || fs.stage !== 'fragment' || vs.typeParams || fs.typeParams) continue;
@@ -227,7 +269,11 @@ export function drawSources(decls: Decl[]): string {
     if (got.kind !== 'name' || got.name !== vs.retNode.name) continue;
     const st = structs.get(vs.retNode.name);
     if (!st || st.typeParams) continue;
-    out += drawSource(vs, fs, st);
+    out += helperSource(vs, fs, st);
+    for (const kind of kinds.values()) {
+      if (vs.params.length < (kind.instanced ? 2 : 1)) continue;
+      out += drawSource(vs, fs, st, kind);
+    }
   }
   return out;
 }
@@ -238,20 +284,17 @@ export function drawSources(decls: Decl[]): string {
  * 画素の中心で塗る（辺の上は top-left rule）。補間は遠近を考えた重心座標（整数のフィールドは最初の頂点の値）、
  * 深度は小さいものが残る。fragment function の position は（画素の中心の x, y, 深度, 1 / w）。
  */
-function drawSource(vs: FnDecl, fs: FnDecl, st: StructDecl): string {
+function helperSource(vs: FnDecl, fs: FnDecl, st: StructDecl): string {
   const tag = `${vs.name}__${fs.name}`;
   const out = st.name;
-  const vArgs = vs.params.slice(1).map((_, i) => `v${i}`);
   const fArgs = fs.params.slice(1).map((_, i) => `f${i}`);
   // 引数の型はシェーダの宣言のまま（シェーダの引数は読むだけなので、渡し方の印はない）。
-  const vTypes = vs.params.slice(1).map((p) => typeText(p.tyNode));
   const fTypes = fs.params.slice(1).map((p) => typeText(p.tyNode));
   const params = (names: string[], types: string[]) => names.map((n, i) => `, ${n}: ${types[i]}`).join('');
   const pass = (names: string[]) => names.map((n) => `, ${n}`).join('');
   const fields = st.fields.filter((f) => f.name !== 'position');
   const lerp = fields.map((f) => isFlat(f.tyNode) ? `${f.name}: prov.${f.name}` : `${f.name}: a.${f.name} + (b.${f.name} - a.${f.name}) * t`);
   const mix = fields.map((f) => isFlat(f.tyNode) ? `${f.name}: prov.${f.name}` : `${f.name}: a.${f.name} * wa + b.${f.name} * wb + c.${f.name} * wc`);
-  const vsCall = (i: string) => `${vs.name}(${i}${pass(vArgs)})`;
   return `
 function umRenderLerp__${tag}(a: ${out}, b: ${out}, t: f32, prov: ${out}): ${out} {
   return { position: a.position + (b.position - a.position) * t${lerp.map((x) => `, ${x}`).join('')} };
@@ -353,21 +396,42 @@ function umRenderTri__${tag}(img: mut GpuImage, a: ${out}, b: ${out}, c: ${out},
     }
   }
 }
+`;
+}
 
-function ${drawName(vs.name, fs.name)}(img: mut GpuImage, count: u32${params(vArgs, vTypes)}${params(fArgs, fTypes)}): void {
+/** 描画の形ごとの描画の関数: GPU の画像なら gpu.rawDraw / rawDrawIndexed、CPU の画像なら CPU で描く。 */
+function drawSource(vs: FnDecl, fs: FnDecl, st: StructDecl, kind: DrawKind): string {
+  const tag = `${vs.name}__${fs.name}`;
+  const out = st.name;
+  const skip = kind.instanced ? 2 : 1;
+  const vArgs = vs.params.slice(skip).map((_, i) => `v${i}`);
+  const fArgs = fs.params.slice(1).map((_, i) => `f${i}`);
+  const vTypes = vs.params.slice(skip).map((p) => typeText(p.tyNode));
+  const fTypes = fs.params.slice(1).map((p) => typeText(p.tyNode));
+  const params = (names: string[], types: string[]) => names.map((n, i) => `, ${n}: ${types[i]}`).join('');
+  const pass = (names: string[]) => names.map((n) => `, ${n}`).join('');
+  const index = (k: string) => (kind.indexed ? `indices[${k}]` : k);
+  const vsCall = (k: string) => `${vs.name}(${index(k)}${kind.instanced ? ', inst' : ''}${pass(vArgs)})`;
+  const first = kind.indexed ? 'indices: Buffer<u32>' : 'count: u32';
+  const raw = kind.indexed ? 'rawDrawIndexed' : 'rawDraw';
+  return `
+function ${drawName(vs.name, fs.name, kind)}(img: mut GpuImage, ${first}${kind.instanced ? ', instances: u32' : ''}${params(vArgs, vTypes)}${params(fArgs, fTypes)}): void {
   if (img.handle != 0) {
-    gpu.rawDraw(img.handle, count, ${vs.name}(${vArgs.join(', ')}), ${fs.name}(${fArgs.join(', ')}));
+    gpu.${raw}(img.handle, ${kind.indexed ? 'indices' : 'count'}, ${kind.instanced ? 'instances' : '1'}, ${vs.name}(${vArgs.join(', ')}), ${fs.name}(${fArgs.join(', ')}));
     return;
   }
-  for (let i: u32 = 0; i + 3 <= count; i += 3) {
-    const a = ${vsCall('i')};
-    const b = ${vsCall('i + 1')};
-    const c = ${vsCall('i + 2')};
-    let poly: ${out}[] = [a, b, c];
-    poly = umRenderClip__${tag}(poly, false, a);
-    poly = umRenderClip__${tag}(poly, true, a);
-    for (let k: usize = 1; k + 1 < poly.length; k++) {
-      umRenderTri__${tag}(mut img, poly[0], poly[k], poly[k + 1], a${pass(fArgs)});
+  const n: u32 = ${kind.indexed ? 'indices.length as u32' : 'count'};
+  for (let inst: u32 = 0; inst < ${kind.instanced ? 'instances' : '1'}; inst++) {
+    for (let i: u32 = 0; i + 3 <= n; i += 3) {
+      const a = ${vsCall('i')};
+      const b = ${vsCall('i + 1')};
+      const c = ${vsCall('i + 2')};
+      let poly: ${out}[] = [a, b, c];
+      poly = umRenderClip__${tag}(poly, false, a);
+      poly = umRenderClip__${tag}(poly, true, a);
+      for (let k: usize = 1; k + 1 < poly.length; k++) {
+        umRenderTri__${tag}(mut img, poly[0], poly[k], poly[k + 1], a${pass(fArgs)});
+      }
     }
   }
 }

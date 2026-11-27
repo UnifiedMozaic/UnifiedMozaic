@@ -1,0 +1,147 @@
+// 番号の Buffer で描く（gpu.drawIndexed）、インスタンスで同じ形を何回も描く、テクスチャの色を読む、を確かめる。
+//   1. 四角（4 頂点、6 つの番号）を 3 つのインスタンスで描く。位置・大きさ・色（テクスチャの画素）はインスタンスごとの Buffer から。
+//      色は補間しない（flat）ので、GPU による違いが出ない。文字の絵で照合する。
+//   2. 画面いっぱいの四角に、テクスチャをバイリニアで貼る。GPU と CPU のラスタライザで描いて比べる。
+// cpu-build
+// expect: ........................
+// expect: .RRRRRRRR...............
+// expect: .RRRRRRRR...............
+// expect: .RRRRRRRR....BBBBBBBBB..
+// expect: .RRRRRRRR....BBBBBBBBB..
+// expect: .............BBBBBBBBB..
+// expect: .............BBBBBBBBB..
+// expect: .............BBBBBBBBB..
+// expect: ...WWWWW................
+// expect: ...WWWWW................
+// expect: ........................
+// expect: ........................
+// expect: true
+// expect: true
+
+struct Corner {
+  x: f32;
+  y: f32;
+}
+
+struct Place {
+  x: f32;
+  y: f32;
+  size: f32;
+  texel: u32;
+}
+
+struct VOut {
+  position: vec4<f32>;
+  uv: vec2<f32>;
+  texel: u32;
+}
+
+vertex function vs(i: u32, inst: u32, corners: Buffer<Corner>, places: Buffer<Place>): VOut {
+  const c = corners[i];
+  const p = places[inst];
+  return { position: vec4(p.x + c.x * p.size, p.y + c.y * p.size, 0.5, 1.0 as f32), uv: vec2(c.x * 0.5 + 0.5, 0.5 - c.y * 0.5), texel: p.texel };
+}
+
+// 1. インスタンスの画素の色（補間しない）。
+fragment function fsTexel(v: VOut, tex: Buffer<u32>): vec4<f32> {
+  return textureFetch(tex, 2, 2, (v.texel % 2) as i32, (v.texel / 2) as i32);
+}
+
+// 2. テクスチャをバイリニアで貼る。
+fragment function fsSample(v: VOut, tex: Buffer<u32>, size: u32): vec4<f32> {
+  return textureSample(tex, size, size, v.uv);
+}
+
+function letter(c: u32): u8 {
+  if (c == 0xFFFF0000) {
+    return 82;
+  }
+  if (c == 0xFF00FF00) {
+    return 71;
+  }
+  if (c == 0xFF0000FF) {
+    return 66;
+  }
+  if (c == 0xFFFFFFFF) {
+    return 87;
+  }
+  return c == 0xFF000000 ? 46 : 63;
+}
+
+function channelDiff(a: u32, b: u32, shift: u32): u32 {
+  const x = (a >> shift) & 255;
+  const y = (b >> shift) & 255;
+  return x > y ? x - y : y - x;
+}
+
+export function main(): i32 {
+  let corners = new Buffer<Corner>(4);
+  corners[0] = { x: -1, y: -1 };
+  corners[1] = { x: 1, y: -1 };
+  corners[2] = { x: 1, y: 1 };
+  corners[3] = { x: -1, y: 1 };
+  let quad = new Buffer<u32>(6);
+  quad[0] = 0;
+  quad[1] = 1;
+  quad[2] = 2;
+  quad[3] = 0;
+  quad[4] = 2;
+  quad[5] = 3;
+  // テクスチャ 2 × 2: 赤 緑 / 青 白
+  let tex = new Buffer<u32>(4);
+  tex[0] = 0xFFFF0000;
+  tex[1] = 0xFF00FF00;
+  tex[2] = 0xFF0000FF;
+  tex[3] = 0xFFFFFFFF;
+  // 辺が画素の中心から 1/4 画素離れるように置く（GPU は頂点を細かい格子に丸めるので、中心のすぐ近くの辺は GPU によって分かれる）。
+  let places = new Buffer<Place>(3);
+  places[0] = { x: -0.583333, y: 0.479167, size: 0.3125, texel: 0 };
+  places[1] = { x: 0.4375, y: 0.0625, size: 0.375, texel: 2 };
+  places[2] = { x: -0.5625, y: -0.5208, size: 0.2083, texel: 3 };
+
+  const w: u32 = 24;
+  const h: u32 = 12;
+  let img = gpu.beginImage(w as i32, h as i32, 0xFF000000);
+  gpu.drawIndexed(mut img, quad, 3, vs(corners, places), fsTexel(tex));
+  let px = new Buffer<u32>((w * h) as usize);
+  gpu.endImage(mut img, mut px);
+  for (let y: u32 = 0; y < h; y++) {
+    let row = new Array<u8>(w as usize);
+    for (let x: u32 = 0; x < w; x++) {
+      row[x] = letter(px[y * w + x]);
+    }
+    print(stringFromBytes(row));
+  }
+
+  // 2. 8 × 8 の模様を 64 × 64 の画像いっぱいに貼り、GPU（あれば）と CPU で比べる。
+  let pattern = new Buffer<u32>(64);
+  for (let i: u32 = 0; i < 64; i++) {
+    const r = (i * 37) % 256;
+    const g = (i * 91) % 256;
+    pattern[i] = 0xFF000000 | (r << 16) | (g << 8) | ((i * 4) % 256);
+  }
+  let full = new Buffer<Place>(1);
+  full[0] = { x: 0, y: 0, size: 1, texel: 0 };
+  const n: i32 = 64;
+  let gi = gpu.beginImage(n, n, 0xFF000000);
+  gpu.drawIndexed(mut gi, quad, 1, vs(corners, full), fsSample(pattern, 8));
+  let ci = new GpuImage(n, n, 0, 0xFF000000);
+  gpu.drawIndexed(mut ci, quad, 1, vs(corners, full), fsSample(pattern, 8));
+  let gp = new Buffer<u32>((n * n) as usize);
+  let cp = new Buffer<u32>((n * n) as usize);
+  gpu.endImage(mut gi, mut gp);
+  gpu.endImage(mut ci, mut cp);
+  let split: u32 = 0;
+  let differ: u32 = 0;
+  for (let i: u32 = 0; i < (n * n) as u32; i++) {
+    if ((gp[i] == 0xFF000000) != (cp[i] == 0xFF000000)) {
+      split++;
+    } else if (Math.max(channelDiff(gp[i], cp[i], 16), Math.max(channelDiff(gp[i], cp[i], 8), channelDiff(gp[i], cp[i], 0))) > 3) {
+      differ++;
+    }
+  }
+  print(split == 0);
+  print(differ * 50 < (n * n) as u32);
+  eprint(`split ${split}, differ ${differ}`);
+  return 0;
+}

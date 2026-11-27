@@ -800,13 +800,20 @@ class Emitter {
    * 名前がぶつからないよう、vertex の引数は v_、fragment の引数は f_ を付ける。
    * 本体は普通の WGSL の関数（um_vs_body / um_fs_body）にし、入口が UM の struct と WGSL の組み込みの型を写し替える。
    */
-  render(vs: FnDecl, fs: FnDecl): WgslKernel {
+  render(vs: FnDecl, fs: FnDecl, kind: { indexed: boolean; instanced: boolean } = { indexed: false, instanced: false }): WgslKernel {
     const buffers: WgslBuffer[] = [];
     const paramFields = ['  count: u32,', '  row: u32,'];
     const globals: string[] = [];
-    const stages = [{ d: vs, tag: 'v' }, { d: fs, tag: 'f' }];
-    for (const { d, tag } of stages) {
-      for (const p of d.params.slice(1)) {
+    // vertex function の先頭の引数は、頂点の番号（とインスタンスの番号）。fragment function の先頭は受け取る値。
+    const stages = [{ d: vs, tag: 'v', skip: kind.instanced ? 2 : 1 }, { d: fs, tag: 'f', skip: 1 }];
+    // 番号の Buffer（gpu.drawIndexed）は最初の Buffer。頂点の番号は、そこから読んだ値になる。
+    if (kind.indexed) {
+      buffers.push({ name: 'um_indices', writable: false, elem: { k: 'int', bits: 32, signed: false } });
+      paramFields.push('  len_um_indices: u32,');
+      globals.push('@group(0) @binding(1) var<storage, read> b_um_indices: array<u32>;');
+    }
+    for (const { d, tag, skip } of stages) {
+      for (const p of d.params.slice(skip)) {
         const ty = p.ty!;
         if (ty.k !== 'heap') continue;
         const global = `b_${tag}_${p.name}`;
@@ -817,8 +824,8 @@ class Emitter {
         this.bufs.set(p.sym!.id, { global, len: `um_params.len_${tag}_${p.name}` });
       }
     }
-    for (const { d, tag } of stages) {
-      for (const p of d.params.slice(1)) {
+    for (const { d, tag, skip } of stages) {
+      for (const p of d.params.slice(skip)) {
         const ty = p.ty!;
         if (ty.k === 'heap') continue;
         paramFields.push(`  p_${tag}_${p.name}: ${ty.k === 'bool' ? 'u32' : this.ty(ty)},`);
@@ -826,11 +833,11 @@ class Emitter {
     }
 
     // 本体を WGSL の関数にする。値の引数は UmParams から変数に写す。
-    const body = (d: FnDecl, tag: string, head: string, first: string): string[] => {
+    const body = (d: FnDecl, tag: string, head: string, first: string, skip: number): string[] => {
       this.lines = [];
       this.indent = 1;
       if (first) this.line(`var ${this.name(d.params[0].sym!)}: ${this.ty(d.params[0].ty!)} = ${first};`);
-      for (const p of d.params.slice(1)) {
+      for (const p of d.params.slice(skip)) {
         const ty = p.ty!;
         if (ty.k === 'heap') continue;
         const value = ty.k === 'bool' ? `(um_params.p_${tag}_${p.name} != 0u)` : `um_params.p_${tag}_${p.name}`;
@@ -840,11 +847,12 @@ class Emitter {
       return [head, ...this.lines, '}', ''];
     };
     this.names.set(vs.params[0].sym!.id, 'um_i');
+    if (kind.instanced) this.names.set(vs.params[1].sym!.id, 'um_inst');
     const out = vs.ret as Ty & { k: 'struct' };
     const outTy = this.ty(out);
     const color = this.ty(fs.ret!);
-    const vsText = body(vs, 'v', `fn um_vs_body(um_i: u32) -> ${outTy} {`, '');
-    const fsText = body(fs, 'f', `fn um_fs_body(a_in: ${outTy}) -> ${color} {`, 'a_in');
+    const vsText = body(vs, 'v', `fn um_vs_body(um_i: u32, um_inst: u32) -> ${outTy} {`, '', kind.instanced ? 2 : 1);
+    const fsText = body(fs, 'f', `fn um_fs_body(a_in: ${outTy}) -> ${color} {`, 'a_in', 1);
 
     // 受け渡す値（varyings）。position は @builtin(position)、ほかは @location の順。整数は補間しない（flat）。
     const info = this.prog.structs.get(out.name)!;
@@ -916,9 +924,9 @@ class Emitter {
       '}',
       '',
       '@vertex',
-      'fn um_vs(@builtin(vertex_index) um_vi: u32) -> UmVaryings {',
+      'fn um_vs(@builtin(vertex_index) um_vi: u32, @builtin(instance_index) um_ii: u32) -> UmVaryings {',
       ...setZ,
-      '  let o = um_vs_body(um_vi);',
+      kind.indexed ? '  let o = um_vs_body(b_um_indices[um_clamp(um_vi, um_params.len_um_indices)], um_ii);' : '  let o = um_vs_body(um_vi, um_ii);',
       '  var r: UmVaryings;',
       ...toVaryings,
       '  return r;',
@@ -948,8 +956,8 @@ function vecInfo(prog: Program, t: Ty): { n: number; elem: Ty } | null {
 }
 
 /** vertex function と fragment function の組から、描画のシェーダの WGSL を作る（Emitter.render）。 */
-export function emitWgslRender(prog: Program, vs: FnDecl, fs: FnDecl): WgslKernel {
-  return new Emitter(prog).render(vs, fs);
+export function emitWgslRender(prog: Program, vs: FnDecl, fs: FnDecl, kind: { indexed: boolean; instanced: boolean } = { indexed: false, instanced: false }): WgslKernel {
+  return new Emitter(prog).render(vs, fs, kind);
 }
 
 /** 補助関数の WGSL（Emitter.uses に入れた名前ごと）。 */

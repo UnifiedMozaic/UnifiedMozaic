@@ -1473,7 +1473,7 @@ static um_rpipe *um_rpipeline_locked(int32_t key, const char *src, int32_t src_l
 }
 
 // 画像に描画のパスを1つ積む。pipe が NULL なら、埋めるだけ（何も描かない）。鍵を持って呼ぶ。
-static void um_render_pass_locked(um_image *im, um_rpipe *pipe, WGPUBindGroup bg, uint32_t count) {
+static void um_render_pass_locked(um_image *im, um_rpipe *pipe, WGPUBindGroup bg, uint32_t count, uint32_t instances) {
   WGPURenderPassColorAttachment ca = WGPU_RENDER_PASS_COLOR_ATTACHMENT_INIT;
   ca.view = im->color_view;
   ca.loadOp = im->drawn ? WGPULoadOp_Load : WGPULoadOp_Clear;
@@ -1496,15 +1496,15 @@ static void um_render_pass_locked(um_image *im, um_rpipe *pipe, WGPUBindGroup bg
   if (pipe) {
     wgpuRenderPassEncoderSetPipeline(pass, pipe->pipeline);
     wgpuRenderPassEncoderSetBindGroup(pass, 0, bg, 0, NULL);
-    if (count > 0) wgpuRenderPassEncoderDraw(pass, count, 1, 0, 0);
+    if (count > 0 && instances > 0) wgpuRenderPassEncoderDraw(pass, count, instances, 0, 0);
   }
   wgpuRenderPassEncoderEnd(pass);
   wgpuRenderPassEncoderRelease(pass);
   im->drawn = 1;
 }
 
-void um_gpu_draw(int32_t image, int32_t key, const char *src, int32_t src_len, int32_t count, const void *block, int32_t block_bytes,
-                 const uint64_t *table, int32_t nbufs) {
+void um_gpu_draw(int32_t image, int32_t key, const char *src, int32_t src_len, int32_t count, int32_t instances, const void *block,
+                 int32_t block_bytes, const uint64_t *table, int32_t nbufs) {
   um_lock();
   um_image *im = um_image_at(image, "gpu.draw");
   if (im->skip) {
@@ -1552,7 +1552,7 @@ void um_gpu_draw(int32_t image, int32_t key, const char *src, int32_t src_len, i
   bd.entries = entries;
   WGPUBindGroup bg = wgpuDeviceCreateBindGroup(um_dev, &bd);
 
-  um_render_pass_locked(im, pipe, bg, (uint32_t)count);
+  um_render_pass_locked(im, pipe, bg, (uint32_t)count, (uint32_t)instances);
   wgpuBindGroupRelease(bg);
   wgpuBufferRelease(params);
   um_enc_count++;
@@ -1571,7 +1571,7 @@ void um_gpu_image_end(int32_t image, uint32_t *pixels, size_t len) {
              (unsigned long long)len, im->width, im->height);
     um_render_panic(msg);
   }
-  if (!im->drawn) um_render_pass_locked(im, NULL, NULL, 0);
+  if (!im->drawn) um_render_pass_locked(im, NULL, NULL, 0, 0);
 
   // テクスチャから読み戻し用のバッファへ写す（1行のバイト数は 256 の倍数）。
   uint32_t row = (im->width * 4 + 255) / 256 * 256;
@@ -1757,7 +1757,7 @@ void um_gpu_frame_end(int32_t frame) {
   um_image *im = um_image_at(frame, "gpu.endFrame");
   if (!im->window) um_render_panic("gpu.endFrame: this is an image; end it with gpu.endImage");
   if (!im->skip) {
-    if (!im->drawn) um_render_pass_locked(im, NULL, NULL, 0);
+    if (!im->drawn) um_render_pass_locked(im, NULL, NULL, 0, 0);
     um_submit_locked();
     wgpuSurfacePresent(um_surfaces[im->window - 1].surface);
     wgpuTextureViewRelease(im->color_view);

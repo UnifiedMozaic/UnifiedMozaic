@@ -1,6 +1,7 @@
 // 3D のデモ: 宝石あつめ。市松模様の広場で立方体を動かし、回る宝石を全部あつめる。
 //   移動: W A S D（か ↑ ↓）  向き: ← → かマウスのドラッグ  ジャンプ: Space  やり直し: R  終わり: Esc
-// シェーダ（光・市松模様・霧）、1 フレームに何回もの gpu.draw、深度テスト、三角関数と行列、キーとマウスの入力を使う。
+// シェーダ（光・市松模様・霧・レンガのテクスチャ）、宝石のインスタンス描画（8 つを 1 回の gpu.draw で）、深度テスト、
+// 三角関数と行列、キーとマウスの入力を使う。
 // 同じソースが、GPU（UM_WGPU=1）でも CPU でも、ネイティブでもブラウザ（--web）でも動く（docs/render.ja.md、docs/web.ja.md）。
 //   UM_WGPU=1 node src/cli.ts build examples/window/demo.um --target host -o demo && ./demo
 //   node src/cli.ts build examples/window/demo.um --web -o demo-web   （HTTP で開く）
@@ -12,11 +13,12 @@ struct Vertex {
   pos: vec3<f32>;
   normal: vec3<f32>;
   color: vec3<f32>;
-  checker: f32;  // 1 なら、fragment function が市松模様を塗る（地面）
+  uv: vec2<f32>;   // テクスチャの座標（2 単位で 1 枚）
+  material: f32;   // 0 色のまま、1 市松模様（地面）、2 レンガのテクスチャ（壁と柱）
 }
 
 // 頂点の配列に、軸にそろった直方体（中心 c、半分の大きさ h）を足す。
-function addBox(out: mut Vertex[], c: vec3<f32>, h: vec3<f32>, color: vec3<f32>): void {
+function addBox(out: mut Vertex[], c: vec3<f32>, h: vec3<f32>, color: vec3<f32>, material: f32): void {
   const us: f32[6] = [-1, 1, 1, -1, 1, -1];
   const ws: f32[6] = [-1, -1, 1, -1, 1, 1];
   for (let axis: u32 = 0; axis < 3; axis++) {
@@ -32,7 +34,15 @@ function addBox(out: mut Vertex[], c: vec3<f32>, h: vec3<f32>, color: vec3<f32>)
           p = vec3(us[k], ws[k], s);
           n = vec3(0, 0, s);
         }
-        out.push({ pos: vec3(c.x + p.x * h.x, c.y + p.y * h.y, c.z + p.z * h.z), normal: n, color: color, checker: 0 });
+        const wp: vec3<f32> = vec3(c.x + p.x * h.x, c.y + p.y * h.y, c.z + p.z * h.z);
+        // 面の上の 2 つの座標（世界の長さ）で、テクスチャを並べる。縦は上が 0。
+        let uv: vec2<f32> = vec2(wp.z * 0.5, -wp.y * 0.5);
+        if (axis == 1) {
+          uv = vec2(wp.x * 0.5, wp.z * 0.5);
+        } else if (axis == 2) {
+          uv = vec2(wp.x * 0.5, -wp.y * 0.5);
+        }
+        out.push({ pos: wp, normal: n, color: color, uv: uv, material: material });
       }
     }
   }
@@ -45,10 +55,31 @@ function addGem(out: mut Vertex[], color: vec3<f32>): void {
     const sy: f32 = (f & 2) != 0 ? 1 : -1;
     const sz: f32 = (f & 4) != 0 ? 1 : -1;
     const n = vec3Normalize(vec3(sx, sy * 0.7, sz));
-    out.push({ pos: vec3(sx * 0.5, 0, 0), normal: n, color: color, checker: 0 });
-    out.push({ pos: vec3(0.0 as f32, sy * 0.8, 0), normal: n, color: color, checker: 0 });
-    out.push({ pos: vec3(0, 0, sz * 0.5), normal: n, color: color, checker: 0 });
+    out.push({ pos: vec3(sx * 0.5, 0, 0), normal: n, color: color, uv: vec2(0.0 as f32, 0), material: 0 });
+    out.push({ pos: vec3(0.0 as f32, sy * 0.8, 0), normal: n, color: color, uv: vec2(0.0 as f32, 0), material: 0 });
+    out.push({ pos: vec3(0, 0, sz * 0.5), normal: n, color: color, uv: vec2(0.0 as f32, 0), material: 0 });
   }
+}
+
+// レンガのテクスチャ（32 × 32 の 0xAARRGGBB）。横 16・縦 8 画素のレンガを、段ごとに半分ずらして積む。
+function brickTexture(): Buffer<u32> {
+  let px = new Buffer<u32>(32 * 32);
+  for (let y: u32 = 0; y < 32; y++) {
+    for (let x: u32 = 0; x < 32; x++) {
+      const row = y / 8;
+      const sx = (x + (row % 2) * 8) % 32;
+      const mortar = y % 8 == 0 || sx % 16 == 0;
+      // レンガごとに少し明るさを変える。
+      const id = row * 2 + sx / 16;
+      const shade = 200 + (id * 37) % 56;
+      let c: u32 = 0xFFD8D2C8;
+      if (!mortar) {
+        c = 0xFF000000 | (shade << 16) | ((shade * 3 / 5) << 8) | (shade / 2);
+      }
+      px[y * 32 + x] = c;
+    }
+  }
+  return px;
 }
 
 function toBuffer(vs: Vertex[]): Buffer<Vertex> {
@@ -82,11 +113,12 @@ struct VOut {
   world: vec3<f32>;
   normal: vec3<f32>;
   color: vec3<f32>;
-  checker: f32;
+  uv: vec2<f32>;
+  material: f32;
 }
 
-vertex function vs(i: u32, verts: Buffer<Vertex>, cam: Camera, obj: Object): VOut {
-  const v = verts[i];
+// 頂点を物の変換とカメラで動かす（2 つの vertex function が使う）。
+kernel function shade(v: Vertex, cam: Camera, obj: Object): VOut {
   const wp = mat4MulVec(obj.model, vec4(v.pos.x, v.pos.y, v.pos.z, 1.0 as f32));
   const wn = mat4MulVec(obj.model, vec4(v.normal.x, v.normal.y, v.normal.z, 0.0 as f32));
   return {
@@ -94,13 +126,28 @@ vertex function vs(i: u32, verts: Buffer<Vertex>, cam: Camera, obj: Object): VOu
     world: vec3(wp.x, wp.y, wp.z),
     normal: vec3(wn.x, wn.y, wn.z),
     color: vec3(v.color.x * obj.tint.x, v.color.y * obj.tint.y, v.color.z * obj.tint.z),
-    checker: v.checker,
+    uv: v.uv,
+    material: v.material,
   };
 }
 
-fragment function fs(v: VOut, scene: Scene): vec4<f32> {
+// 1 つの物を描く。
+vertex function vs(i: u32, verts: Buffer<Vertex>, cam: Camera, obj: Object): VOut {
+  return shade(verts[i], cam, obj);
+}
+
+// 同じ形をインスタンスで何回も描く（宝石）。inst 番目の物の変換は objs[inst]。
+vertex function vsMany(i: u32, inst: u32, verts: Buffer<Vertex>, cam: Camera, objs: Buffer<Object>): VOut {
+  return shade(verts[i], cam, objs[inst]);
+}
+
+fragment function fs(v: VOut, scene: Scene, bricks: Buffer<u32>): vec4<f32> {
   let base = v.color;
-  if (v.checker > 0.5) {
+  if (v.material > 1.5) {
+    // レンガのテクスチャ（32 × 32）。色は頂点の色に掛ける。
+    const t = textureSample(bricks, 32, 32, v.uv);
+    base = vec3(base.x * t.x, base.y * t.y, base.z * t.z);
+  } else if (v.material > 0.5) {
     // 地面の市松模様（2 マスで 1 周期）。
     const cx = Math.floor(v.world.x * 0.5);
     const cz = Math.floor(v.world.z * 0.5);
@@ -298,27 +345,30 @@ export function main(): i32 {
   // 動かない物（地面・壁・柱）は 1 つの Buffer にまとめて、1 回の draw で描く。
   let worldVerts: Vertex[] = [];
   const ground: vec3<f32> = vec3(0.55 as f32, 0.78, 0.5);
-  worldVerts.push({ pos: vec3(-ARENA, 0, -ARENA), normal: vec3(0.0 as f32, 1, 0), color: ground, checker: 1 });
-  worldVerts.push({ pos: vec3(ARENA, 0, -ARENA), normal: vec3(0.0 as f32, 1, 0), color: ground, checker: 1 });
-  worldVerts.push({ pos: vec3(ARENA, 0, ARENA), normal: vec3(0.0 as f32, 1, 0), color: ground, checker: 1 });
-  worldVerts.push({ pos: vec3(-ARENA, 0, -ARENA), normal: vec3(0.0 as f32, 1, 0), color: ground, checker: 1 });
-  worldVerts.push({ pos: vec3(ARENA, 0, ARENA), normal: vec3(0.0 as f32, 1, 0), color: ground, checker: 1 });
-  worldVerts.push({ pos: vec3(-ARENA, 0, ARENA), normal: vec3(0.0 as f32, 1, 0), color: ground, checker: 1 });
+  worldVerts.push({ pos: vec3(-ARENA, 0, -ARENA), normal: vec3(0.0 as f32, 1, 0), color: ground, uv: vec2(0.0 as f32, 0), material: 1 });
+  worldVerts.push({ pos: vec3(ARENA, 0, -ARENA), normal: vec3(0.0 as f32, 1, 0), color: ground, uv: vec2(0.0 as f32, 0), material: 1 });
+  worldVerts.push({ pos: vec3(ARENA, 0, ARENA), normal: vec3(0.0 as f32, 1, 0), color: ground, uv: vec2(0.0 as f32, 0), material: 1 });
+  worldVerts.push({ pos: vec3(-ARENA, 0, -ARENA), normal: vec3(0.0 as f32, 1, 0), color: ground, uv: vec2(0.0 as f32, 0), material: 1 });
+  worldVerts.push({ pos: vec3(ARENA, 0, ARENA), normal: vec3(0.0 as f32, 1, 0), color: ground, uv: vec2(0.0 as f32, 0), material: 1 });
+  worldVerts.push({ pos: vec3(-ARENA, 0, ARENA), normal: vec3(0.0 as f32, 1, 0), color: ground, uv: vec2(0.0 as f32, 0), material: 1 });
   const wall: vec3<f32> = vec3(0.85 as f32, 0.8, 0.7);
-  addBox(mut worldVerts, vec3(0.0 as f32, 0.6, -ARENA - 0.3), vec3(ARENA + 0.6, 0.6, 0.3), wall);
-  addBox(mut worldVerts, vec3(0.0 as f32, 0.6, ARENA + 0.3), vec3(ARENA + 0.6, 0.6, 0.3), wall);
-  addBox(mut worldVerts, vec3(-ARENA - 0.3, 0.6, 0), vec3(0.3 as f32, 0.6, ARENA), wall);
-  addBox(mut worldVerts, vec3(ARENA + 0.3, 0.6, 0), vec3(0.3 as f32, 0.6, ARENA), wall);
+  addBox(mut worldVerts, vec3(0.0 as f32, 0.6, -ARENA - 0.3), vec3(ARENA + 0.6, 0.6, 0.3), wall, 2);
+  addBox(mut worldVerts, vec3(0.0 as f32, 0.6, ARENA + 0.3), vec3(ARENA + 0.6, 0.6, 0.3), wall, 2);
+  addBox(mut worldVerts, vec3(-ARENA - 0.3, 0.6, 0), vec3(0.3 as f32, 0.6, ARENA), wall, 2);
+  addBox(mut worldVerts, vec3(ARENA + 0.3, 0.6, 0), vec3(0.3 as f32, 0.6, ARENA), wall, 2);
   for (let k: u32 = 0; k < 4; k++) {
-    addBox(mut worldVerts, vec3(PILLAR_X[k], 2.0, PILLAR_Z[k]), vec3(PILLAR_H, 2.0, PILLAR_H), vec3(0.75 as f32, 0.55, 0.85));
+    addBox(mut worldVerts, vec3(PILLAR_X[k], 2.0, PILLAR_Z[k]), vec3(PILLAR_H, 2.0, PILLAR_H), vec3(0.85 as f32, 0.7, 0.95), 2);
   }
   const world = toBuffer(worldVerts);
   let cubeVerts: Vertex[] = [];
-  addBox(mut cubeVerts, vec3(0.0 as f32, 0.5, 0), vec3(0.5 as f32, 0.5, 0.5), vec3(0.95 as f32, 0.45, 0.3));
+  addBox(mut cubeVerts, vec3(0.0 as f32, 0.5, 0), vec3(0.5 as f32, 0.5, 0.5), vec3(0.95 as f32, 0.45, 0.3), 0);
   const cube = toBuffer(cubeVerts);
   let gemVerts: Vertex[] = [];
   addGem(mut gemVerts, vec3(0.35 as f32, 0.85, 1));
   const gem = toBuffer(gemVerts);
+  const bricks = brickTexture();
+  // 宝石のインスタンスごとの変換（毎フレーム、残っている宝石の分だけ詰めて書く）。
+  let gemObjs = new Buffer<Object>(GEMS as usize);
 
   const sky: vec3<f32> = vec3(0.62 as f32, 0.78, 0.95);
   const clear: u32 = 0xFF000000 | (((sky.x * 255) as u32) << 16) | (((sky.y * 255) as u32) << 8) | ((sky.z * 255) as u32);
@@ -401,16 +451,21 @@ export function main(): i32 {
     const cam: Camera = { viewProj: mat4Mul(proj, view) };
     const scene: Scene = { light: vec3Normalize(vec3(0.5 as f32, 1, 0.35)), fog: sky, eye: eye };
 
-    gpu.draw(mut frame, world.length as u32, vs(world, cam, { model: mat4Identity(), tint: white }), fs(scene));
+    gpu.draw(mut frame, world.length as u32, vs(world, cam, { model: mat4Identity(), tint: white }), fs(scene, bricks));
     const player: Object = { model: mat4Mul(mat4Translate(game.x, game.y, game.z), mat4RotateY(game.yaw)), tint: white };
-    gpu.draw(mut frame, cube.length as u32, vs(cube, cam, player), fs(scene));
+    gpu.draw(mut frame, cube.length as u32, vs(cube, cam, player), fs(scene, bricks));
+    // 残っている宝石を、インスタンスで 1 回の draw で描く。
+    let left: u32 = 0;
     for (let k: u32 = 0; k < GEMS; k++) {
       if (!game.taken[k]) {
         const bob = Math.sin(time * 2.5 + (k as f32)) * 0.25 + 1.2;
         const spin = mat4RotateY(time * 1.8 + (k as f32));
-        const g: Object = { model: mat4Mul(mat4Translate(game.gemX[k], bob, game.gemZ[k]), spin), tint: white };
-        gpu.draw(mut frame, gem.length as u32, vs(gem, cam, g), fs(scene));
+        gemObjs[left] = { model: mat4Mul(mat4Translate(game.gemX[k], bob, game.gemZ[k]), spin), tint: white };
+        left++;
       }
+    }
+    if (left > 0) {
+      gpu.draw(mut frame, gem.length as u32, left, vsMany(gem, cam, gemObjs), fs(scene, bricks));
     }
     gpu.endFrame(mut frame);
 

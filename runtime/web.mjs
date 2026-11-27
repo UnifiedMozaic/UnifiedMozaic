@@ -444,7 +444,7 @@ export class RenderRunner {
     return pass;
   }
 
-  draw(handle, key, srcPtr, srcLen, count, paramsPtr, paramBytes, descPtr, nbufs) {
+  draw(handle, key, srcPtr, srcLen, count, instances, paramsPtr, paramBytes, descPtr, nbufs) {
     const im = this.image(handle, 'gpu.draw');
     const device = this.device;
     const { pipeline, layout } = this.pipeline(key, srcPtr, srcLen, nbufs, im.format);
@@ -476,7 +476,7 @@ export class RenderRunner {
     const pass = this.pass(encoder, im);
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, device.createBindGroup({ layout, entries }));
-    if (count > 0) pass.draw(count >>> 0);
+    if (count > 0 && instances > 0) pass.draw(count >>> 0, instances >>> 0);
     pass.end();
     device.queue.submit([encoder.finish()]);
     for (const b of made) b.destroy();

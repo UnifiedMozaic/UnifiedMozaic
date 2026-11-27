@@ -10,7 +10,7 @@
 | ブラウザ（wasm32。[ブラウザで動かす](web.ja.md)） | WebGPU。WebGPU がなければ CPU |
 | ネイティブ（`UM_WGPU=1` なし）、Metal（`UM_METAL=1`）、Node で動かす wasm32 | CPU |
 
-**これから:** インデックスとインスタンス、テクスチャ、裏面を描かない設定・半透明の合成など。
+**これから:** 裏面を描かない設定・半透明の合成、画像ファイルの読み込み、GPU のテクスチャ（ハードウェアの補間とミップマップ）など。
 
 ## 例
 
@@ -80,10 +80,30 @@ node src/cli.ts build tri.um --target host -o tri && ./tri             # CPU で
 
 - `GpuImage` は標準の class です（`runtime/render.um`）。`handle` が 0 でなければ GPU の画像、0 なら CPU の画像で、色と深度を `color` / `depth` の Buffer に持ちます。`new GpuImage(width, height, 0, clear)` と書くと、GPU があっても CPU で描く画像を作れます（GPU と CPU の結果を比べるときなど）。
 
+- **番号で描く**: `gpu.drawIndexed(mut image, indices: Buffer<u32>, vs(...), fs(...))` は、`indices` の値を頂点の番号として vertex function に渡し、3 つずつを三角形にする。四角なら 4 つの頂点と 6 つの番号で描ける。
+- **インスタンス**: `gpu.draw` と `gpu.drawIndexed` に、図形の前にインスタンスの数を足すと（`gpu.draw(mut image, vertexCount, instances, vs(...), fs(...))`）、同じ形をその数だけ描く。vertex function は 2 番目の引数でインスタンスの番号を受け取る（`vertex function vs(i: u32, inst: u32, ...)`）ので、位置や色はインスタンスごとの Buffer から `places[inst]` のように読む。
 - **深度テスト**があります。深度の小さい（近い）ものが残り、同じか遠いものは塗りません。同じ画像への `gpu.draw` は、前の結果に重ねて描きます。
 - いまは、裏面も描きます（カリングなし）。色はそのまま書きます（半透明の合成なし）。
 - `gpu.draw` は dispatch と同じ順に GPU に積まれます。前に dispatch した kernel が書いた Buffer を、続けて描けます。
 - GPU の画像の大きさが GPU の上限を超えると停止します。
+
+## テクスチャ
+
+画像の色を読む標準の `kernel function` です。画像は `Buffer<u32>` の画素（0xAARRGGBB、上の行から）と幅・高さで渡します。UM で書いた関数なので、シェーダでも kernel でも CPU の描画でも使え、どこでも同じ値になります。
+
+| 関数 | 内容 |
+| --- | --- |
+| `textureSample(pixels, width, height, uv: vec2<f32>): vec4<f32>` | 座標 `uv` の色。隣り合う 4 つの画素を近さで混ぜる（バイリニア）。`uv` は左上が (0, 0)、右下が (1, 1)。範囲の外は画像を繰り返す |
+| `textureFetch(pixels, width, height, x: i32, y: i32): vec4<f32>` | 画素 (x, y) の色（混ぜない）。範囲の外は繰り返す |
+| `colorFromArgb(c: u32): vec4<f32>` | 0xAARRGGBB を 0〜1 の色（x = 赤、y = 緑、z = 青、w = 不透明度）にする |
+
+```ts
+fragment function fs(v: VOut, bricks: Buffer<u32>): vec4<f32> {
+  return textureSample(bricks, 32, 32, v.uv);
+}
+```
+
+GPU の専用のテクスチャ（ハードウェアの補間、ミップマップ）ではなく、Buffer を読んで計算します。そのぶん遅くなりますが、CPU と GPU で同じ絵になります。例は [examples/window/demo.um](../examples/window/demo.um)（壁と柱のレンガ）と [tests/wgpu/draw_instanced.um](../tests/wgpu/draw_instanced.um)。
 
 ## ウィンドウに描く
 
@@ -114,7 +134,7 @@ while (running) {
 
 GPU のない環境でも同じプログラムが動くよう、コンパイラは `gpu.draw` の vertex function と fragment function の組ごとに、描画の関数（`umRenderDraw__vs__fs`。`src/render.ts` の `drawSource`）を UM で作ります。その関数は、画像が GPU にあれば GPU に頼み、CPU にあれば次のように描きます。
 
-1. vertex function を CPU で呼んで、3 つずつの頂点を作る
+1. vertex function を CPU で呼んで、3 つずつの頂点を作る（番号で描くときは番号の Buffer の値、インスタンスのあるときはインスタンスごとに繰り返す）
 2. クリップ空間で、近い面（z ≥ 0）と遠い面（z ≤ w）で切る（GPU と同じ）
 3. 画面の座標にし、画素の中心が三角形の中にある画素を塗る。辺の上の画素は top-left rule（GPU と同じ決まり）
 4. 深度を比べ、近ければ、遠近を考えた補間で受け渡す値を作り、fragment function を呼んで色を書く
