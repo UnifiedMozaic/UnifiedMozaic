@@ -235,6 +235,14 @@ const MAX_VALUE_SCALARS = 4096;
  */
 const MAX_CONST_SCALARS = 1 << 22;
 
+/** prelude.um の関数で計算する Math の関数。名前の後ろに F32 / F64 を付けた関数を呼ぶ。 */
+const MATH_PRELUDE: Record<string, string> = {
+  sin: 'mathSin', cos: 'mathCos', tan: 'mathTan', asin: 'mathAsin', acos: 'mathAcos', atan: 'mathAtan', atan2: 'mathAtan2',
+};
+
+/** Math.xxx として読める定数。 */
+const MATH_CONSTS: Record<string, number> = { PI: Math.PI };
+
 /** Math.xxx として呼べる組み込み。float はすべての浮動小数点型、num は整数も受け付ける。 */
 const MATH: Record<string, { argc: number; kind: 'float' | 'num' | 'int' }> = {
   sqrt: { argc: 1, kind: 'float' },
@@ -243,6 +251,14 @@ const MATH: Record<string, { argc: number; kind: 'float' | 'num' | 'int' }> = {
   abs: { argc: 1, kind: 'num' },
   min: { argc: 2, kind: 'num' },
   max: { argc: 2, kind: 'num' },
+  // 三角関数（f32 と f64）。標準の関数 mathSinF32 / mathSinF64 など（runtime/prelude.um）の呼び出しに置き換える。
+  sin: { argc: 1, kind: 'float' },
+  cos: { argc: 1, kind: 'float' },
+  tan: { argc: 1, kind: 'float' },
+  asin: { argc: 1, kind: 'float' },
+  acos: { argc: 1, kind: 'float' },
+  atan: { argc: 1, kind: 'float' },
+  atan2: { argc: 2, kind: 'float' },
   // ビット演算。立っているビットの数、上位・下位から続く 0 の数（値が 0 ならビット幅）。
   popcount: { argc: 1, kind: 'int' },
   clz: { argc: 1, kind: 'int' },
@@ -821,7 +837,7 @@ class Checker {
 
   /** 定数の初期化に書ける形かどうかを確かめる。 */
   constShape(e: Expr): void {
-    const hint = 'a top-level constant may use literals, array literals, other top-level constants (and their elements `T[i]`), operators, `as` and parentheses; compute anything else inside a function';
+    const hint = 'a top-level constant may use literals, array literals, other top-level constants (and their elements `T[i]`), `Math.PI`, operators, `as` and parentheses; compute anything else inside a function';
     switch (e.kind) {
       case 'int':
       case 'float':
@@ -848,6 +864,10 @@ class Checker {
         // 定数の配列の要素: `T[3]`、`T[N - 1][0]`。
         this.constShape(e.base);
         return this.constShape(e.index);
+      case 'field':
+        // `Math.PI`（型検査で小数のリテラルになる）。
+        if (e.base.kind === 'ident' && e.base.name === 'Math' && !this.consts.has('Math') && e.name in MATH_CONSTS) return;
+        break;
     }
     const what = e.kind === 'call' || e.kind === 'mcall' || e.kind === 'new' || e.kind === 'newArray' ? 'a call'
       : e.kind === 'object' ? 'an object literal' : e.kind === 'cond' ? '`? :`'
@@ -2360,6 +2380,15 @@ class Checker {
       }
 
       case 'field': {
+        // `Math.PI`: 小数のリテラルに置き換えて、文脈の型（f32 / f64）に合わせる。
+        if (e.base.kind === 'ident' && e.base.name === 'Math' && !this.lookup('Math')) {
+          const v = MATH_CONSTS[e.name];
+          if (v === undefined) {
+            this.err('unknown-field', `\`Math.${e.name}\` is not available`, e.pos, `available: ${Object.keys(MATH_CONSTS).map((n) => `Math.${n}`).join(', ')}`);
+          }
+          this.rewrite(e, { kind: 'float', value: v });
+          return this.infer(e, want);
+        }
         // `Shape.Empty`: 値を持たない選択肢。
         if (e.base.kind === 'ident' && !this.lookup(e.base.name) && this.isEnumName(e.base.name)) {
           return this.enumValue(e, e.base.name, e.name, [], want);
@@ -3379,6 +3408,16 @@ class Checker {
     }
     if (e.name === 'clz32') {
       this.err('ts-feature', '`Math.clz32` is not available', e.pos, 'use `Math.clz(x)`; it works on any integer type');
+    }
+    const fn = MATH_PRELUDE[e.name];
+    if (fn) {
+      // 三角関数は標準の関数の呼び出しにする。四則演算だけで計算するので、どのターゲットでも同じ値になる。
+      if (t.k === 'float' && t.bits !== 32 && t.bits !== 64) {
+        this.err('type-mismatch', `\`Math.${e.name}\` needs f32 or f64 but found ${tyStr(t)}`, e.pos, 'convert first, e.g. `x as f32`');
+      }
+      const callee = `${fn}${t.k === 'float' && t.bits === 64 ? 'F64' : 'F32'}`;
+      this.rewrite(e, { kind: 'call', callee, args: exprs.map((expr) => ({ mode: 'none', expr })) });
+      return this.infer(e);
     }
     const node = e as unknown as { kind: string; fn: string; args: Expr[] };
     node.kind = 'math';

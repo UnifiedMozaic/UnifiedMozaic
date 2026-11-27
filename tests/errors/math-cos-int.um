@@ -1,0 +1,5 @@
+// error: type-mismatch
+export function main(): i32 {
+  print(Math.cos(1));
+  return 0;
+}

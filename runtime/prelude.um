@@ -112,6 +112,11 @@ kernel function vec2Length(a: vec2<f32>): f32 {
   return Math.sqrt(a.x * a.x + a.y * a.y);
 }
 
+// 長さ 1 にしたもの（向きは同じ）。長さ 0 のベクトルでは NaN になる。
+kernel function vec2Normalize(a: vec2<f32>): vec2<f32> {
+  return vec2DivBy(a, vec2Length(a));
+}
+
 struct vec3<T> {
   x: T;
   y: T;
@@ -159,6 +164,16 @@ kernel function vec3Dot<T>(a: vec3<T>, b: vec3<T>): T {
 // 長さ。
 kernel function vec3Length(a: vec3<f32>): f32 {
   return Math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
+}
+
+// 外積 a × b（右手系）。vec3Cross(vec3(1, 0, 0), vec3(0, 1, 0)) は (0, 0, 1)。
+kernel function vec3Cross<T>(a: vec3<T>, b: vec3<T>): vec3<T> {
+  return { x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x };
+}
+
+// 長さ 1 にしたもの（向きは同じ）。長さ 0 のベクトルでは NaN になる。
+kernel function vec3Normalize(a: vec3<f32>): vec3<f32> {
+  return vec3DivBy(a, vec3Length(a));
 }
 
 struct vec4<T> {
@@ -209,6 +224,11 @@ kernel function vec4Dot<T>(a: vec4<T>, b: vec4<T>): T {
 // 長さ。
 kernel function vec4Length(a: vec4<f32>): f32 {
   return Math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z + a.w * a.w);
+}
+
+// 長さ 1 にしたもの（向きは同じ）。長さ 0 のベクトルでは NaN になる。
+kernel function vec4Normalize(a: vec4<f32>): vec4<f32> {
+  return vec4DivBy(a, vec4Length(a));
 }
 
 // ---- 成功か失敗か ----
@@ -352,4 +372,449 @@ kernel function mat4Transpose<T>(a: mat4<T>): mat4<T> {
     }
   }
   return out;
+}
+
+// ---- 三角関数 ----
+// Math.sin / cos / tan / asin / acos / atan / atan2 は、型検査で下の関数の呼び出しに置き換わる
+// （f32 は mathXxxF32、f64 は mathXxxF64）。四則演算と Math.sqrt / Math.floor だけで計算するので、
+// CPU・wasm32・GPU（WGSL・MSL）で同じ値（同じビット）になる。f32 の版は kernel なので GPU でも使える。
+// 多項式の係数は Cephes Math Library（Stephen L. Moshier）の sinf / cosf / tanf / asinf / atanf と
+// sin / cos / tan / asin / acos / atan のもの。
+// 範囲の縮小（x を π/4 の倍数と残りに分ける）は π/4 を3つに分けた定数で行う。誤差が小さいのは、
+// f32 では |x| がおよそ 8192 まで、f64 ではおよそ 2^30（約 1.07e9）まで。それより大きいと、
+// 結果は -1 〜 1 に収まるが、正しい値から離れる。
+
+// sin と cos の f32 の範囲の縮小。|x| を π/4 の偶数倍と残り r（|r| ≤ π/4 ほど）に分け、
+// 返す vec2 の x に r、y に π/4 の何倍かを 8 で割った余り（0, 2, 4, 6）を入れる。
+kernel function mathReduceF32(x: f32): vec2<f32> {
+  let j: f32 = Math.floor(x * 1.27323954473516);
+  if (j - Math.floor(j * 0.5) * 2 == 1) {
+    j += 1;
+  }
+  const r: f32 = ((x - j * 0.78515625) - j * 2.4187564849853515625e-4) - j * 3.77489497744594108e-8;
+  return { x: r, y: j - Math.floor(j * 0.125) * 8 };
+}
+
+// |r| ≤ π/4 での sin。
+kernel function mathSinPolyF32(r: f32): f32 {
+  const z: f32 = r * r;
+  return ((-1.9515295891e-4 * z + 8.3321608736e-3) * z - 1.6666654611e-1) * z * r + r;
+}
+
+// |r| ≤ π/4 での cos。
+kernel function mathCosPolyF32(r: f32): f32 {
+  const z: f32 = r * r;
+  return ((2.443315711809948e-5 * z - 1.388731625493765e-3) * z + 4.166664568298827e-2) * z * z - 0.5 * z + 1;
+}
+
+kernel function mathSinF32(x: f32): f32 {
+  let sign: f32 = 1;
+  let a: f32 = x;
+  if (x < 0) {
+    sign = -1;
+    a = -x;
+  }
+  const red = mathReduceF32(a);
+  let j: f32 = red.y;
+  if (j > 3) {
+    sign = -sign;
+    j -= 4;
+  }
+  if (j == 2) {
+    return sign * mathCosPolyF32(red.x);
+  }
+  return sign * mathSinPolyF32(red.x);
+}
+
+kernel function mathCosF32(x: f32): f32 {
+  let sign: f32 = 1;
+  let a: f32 = x;
+  if (x < 0) {
+    a = -x;
+  }
+  const red = mathReduceF32(a);
+  let j: f32 = red.y;
+  if (j > 3) {
+    sign = -sign;
+    j -= 4;
+  }
+  if (j == 2) {
+    return -sign * mathSinPolyF32(red.x);
+  }
+  return sign * mathCosPolyF32(red.x);
+}
+
+kernel function mathTanF32(x: f32): f32 {
+  let sign: f32 = 1;
+  let a: f32 = x;
+  if (x < 0) {
+    sign = -1;
+    a = -x;
+  }
+  const red = mathReduceF32(a);
+  const r: f32 = red.x;
+  const z: f32 = r * r;
+  let y: f32 = r;
+  if (a > 1.0e-4) {
+    y = (((((9.38540185543e-3 * z + 3.11992232697e-3) * z + 2.44301354525e-2) * z + 5.34112807005e-2) * z + 1.33387994085e-1) * z + 3.33331568548e-1) * z * r + r;
+  }
+  if (red.y == 2 || red.y == 6) {
+    y = -1 / y;
+  }
+  return sign * y;
+}
+
+// |x| ≤ 1 での asin。1 より大きいと NaN。
+kernel function mathAsinF32(x: f32): f32 {
+  let sign: f32 = 1;
+  let a: f32 = x;
+  if (x < 0) {
+    sign = -1;
+    a = -x;
+  }
+  if (a > 1) {
+    return (a - a) / (a - a);
+  }
+  let t: f32 = a;
+  let z: f32 = a * a;
+  const big = a > 0.5;
+  if (big) {
+    z = 0.5 * (1 - a);
+    t = Math.sqrt(z);
+  }
+  let y: f32 = ((((4.2163199048e-2 * z + 2.4181311049e-2) * z + 4.5470025998e-2) * z + 7.4953002686e-2) * z + 1.6666752422e-1) * z * t + t;
+  if (big) {
+    y = 1.5707963267948966 - (y + y);
+  }
+  return sign * y;
+}
+
+// |x| ≤ 1 での acos（0 〜 π）。1 より大きいと NaN。
+kernel function mathAcosF32(x: f32): f32 {
+  if (x < -0.5) {
+    return 3.141592653589793 - 2 * mathAsinF32(Math.sqrt(0.5 * (1 + x)));
+  }
+  if (x > 0.5) {
+    return 2 * mathAsinF32(Math.sqrt(0.5 * (1 - x)));
+  }
+  return 1.5707963267948966 - mathAsinF32(x);
+}
+
+kernel function mathAtanF32(x: f32): f32 {
+  let sign: f32 = 1;
+  let a: f32 = x;
+  if (x < 0) {
+    sign = -1;
+    a = -x;
+  }
+  let base: f32 = 0;
+  if (a > 2.414213562373095) {
+    base = 1.5707963267948966;
+    a = -1 / a;
+  } else if (a > 0.4142135623730950) {
+    base = 0.7853981633974483;
+    a = (a - 1) / (a + 1);
+  }
+  const z: f32 = a * a;
+  return sign * (base + ((((8.05374449538e-2 * z - 1.38776856032e-1) * z + 1.99777106478e-1) * z - 3.33329491539e-1) * z * a + a));
+}
+
+// 点 (x, y) の偏角（-π 〜 π）。C の atan2 と同じく、0 の符号と無限大も扱う。
+kernel function mathAtan2F32(y: f32, x: f32): f32 {
+  if (x != x || y != y) {
+    return x + y;
+  }
+  const pi: f32 = 3.141592653589793;
+  // y の符号（-0 も負とする）。1 / -0 は -∞。
+  let ys: f32 = 1;
+  if (y < 0 || (y == 0 && 1 / y < 0)) {
+    ys = -1;
+  }
+  const xneg = x < 0 || (x == 0 && 1 / x < 0);
+  if (y == 0) {
+    if (xneg) {
+      return ys * pi;
+    }
+    return y;
+  }
+  if (x == 0) {
+    return ys * (pi * 0.5);
+  }
+  const big: f32 = 3.4028234663852886e38;
+  const xinf = x > big || x < -big;
+  const yinf = y > big || y < -big;
+  if (xinf && yinf) {
+    if (xneg) {
+      return ys * (pi * 0.75);
+    }
+    return ys * (pi * 0.25);
+  }
+  if (yinf) {
+    return ys * (pi * 0.5);
+  }
+  if (xinf) {
+    if (xneg) {
+      return ys * pi;
+    }
+    return ys * 0;
+  }
+  const t: f32 = mathAtanF32(y / x);
+  if (xneg) {
+    return t + ys * pi;
+  }
+  return t;
+}
+
+// sin と cos の f64 の範囲の縮小（mathReduceF32 と同じ形）。
+function mathReduceF64(x: f64): vec2<f64> {
+  let j: f64 = Math.floor(x * 1.27323954473516268615);
+  if (j - Math.floor(j * 0.5) * 2 == 1) {
+    j += 1;
+  }
+  const r: f64 = ((x - j * 7.85398125648498535156e-1) - j * 3.77489470793079817668e-8) - j * 2.69515142907905952645e-15;
+  return { x: r, y: j - Math.floor(j * 0.125) * 8 };
+}
+
+function mathSinPolyF64(r: f64): f64 {
+  const z: f64 = r * r;
+  return r + r * z * (((((1.58962301576546568060e-10 * z - 2.50507477628578072866e-8) * z + 2.75573136213857245213e-6) * z - 1.98412698295895385996e-4) * z + 8.33333333332211858878e-3) * z - 1.66666666666666307295e-1);
+}
+
+function mathCosPolyF64(r: f64): f64 {
+  const z: f64 = r * r;
+  return 1 - 0.5 * z + z * z * (((((-1.13585365213876817300e-11 * z + 2.08757008419747316778e-9) * z - 2.75573141792967388112e-7) * z + 2.48015872888517045348e-5) * z - 1.38888888888730564116e-3) * z + 4.16666666666665929218e-2);
+}
+
+function mathSinF64(x: f64): f64 {
+  let sign: f64 = 1;
+  let a: f64 = x;
+  if (x < 0) {
+    sign = -1;
+    a = -x;
+  }
+  const red = mathReduceF64(a);
+  let j: f64 = red.y;
+  if (j > 3) {
+    sign = -sign;
+    j -= 4;
+  }
+  if (j == 2) {
+    return sign * mathCosPolyF64(red.x);
+  }
+  return sign * mathSinPolyF64(red.x);
+}
+
+function mathCosF64(x: f64): f64 {
+  let sign: f64 = 1;
+  let a: f64 = x;
+  if (x < 0) {
+    a = -x;
+  }
+  const red = mathReduceF64(a);
+  let j: f64 = red.y;
+  if (j > 3) {
+    sign = -sign;
+    j -= 4;
+  }
+  if (j == 2) {
+    return -sign * mathSinPolyF64(red.x);
+  }
+  return sign * mathCosPolyF64(red.x);
+}
+
+function mathTanF64(x: f64): f64 {
+  let sign: f64 = 1;
+  let a: f64 = x;
+  if (x < 0) {
+    sign = -1;
+    a = -x;
+  }
+  const red = mathReduceF64(a);
+  const r: f64 = red.x;
+  const z: f64 = r * r;
+  let y: f64 = r;
+  if (z > 1.0e-14) {
+    const p: f64 = (-1.30936939181383777646e4 * z + 1.15351664838587416140e6) * z - 1.79565251976484877988e7;
+    const q: f64 = (((z + 1.36812963470692954678e4) * z - 1.32089234440210967447e6) * z + 2.50083801823357915839e7) * z - 5.38695755929454629881e7;
+    y = r + r * (z * p / q);
+  }
+  if (red.y == 2 || red.y == 6) {
+    y = -1 / y;
+  }
+  return sign * y;
+}
+
+function mathAsinF64(x: f64): f64 {
+  let sign: f64 = 1;
+  let a: f64 = x;
+  if (x < 0) {
+    sign = -1;
+    a = -x;
+  }
+  if (a > 1) {
+    return (a - a) / (a - a);
+  }
+  const pio4: f64 = 7.85398163397448309616e-1;
+  const morebits: f64 = 6.123233995736765886130e-17;
+  if (a > 0.625) {
+    let zz: f64 = 1 - a;
+    const p: f64 = zz * ((((2.967721961301243206100e-3 * zz - 5.634242780008963776856e-1) * zz + 6.968710824104713396794e0) * zz - 2.556901049652824852289e1) * zz + 2.853665548261061424989e1)
+      / ((((zz - 2.194779531642920639778e1) * zz + 1.470656354026814941758e2) * zz - 3.838770957603691357202e2) * zz + 3.424398657913078477438e2);
+    zz = Math.sqrt(zz + zz);
+    let z: f64 = pio4 - zz;
+    zz = zz * p - morebits;
+    z = z - zz;
+    z = z + pio4;
+    return sign * z;
+  }
+  if (a < 1.0e-8) {
+    return x;
+  }
+  const zz: f64 = a * a;
+  const z: f64 = zz * (((((4.253011369004428248960e-3 * zz - 6.019598008014123785661e-1) * zz + 5.444622390564711410273e0) * zz - 1.626247967210700244449e1) * zz + 1.956261983317594739197e1) * zz - 8.198089802484824371615e0)
+    / (((((zz - 1.474091372988853791896e1) * zz + 7.049610280856842141659e1) * zz - 1.471791292232726029859e2) * zz + 1.395105614657485689735e2) * zz - 4.918853881490881290097e1);
+  return sign * (a * z + a);
+}
+
+function mathAcosF64(x: f64): f64 {
+  if (x < -0.5) {
+    return 3.14159265358979323846 - 2 * mathAsinF64(Math.sqrt(0.5 * (1 + x)));
+  }
+  if (x > 0.5) {
+    return 2 * mathAsinF64(Math.sqrt(0.5 * (1 - x)));
+  }
+  const pio4: f64 = 7.85398163397448309616e-1;
+  let z: f64 = pio4 - mathAsinF64(x);
+  z = z + 6.123233995736765886130e-17;
+  return z + pio4;
+}
+
+function mathAtanF64(x: f64): f64 {
+  let sign: f64 = 1;
+  let a: f64 = x;
+  if (x < 0) {
+    sign = -1;
+    a = -x;
+  }
+  const morebits: f64 = 6.123233995736765886130e-17;
+  let base: f64 = 0;
+  let extra: f64 = 0;
+  if (a > 2.41421356237309504880) {
+    base = 1.57079632679489661923;
+    extra = morebits;
+    a = -1 / a;
+  } else if (a > 0.66) {
+    base = 7.85398163397448309616e-1;
+    extra = 0.5 * morebits;
+    a = (a - 1) / (a + 1);
+  }
+  const z: f64 = a * a;
+  let w: f64 = z * ((((-8.750608600031904122785e-1 * z - 1.615753718733365076637e1) * z - 7.500855792314704667340e1) * z - 1.228866684490136173410e2) * z - 6.485021904942025371773e1)
+    / (((((z + 2.485846490142306297962e1) * z + 1.650270098316988542046e2) * z + 4.328810604912902668951e2) * z + 4.853903996359136964868e2) * z + 1.945506571482613964425e2);
+  w = a * w + a;
+  return sign * (base + (w + extra));
+}
+
+function mathAtan2F64(y: f64, x: f64): f64 {
+  if (x != x || y != y) {
+    return x + y;
+  }
+  const pi: f64 = 3.14159265358979323846;
+  let ys: f64 = 1;
+  if (y < 0 || (y == 0 && 1 / y < 0)) {
+    ys = -1;
+  }
+  const xneg = x < 0 || (x == 0 && 1 / x < 0);
+  if (y == 0) {
+    if (xneg) {
+      return ys * pi;
+    }
+    return y;
+  }
+  if (x == 0) {
+    return ys * (pi * 0.5);
+  }
+  const big: f64 = 1.7976931348623157e308;
+  const xinf = x > big || x < -big;
+  const yinf = y > big || y < -big;
+  if (xinf && yinf) {
+    if (xneg) {
+      return ys * (pi * 0.75);
+    }
+    return ys * (pi * 0.25);
+  }
+  if (yinf) {
+    return ys * (pi * 0.5);
+  }
+  if (xinf) {
+    if (xneg) {
+      return ys * pi;
+    }
+    return ys * 0;
+  }
+  const t: f64 = mathAtanF64(y / x);
+  if (xneg) {
+    return t + ys * pi;
+  }
+  return t;
+}
+
+// ---- 3D の変換の行列（mat4<f32>） ----
+// 列ベクトルに左から掛ける形（mat4MulVec(m, v) は m × v）。いくつかを続けて掛けるときは
+// mat4Mul(proj, mat4Mul(view, model)) のように、先に掛けたいものを右に置く。
+// 座標は右手系。角度はラジアン。kernel なので GPU でも使える。
+
+// 平行移動。
+kernel function mat4Translate(x: f32, y: f32, z: f32): mat4<f32> {
+  return { m: [1, 0, 0, x, 0, 1, 0, y, 0, 0, 1, z, 0, 0, 0, 1] };
+}
+
+// 拡大・縮小（軸ごとの倍率）。
+kernel function mat4Scale(x: f32, y: f32, z: f32): mat4<f32> {
+  return { m: [x, 0, 0, 0, 0, y, 0, 0, 0, 0, z, 0, 0, 0, 0, 1] };
+}
+
+// x 軸のまわりの回転（y から z へ回る向きが正）。
+kernel function mat4RotateX(angle: f32): mat4<f32> {
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  return { m: [1, 0, 0, 0, 0, c, -s, 0, 0, s, c, 0, 0, 0, 0, 1] };
+}
+
+// y 軸のまわりの回転（z から x へ回る向きが正）。
+kernel function mat4RotateY(angle: f32): mat4<f32> {
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  return { m: [c, 0, s, 0, 0, 1, 0, 0, -s, 0, c, 0, 0, 0, 0, 1] };
+}
+
+// z 軸のまわりの回転（x から y へ回る向きが正）。
+kernel function mat4RotateZ(angle: f32): mat4<f32> {
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  return { m: [c, -s, 0, 0, s, c, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] };
+}
+
+// 透視投影。fovY は縦の画角（ラジアン）、aspect は幅 / 高さ、near と far は見える奥行きの範囲（どちらも正）。
+// カメラは -z の向きを見る。結果の w で割ると、z は near で 0、far で 1 になる（WebGPU・Metal・Direct3D の深度の範囲）。
+kernel function mat4Perspective(fovY: f32, aspect: f32, near: f32, far: f32): mat4<f32> {
+  const f: f32 = 1 / Math.tan(fovY * 0.5);
+  const nf: f32 = 1 / (near - far);
+  return { m: [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, far * nf, near * far * nf, 0, 0, -1, 0] };
+}
+
+// 正射影。left〜right、bottom〜top、near〜far の箱を、x と y は -1〜1、z は 0〜1 に写す（カメラは -z の向きを見る）。
+kernel function mat4Ortho(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32): mat4<f32> {
+  const w: f32 = 1 / (right - left);
+  const h: f32 = 1 / (top - bottom);
+  const d: f32 = 1 / (near - far);
+  return { m: [2 * w, 0, 0, -(right + left) * w, 0, 2 * h, 0, -(top + bottom) * h, 0, 0, d, near * d, 0, 0, 0, 1] };
+}
+
+// カメラの行列（ワールドの座標をカメラの座標にする）。eye から target を見て、up が画面の上になる。
+kernel function mat4LookAt(eye: vec3<f32>, target: vec3<f32>, up: vec3<f32>): mat4<f32> {
+  const z = vec3Normalize(eye - target);
+  const x = vec3Normalize(vec3Cross(up, z));
+  const y = vec3Cross(z, x);
+  return { m: [x.x, x.y, x.z, -vec3Dot(x, eye), y.x, y.y, y.z, -vec3Dot(y, eye), z.x, z.y, z.z, -vec3Dot(z, eye), 0, 0, 0, 1] };
 }

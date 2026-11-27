@@ -85,7 +85,7 @@ Windows で exe にアイコンを付けるには、`llvm-rc`（LLVM に入っ�
 | 文 | `let` / `const`（`let x: T;` はゼロで初期化）、代入と複合代入、`++` / `--`、`if` / `else`、`while`、`do ... while`、`for (;;)`、`for...of`、`switch`、`match`、`break`、`continue`、`return` |
 | 式 | 四則演算と剰余、比較、`&&` / `\|\|` / `!`、条件式 `a ? b : c`、`x ?? 既定値`、ビット演算とシフト、`as` による変換、関数とメソッドの呼び出し、`new`、`this`、フィールドと添字、オブジェクトリテラル、配列リテラル、`new Array<T>(n)`、`xs.length`、テンプレート文字列 `` `x = ${x}` ``、`String(x)` |
 | 配列のメソッド | `push`、`pop`、`clear`、`clone`、一括の書き込み `fill(v)` / `fill(v, start, end)`（Buffer / RacyBuffer にも。下の「一括の書き込み」） |
-| 組み込み | `print(x)`（数、`bool`、文字列）、`dispatch` / `cpu.dispatch` / `gpu.dispatch`、グループで実行する `dispatchGroups`（下の「グループ（共有配列・barrier）と kernel の中のアトミック演算」）、`gpu.submit` / `gpu.ready` / `gpu.wait`、`gpu.flags` / `gpu.commit` / `gpu.untracked`（下の「Metal（Mac）での GPU 実行」）、実行時に WGSL の kernel を読み込む `gpu.loadKernel` / `gpu.runKernel`（[wgpu での GPU 実行](wgpu.ja.md)）、`thread.*`（下の「スレッド」）、`Math.sqrt` / `floor` / `ceil` / `abs` / `min` / `max`、ビット演算の `Math.popcount` / `clz` / `ctz`、マスクつきシフト `Math.shl` / `Math.shr`（下の「マスクつきシフトと範囲チェックの除去」）、先読み `Math.prefetch(arr, i)`（下の「先読み」）、SIMD の `Simd.*`（下の「SIMD のベクトル」） |
+| 組み込み | `print(x)`（数、`bool`、文字列）、`dispatch` / `cpu.dispatch` / `gpu.dispatch`、グループで実行する `dispatchGroups`（下の「グループ（共有配列・barrier）と kernel の中のアトミック演算」）、`gpu.submit` / `gpu.ready` / `gpu.wait`、`gpu.flags` / `gpu.commit` / `gpu.untracked`（下の「Metal（Mac）での GPU 実行」）、実行時に WGSL の kernel を読み込む `gpu.loadKernel` / `gpu.runKernel`（[wgpu での GPU 実行](wgpu.ja.md)）、`thread.*`（下の「スレッド」）、`Math.sqrt` / `floor` / `ceil` / `abs` / `min` / `max`、三角関数の `Math.sin` / `cos` / `tan` / `asin` / `acos` / `atan` / `atan2` と定数 `Math.PI`（下の「三角関数」）、ビット演算の `Math.popcount` / `clz` / `ctz`、マスクつきシフト `Math.shl` / `Math.shr`（下の「マスクつきシフトと範囲チェックの除去」）、先読み `Math.prefetch(arr, i)`（下の「先読み」）、SIMD の `Simd.*`（下の「SIMD のベクトル」） |
 | 入出力の組み込み | `readLine()`、`inputReady()`、`clock()`、`stringFromBytes(bytes)`、`readFile(path)`、`writeFile(path, bytes)`、`fileSize(path)`、`readFileRange(path, offset, length)`、`appendFile(path, bytes)`、`readFileInto(...)`、開いたままのファイル `fileOpen` / `fileRead` / `fileReadAt` / `fileWrite` / `fileSeek` / `fileLength` / `fileClose`、フォルダ `listDir` / `makeDir` / `isDir`、パス `cwd()` / `exePath()` / `exeDir()` / `absPath(path)`、環境変数 `envVar(name)`、名前の変更と削除 `fileRename` / `fileRemove` / `dirRemove`、プロセス `processRun` / `processStart` / `processId`、`args()`、`eprint(text)`（下の「入出力」） |
 | ネイティブだけの組み込み | ウィンドウ（`windowOpen` など。[window.ja.md](window.ja.md)）、WebAssembly のモジュールの実行（`wasmLoad` / `wasmNew` / `wasmCall` など。[wasm.ja.md](wasm.ja.md)）、動画・音声の読み書き（`mediaOpenVideo` / `mediaFrame` / `mediaSamples` / `mediaCreate` など。FFmpeg を使う。[media.ja.md](media.ja.md)）、HTTP(S) の要求（`httpStart` / `httpReadLine` / `httpPoll` など。裏のスレッドで送受信し、届いた分から読む。[http.ja.md](http.ja.md)） |
 
@@ -122,7 +122,7 @@ Windows で exe にアイコンを付けるには、`llvm-rc`（LLVM に入っ�
 | `switch` / `do ... while` | `switch` は整数・`bool`・文字列で分岐します。各 `case` は `break` / `return` / `continue` で終えます（次の case へ落ちる書き方はエラー。ラベルを並べて本体を共有するのは可）。 | [switches.um](../examples/switches.um)、[do_while.um](../examples/do_while.um) |
 | 文字列 | UTF-8 のバイト列を持つ、書き換えできない値です。`+` で連結、`==` で比較、`.length` と `s[i]` はバイト単位です。 | [strings.um](../examples/strings.um) |
 | ヒープを持つ要素の配列 | `string[]`、`i32[][]`、配列を持つ struct の配列、自分自身の配列を持つ struct（木）が書けます（下の「所有権」）。 | [nested_arrays.um](../examples/nested_arrays.um) |
-| ベクトルと行列 | `vec2` / `vec3` / `vec4` は演算子で成分ごとに計算できます。`mat2` / `mat3` / `mat4` は関数（`mat3Mul` など）で計算します。`f32` / `i32` / `u32` のベクトルは kernel と `Buffer` で、行列は kernel の中でも使えます。 | [vectors.um](../examples/vectors.um)、[matrices.um](../examples/matrices.um) |
+| ベクトルと行列 | `vec2` / `vec3` / `vec4` は演算子で成分ごとに計算できます（内積 `vec3Dot`、外積 `vec3Cross`、長さ `vec3Length`、長さ 1 にする `vec3Normalize` も）。`mat2` / `mat3` / `mat4` は関数（`mat3Mul` など）で計算します。3D の変換の行列を作る関数もあります（下の「三角関数」）。`f32` / `i32` / `u32` のベクトルは kernel と `Buffer` で、行列は kernel の中でも使えます。 | [vectors.um](../examples/vectors.um)、[matrices.um](../examples/matrices.um)、[trig.um](../examples/trig.um) |
 | 小さい浮動小数点 | `f16`（IEEE 754 半精度）、`f8`（FP8 E4M3）、`f4`（FP4 E2M1）。演算の結果は、正確な値をその型に丸めたものです。kernel と `Buffer` ではまだ使えません。 | [half_floats.um](../examples/half_floats.um)、[small_floats.um](../examples/small_floats.um) |
 | 複数のファイル | `import { a, b } from "./lib/math.um";`。相手のファイルで `export` を付けたものだけ import できます。名前は全ファイルで1つの空間です。 | [tests/modules/basic](../tests/modules/basic/main.um) |
 
@@ -134,6 +134,7 @@ Windows で exe にアイコンを付けるには、`llvm-rc`（LLVM に入っ�
 const FILES: i32 = 9;
 const SQUARES: i32 = FILES * FILES;        // 他の定数を使える
 const BIG: u64 = (1 as u64) << 40;
+const TAU: f64 = Math.PI * 2;              // Math.PI も使える
 export const NAME: string = "um-engine";   // 他のファイルから import できる
 
 function sum(xs: i32[SQUARES]): i32 { ... } // 固定長配列の長さにも使える
@@ -748,6 +749,34 @@ bad.um:1:15: error[ts-feature]: type 'number' is not available
 - **wasm32**: スレッド（合流の時点でその場で実行します）、simd128。
 
 次のものは、TypeScript にはありますが、この言語では持たない方針です（書くとエラーで置き換え先を示します）: 継承（`extends`、`protected`、`abstract`）、例外（`try` / `throw`。失敗は `Result<T, E>` で返します）、`var`、`for...in`、`T | null` 以外の union 型、省略できるフィールドや引数、引数の既定値、`number` / `any`。
+
+## 三角関数
+
+`Math.sin` / `cos` / `tan` / `asin` / `acos` / `atan` / `atan2(y, x)` は、`f32` と `f64` の値を受け取り、同じ型の値を返します。`f32` の版は kernel の中でも使えます。`Math.PI` は円周率で、文脈の型（`f32` / `f64`）の小数になります。角度はラジアンです。
+
+```ts
+const a: f32 = Math.PI / 6;
+const s = Math.sin(a);            // f32
+const t = Math.atan2(-1.0, -1.0); // f64。-3π/4
+```
+
+- **どのターゲットでも同じ値（同じビット）になります。** 標準の関数（`runtime/prelude.um` の `mathSinF32` など）が、四則演算と `Math.sqrt` / `Math.floor` だけで計算します。GPU の `sin` などの命令（精度が決まっていない）は使いません。多項式は Cephes Math Library のものです。
+- **誤差。** ふつうの入力では、`sin` / `cos` / `asin` / `acos` / `atan` / `atan2` は正しい値から 1〜2 ulp、`tan` も 2 ulp ほどです。π/4 の倍数のすぐ近く（`sin(π)` のように答えが 0 に近いところと、`tan` の極の近く）では相対誤差が大きくなります（`f64` で `sin(10π)` の絶対誤差は 1e-30 ほど）。
+- **大きな角度。** 誤差が小さいのは、`f32` では |x| がおよそ 8192 まで、`f64` ではおよそ 1e9 までです。それより大きいと、結果は -1〜1 に収まりますが、正しい値から離れます。角度は小さい範囲に保ってください（`angle = angle % (2 * Math.PI)` など）。
+- `asin` / `acos` に絶対値が 1 より大きい値を渡すと NaN です。`atan2` は C と同じく、0 の符号と無限大も扱います（`atan2(0, -0)` は π、`atan2(-0, 0)` は -0）。
+- `f16` / `f8` / `f4` は受け付けません（`x as f32` にしてから渡します）。
+
+3D の変換の行列（`mat4<f32>`。kernel でも使えます）を作る関数:
+
+| 関数 | 内容 |
+| --- | --- |
+| `mat4Translate(x, y, z)` / `mat4Scale(x, y, z)` | 平行移動 / 軸ごとの拡大・縮小 |
+| `mat4RotateX(angle)` / `mat4RotateY(angle)` / `mat4RotateZ(angle)` | 軸のまわりの回転（右手系） |
+| `mat4Perspective(fovY, aspect, near, far)` | 透視投影。fovY は縦の画角、aspect は幅 / 高さ。カメラは -z の向きを見て、w で割ると z は near で 0、far で 1（WebGPU・Metal・Direct3D の深度の範囲） |
+| `mat4Ortho(left, right, bottom, top, near, far)` | 正射影（z は同じく 0〜1） |
+| `mat4LookAt(eye, target, up)` | カメラの行列。eye から target を見て、up が画面の上 |
+
+行列は列ベクトルに左から掛ける形です（`mat4MulVec(m, v)` は m × v）。続けて掛けるときは `mat4Mul(proj, mat4Mul(view, model))` のように、先に掛けたいものを右に置きます。
 
 ## マスクつきシフトと範囲チェックの除去
 

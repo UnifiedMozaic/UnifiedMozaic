@@ -1,0 +1,85 @@
+// 三角関数（Math.sin / cos / tan / asin / acos / atan / atan2）と Math.PI。f32 と f64 で使え、kernel の中でも使える。
+// 四則演算だけで計算する標準の関数（runtime/prelude.um）なので、CPU・wasm32・GPU で同じ値になる。
+// expect: 0.8414709848078965
+// expect: 0.5403023058681398
+// expect: 0.5463024898437905
+// expect: 3.1415926535897936
+// expect: 3.141592653589793
+// expect: 3.141592653589793
+// expect: -2.356194490192345
+// expect: 0.49999999999999994
+// expect: 0.4794255495071411
+// expect: 0.8775825500488281
+// expect: 3.1415927410125732
+// expect: 3.141592653589793
+// expect: -Infinity
+// expect: 2.356194490192345
+// expect: NaN
+// expect: -0.8560205698013306
+// expect: 1.5
+// expect: 1
+// expect: 0.800000011920929
+// expect: 1
+// expect: 6.2831854820251465
+
+// Math.PI は最上位の定数にも書ける。
+const TAU: f32 = Math.PI * 2;
+
+// 点を z 軸のまわりに回す（角度は点ごとに違う）。
+kernel function spin(i: u32, out: mut Buffer<vec2<f32>>, angle: Buffer<f32>): void {
+  const c = Math.cos(angle[i]);
+  const s = Math.sin(angle[i]);
+  out[i] = vec2(c * 2 - s, s * 2 + c);
+}
+
+// 回した点の向きを atan2 で戻す。
+kernel function heading(i: u32, out: mut Buffer<f32>, ps: Buffer<vec2<f32>>): void {
+  out[i] = Math.atan2(ps[i].y, ps[i].x);
+}
+
+export function main(): i32 {
+  // f64
+  print(Math.sin(1.0));
+  print(Math.cos(1.0));
+  print(Math.tan(0.5));
+  print(Math.asin(0.5) * 6);
+  print(Math.acos(-1.0));
+  print(Math.atan(1.0) * 4);
+  print(Math.atan2(-1.0, -1.0));
+  print(Math.sin(Math.PI / 6));
+  // f32
+  const a: f32 = 0.5;
+  print(Math.sin(a));
+  print(Math.cos(a));
+  const p: f32 = Math.PI;
+  print(p);
+  // 0 の符号と無限大
+  const zero: f64 = 0;
+  const negZero: f64 = -zero;
+  print(Math.atan2(zero, negZero));
+  print(1 / Math.atan2(negZero, zero));
+  print(Math.atan2(1 / zero, -1 / zero));
+  print(Math.asin(2.0));
+
+  // kernel の中で使う
+  let angle = new Buffer<f32>(4);
+  for (let i: u32 = 0; i < 4; i++) {
+    angle[i] = (i as f32) * 0.5;
+  }
+  let ps = new Buffer<vec2<f32>>(4);
+  dispatch(spin, 4, mut ps, angle);
+  let back = new Buffer<f32>(4);
+  dispatch(heading, 4, mut back, ps);
+  print(ps[3].x);
+  print(back[3] - Math.atan(0.5 as f32));
+
+  // ベクトルと 3D の行列
+  print(vec3Cross(vec3(1, 0, 0), vec3(0, 1, 0)).z);
+  const n = vec3Normalize(vec3(3.0 as f32, 0, 4));
+  print(n.z);
+  const v: vec4<f32> = vec4(1, 0, 0, 1);
+  const r = mat4MulVec(mat4RotateZ(Math.PI / 2), v);
+  print(r.y);
+  print(TAU);
+  return 0;
+}

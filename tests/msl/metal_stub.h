@@ -2,10 +2,18 @@
 // 生成した MSL が使う範囲だけを、Metal の意味で定義する。clang++ -std=c++14 で使う。
 // 先に標準ヘッダを include してから、このヘッダを include すること（kernel などのマクロが標準ヘッダに影響しないように）。
 // sqrt / floor / ceil / fabs / fmod / INFINITY / NAN は <cmath> のものをそのまま使う。
+// Metal と同じく float を渡せば float を返すよう、std の多重定義を名前空間なしで見えるようにする
+// （<cmath> だけでは、名前空間なしの floor(float) が C の floor(double) になり、結果が double になることがある）。
 #pragma once
 
 #include <cmath>
 #include <cstdint>
+
+using std::ceil;
+using std::fabs;
+using std::floor;
+using std::fmod;
+using std::sqrt;
 
 // アドレス空間と kernel は、C++ では何もしない。
 #define kernel
