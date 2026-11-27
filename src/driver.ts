@@ -456,6 +456,8 @@ const HTTP_PRELUDE = join(import.meta.dirname, '..', 'runtime', 'http.um');
 const RENDER_PRELUDE = join(import.meta.dirname, '..', 'runtime', 'render.um');
 /** ウィンドウに描く標準の関数（gpuBeginFrame、gpuEndFrame）。gpu.beginFrame / gpu.endFrame を使うときだけ加える。 */
 const RENDER_WINDOW_PRELUDE = join(import.meta.dirname, '..', 'runtime', 'render_window.um');
+/** 文字の描画（drawText、textWidth）。使うときだけ加える（render.um も要る）。 */
+const TEXT_PRELUDE = join(import.meta.dirname, '..', 'runtime', 'text.um');
 
 /** ファイル番号を、宣言とその中のメソッドに付ける。 */
 function tag(d: Decl, file: number): void {
@@ -548,12 +550,16 @@ export function parseProgram(src: string, file?: string): Module {
     if (texts.some((t) => used.test(t))) standard.push(...extra.decls);
   }
   // 描画: 標準の関数と、gpu.draw の vs と fs の組ごとの描画の関数（src/render.ts の drawSources）。
-  if (texts.some((t) => /\bgpu\s*\.\s*(beginImage|draw|drawIndexed|endImage|beginFrame|endFrame)\b/.test(t))) {
-    standard.push(...parse(readFileSync(RENDER_PRELUDE, 'utf8'), 'render.um').decls);
+  // 文字の描画（text.um）は中で gpu.draw を使うので、描画の関数はそれも含めて作る。
+  const usesText = texts.some((t) => /\b(drawText|textWidth)\b/.test(t));
+  if (usesText || texts.some((t) => /\bgpu\s*\.\s*(beginImage|draw|drawIndexed|endImage|beginFrame|endFrame)\b/.test(t))) {
+    const renderDecls = parse(readFileSync(RENDER_PRELUDE, 'utf8'), 'render.um').decls;
     if (texts.some((t) => /\bgpu\s*\.\s*(beginFrame|endFrame)\b/.test(t))) {
-      standard.push(...parse(readFileSync(RENDER_WINDOW_PRELUDE, 'utf8'), 'render.um').decls);
+      renderDecls.push(...parse(readFileSync(RENDER_WINDOW_PRELUDE, 'utf8'), 'render.um').decls);
     }
-    const draws = drawSources(merged.decls);
+    if (usesText) renderDecls.push(...parse(readFileSync(TEXT_PRELUDE, 'utf8'), 'render.um').decls);
+    standard.push(...renderDecls);
+    const draws = drawSources([...merged.decls, ...renderDecls]);
     if (draws) standard.push(...parse(draws, 'render-draw.um').decls);
   }
   for (const d of standard) {

@@ -2,6 +2,7 @@
 //   移動: W A S D（か ↑ ↓）  向き: ← → かマウスのドラッグ  ジャンプ: Space  やり直し: R
 //   レイトレーシング（影と映り込み）の入り切り: T  終わり: Esc
 // シェーダ（光・市松模様・霧・レンガのテクスチャ）、宝石のインスタンス描画（8 つを 1 回の gpu.draw で）、深度テスト、
+// 画面の文字（drawText）、
 // 三角関数と行列、キーとマウスの入力を使う。
 // 影と映り込みはレイトレーシングに任せる: 普通の描画は画素ごとに見える面を決めるだけで、その画素の fragment function
 // の中で、光源の向き（影）と反射の向き（映り込み。床・宝石・立方体）に光線を飛ばす（箱と正八面体との当たり判定。T で切り替え）。
@@ -83,6 +84,13 @@ function brickTexture(): Buffer<u32> {
     }
   }
   return px;
+}
+
+// 影（右下にずらした暗い文字）を付けて文字を描く。
+function shadowText(frame: mut GpuImage, text: string, x: f32, y: f32, scale: f32, color: u32): void {
+  const off = Math.max(Math.floor(scale / 2), 1);
+  drawText(mut frame, text, x + off, y + off, scale, 0xFF1A2230);
+  drawText(mut frame, text, x, y, scale, color);
 }
 
 function toBuffer(vs: Vertex[]): Buffer<Vertex> {
@@ -676,6 +684,19 @@ export function main(): i32 {
     }
     if (left > 0) {
       gpu.draw(mut frame, gem.length as u32, left, vsMany(gem, cam, gemObjs), fs(scene, bricks, boxes, gemShapes, tr));
+    }
+    // 画面の文字（影を付けて読みやすく）。大きさは画面の高さに合わせる。
+    const ui: f32 = Math.max(Math.floor((frame.height as f32) / 400), 1);
+    shadowText(mut frame, `GEMS ${game.score} / ${GEMS}`, 10 * ui, 10 * ui, 3 * ui, 0xFFFFFFFF);
+    let rtLabel = "RAY TRACING ON";
+    if (!game.raytrace) {
+      rtLabel = "RAY TRACING OFF";
+    }
+    shadowText(mut frame, rtLabel, (frame.width as f32) - textWidth(rtLabel, 2 * ui) - 10 * ui, 10 * ui, 2 * ui, 0xFFFFE08A);
+    shadowText(mut frame, "WASD/ARROWS MOVE  SPACE JUMP  T RAY TRACING  R RESET", 10 * ui, (frame.height as f32) - 24 * ui, 2 * ui, 0xFFE8F0F8);
+    if (game.score == GEMS) {
+      const big = 8 * ui;
+      shadowText(mut frame, "CLEAR!", ((frame.width as f32) - textWidth("CLEAR!", big)) * 0.5, (frame.height as f32) * 0.35, big, 0xFFFFD54A);
     }
     gpu.endFrame(mut frame);
 

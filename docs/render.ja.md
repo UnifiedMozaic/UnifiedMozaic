@@ -10,7 +10,7 @@
 | ブラウザ（wasm32。[ブラウザで動かす](web.ja.md)） | WebGPU。WebGPU がなければ CPU |
 | ネイティブ（`UM_WGPU=1` なし）、Metal（`UM_METAL=1`）、Node で動かす wasm32 | CPU |
 
-**これから:** 裏面を描かない設定・半透明の合成、画像ファイルの読み込み、GPU のテクスチャ（ハードウェアの補間とミップマップ）など。
+**これから:** 裏面を描かない設定・半透明の合成、画像ファイルの読み込み、日本語の文字、GPU のテクスチャ（ハードウェアの補間とミップマップ）など。
 
 ## 例
 
@@ -104,6 +104,26 @@ fragment function fs(v: VOut, bricks: Buffer<u32>): vec4<f32> {
 ```
 
 GPU の専用のテクスチャ（ハードウェアの補間、ミップマップ）ではなく、Buffer を読んで計算します。そのぶん遅くなりますが、CPU と GPU で同じ絵になります。例は [examples/window/demo.um](../examples/window/demo.um)（壁と柱のレンガ）と [tests/wgpu/draw_instanced.um](../tests/wgpu/draw_instanced.um)。
+
+## 文字
+
+画像やフレームに ASCII の文字を描く標準の関数です（`runtime/text.um`。使うときだけ加わります）。
+
+| 関数 | 内容 |
+| --- | --- |
+| `drawText(mut frame: GpuImage, text: string, x: f32, y: f32, scale: f32, color: u32)` | (x, y)（左上。画素）から `text` を描く。1 文字は 5 × 7 の点で、点 1 つが `scale` 画素の正方形。`color` は 0xAARRGGBB |
+| `textWidth(text: string, scale: f32): f32` | 描いたときの幅（画素）。1 文字は `6 × scale`（5 つの点と 1 つの隙間）。高さは `7 × scale` |
+
+```ts
+drawText(mut frame, `GEMS ${score} / 8`, 10, 10, 3, 0xFFFFFFFF);
+const w = textWidth("CLEAR!", 8);
+drawText(mut frame, "CLEAR!", (frame.width as f32 - w) / 2, 200, 8, 0xFFFFD54A);
+```
+
+- フォントは UnifiedMozaic のために描いた 5 × 7 の点のフォントで、ASCII の印字できる文字（32〜126）があります。それ以外の文字は `?` になります（日本語はまだ描けません）。
+- 点の 1 つずつを小さな四角として `gpu.draw` で描くので、GPU でも CPU でも、ネイティブでもブラウザでも同じ絵になります。
+- 深度は 0（いちばん手前）なので、3D の場面の上に重なります。場面を描いたあとに呼びます。
+- 影を付けたいときは、少しずらして暗い色で先に描きます（[examples/window/demo.um](../examples/window/demo.um) の `shadowText`）。
 
 ## ウィンドウに描く
 
