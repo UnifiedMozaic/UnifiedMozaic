@@ -5,6 +5,7 @@ import { basename, dirname, extname, join, relative, resolve, sep } from 'node:p
 import { check } from './checker.ts';
 import { generate, kernelUses64 } from './codegen.ts';
 import { emitMsl } from './msl.ts';
+import { drawSources } from './render.ts';
 import { emitWgsl, WGSL_SIMDGROUP } from './wgsl.ts';
 import type { TargetKind } from './codegen.ts';
 import { parse } from './parser.ts';
@@ -451,6 +452,8 @@ const RUNTIME_WASM_C = join(import.meta.dirname, '..', 'runtime', 'wasm_rt.c');
 const MEDIA_PRELUDE = join(import.meta.dirname, '..', 'runtime', 'media.um');
 /** HTTP の標準の型と関数（httpPoll、HttpState、httpRequest など）。UM で書いてある。使うときだけ加える。 */
 const HTTP_PRELUDE = join(import.meta.dirname, '..', 'runtime', 'http.um');
+/** 描画の標準の型と関数（GpuImage、gpuBeginImage など）。プログラムが gpu.beginImage / gpu.draw / gpu.endImage を使うときだけ加える。 */
+const RENDER_PRELUDE = join(import.meta.dirname, '..', 'runtime', 'render.um');
 
 /** ファイル番号を、宣言とその中のメソッドに付ける。 */
 function tag(d: Decl, file: number): void {
@@ -541,6 +544,12 @@ export function parseProgram(src: string, file?: string): Module {
     if (names.length === 0) continue;
     const used = new RegExp(`\\b(?:${names.join('|')})\\b`);
     if (texts.some((t) => used.test(t))) standard.push(...extra.decls);
+  }
+  // 描画: 標準の関数と、gpu.draw の vs と fs の組ごとの描画の関数（src/render.ts の drawSources）。
+  if (texts.some((t) => /\bgpu\s*\.\s*(beginImage|draw|endImage)\b/.test(t))) {
+    standard.push(...parse(readFileSync(RENDER_PRELUDE, 'utf8'), 'render.um').decls);
+    const draws = drawSources(merged.decls);
+    if (draws) standard.push(...parse(draws, 'render-draw.um').decls);
   }
   for (const d of standard) {
     if (defined.has(d.name)) continue;

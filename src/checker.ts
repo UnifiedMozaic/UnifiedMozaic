@@ -1132,6 +1132,8 @@ class Checker {
     const owner = this.fileOf.get(name);
     if (owner === undefined || owner === -1 || owner === this.curFile) return;
     if (this.importedNames.get(this.curFile)?.has(name)) return;
+    // コンパイラが作る描画の関数（src/render.ts の drawSource）は、プログラムのシェーダと struct を使う。
+    if (this.curFile === -1 && pos.file === 'render-draw.um') return;
     this.err('not-imported', `'${name}' is defined in another file and is not imported here`, pos,
       `add \`import { ${name} } from "./<file>.um";\` at the top (the other file must mark it with \`export\`)`);
   }
@@ -2798,7 +2800,8 @@ class Checker {
       const hint = this.structs.get(e.callee)?.isClass ? `write \`new ${e.callee}(...)\`` : undefined;
       this.err('unknown-name', `unknown function '${e.callee}'`, e.pos, hint);
     }
-    if (sig.decl.stage) {
+    // 描画の関数（src/render.ts の drawSource。ファイル render-draw.um）は、CPU で描くときにシェーダの関数を呼ぶ。
+    if (sig.decl.stage && e.pos.file !== 'render-draw.um') {
       this.err('kernel-restriction', `'${sig.name}' is a ${sig.decl.stage} function, so it can only be used in \`gpu.draw\``, e.pos,
         'e.g. `gpu.draw(image, vertexCount, vs(...), fs(...))`; share code through a `kernel function` that both can call');
     }

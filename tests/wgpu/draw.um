@@ -1,8 +1,10 @@
 // 描画（gpu.beginImage / gpu.draw / gpu.endImage）を GPU で実行し、塗られた画素を文字の絵で確かめる。
-//   - 頂点は kernel が GPU で作る（dispatch の結果を、CPU に戻さずに draw が読む）
+// cpu-build で、GPU の経路のないビルド（CPU のラスタライザ）でも同じ絵になることを確かめる。
+//   - 頂点は kernel が作る（dispatch の結果を draw がそのまま読む）
 //   - 深度テスト: 先に描いた近い三角形（G）が、あとから描いた遠い三角形（R、B）に隠されない（左上と下の重なり）
 //   - vertex と fragment に値の引数（ずらす量と色）を渡す
 // 色は三角形ごとに一つ（補間しない）なので、GPU による違いが出ない。三角形の辺は画素の中心を通らない位置に置く。
+// cpu-build
 // expect: ........................
 // expect: ....RRRRRRRRRRRRRRRRRR..
 // expect: ....RRRRRRRRRRRRRRRR....
@@ -65,17 +67,17 @@ export function main(): i32 {
   depth[1] = 0.3;  // G（いちばん近い）
   depth[2] = 0.7;  // B（いちばん遠い。G と重なる所は G に隠れ、重ならない所は見える）
   let verts = new Buffer<vec4<f32>>(9);
-  gpu.dispatch(makeVerts, 9, mut verts, size, depth);
+  dispatch(makeVerts, 9, mut verts, size, depth);
 
   const red: vec4<f32> = vec4(1, 0, 0, 1);
   const green: vec4<f32> = vec4(0, 1, 0, 1);
   const blue: vec4<f32> = vec4(0, 0, 1, 1);
-  const img = gpu.beginImage(w as i32, h as i32, 0xFF000000);
-  gpu.draw(img, 3, vs(verts, 3, 0.0 as f32), fs(green));
-  gpu.draw(img, 3, vs(verts, 0, 0.0 as f32), fs(red));
-  gpu.draw(img, 3, vs(verts, 6, 0.0 as f32), fs(blue));
+  let img = gpu.beginImage(w as i32, h as i32, 0xFF000000);
+  gpu.draw(mut img, 3, vs(verts, 3, 0.0 as f32), fs(green));
+  gpu.draw(mut img, 3, vs(verts, 0, 0.0 as f32), fs(red));
+  gpu.draw(mut img, 3, vs(verts, 6, 0.0 as f32), fs(blue));
   let px = new Buffer<u32>((w * h) as usize);
-  gpu.endImage(img, mut px);
+  gpu.endImage(mut img, mut px);
   for (let y: u32 = 0; y < h; y++) {
     let row = new Array<u8>(w as usize);
     for (let x: u32 = 0; x < w; x++) {

@@ -4777,8 +4777,13 @@ class FnGen {
   renderCall(e: Expr & { kind: 'call' }): string {
     const name = ({ __gpu_image_begin: 'beginImage', __gpu_draw: 'draw', __gpu_image_end: 'endImage' } as Record<string, string>)[e.callee];
     if (this.m.gpu !== 'wgpu') {
-      throw new CompileError('not-implemented', `\`gpu.${name}\` needs a native build with wgpu (UM_WGPU=1)`, e.pos,
-        'build with `UM_WGPU=1 node src/cli.ts build x.um --target host` (docs/wgpu.ja.md); drawing in the browser (wasm32) is not available yet');
+      // GPU の描画の経路がないビルド。画像はいつも CPU に用意する（番号 0）ので、draw と end は呼ばれない。
+      void name;
+      if (e.callee === '__gpu_image_begin') {
+        for (const a of e.args) this.expr(a.expr);
+        return '0';
+      }
+      return '';
     }
     this.m.usesGpuRuntime = true;
     if (e.callee === '__gpu_image_begin') {

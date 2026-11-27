@@ -1,0 +1,75 @@
+// 描画の標準の型と関数（docs/render.ja.md）。プログラムが gpu.beginImage / gpu.draw / gpu.endImage を使うときだけ、
+// ドライバが標準の関数として加える。
+//
+// 画像は GpuImage。GPU で描けるとき（UM_WGPU=1 のビルドで GPU が使えるとき）は handle に GPU の画像の番号（1 以上）を持ち、
+// 描画は GPU のラスタライザが行う。そうでないとき handle は 0 で、色と深度を color / depth に持ち、描画は CPU で行う
+// （gpu.draw ごとにコンパイラが作る関数 umRenderDraw__vs__fs。src/render.ts の drawSource）。
+// どちらでも同じプログラムが動き、同じ画像になる（三角形の辺がちょうど画素の中心を通るときと、補間の誤差を除く）。
+
+class GpuImage {
+  width: i32;
+  height: i32;
+  handle: i32;
+  color: Buffer<u32>;
+  depth: Buffer<f32>;
+
+  constructor(width: i32, height: i32, handle: i32, clear: u32) {
+    this.width = width;
+    this.height = height;
+    this.handle = handle;
+    // GPU で描くときは、CPU 側の色と深度は使わない。
+    let n: u32 = 0;
+    if (handle == 0 && width > 0 && height > 0) {
+      n = (width as u32) * (height as u32);
+    }
+    this.color = new Buffer<u32>(n as usize);
+    this.depth = new Buffer<f32>(n as usize);
+    this.color.fill(clear);
+    this.depth.fill(1);
+  }
+}
+
+// gpu.beginImage(width, height, clear)
+function gpuBeginImage(width: i32, height: i32, clear: u32): GpuImage {
+  return new GpuImage(width, height, gpu.rawBeginImage(width, height, clear), clear);
+}
+
+// gpu.endImage(mut image, mut pixels)。画素を写し、GPU の画像を片づける（あとは CPU の空の画像として残る）。
+function gpuEndImage(image: mut GpuImage, pixels: mut Buffer<u32>): void {
+  if (image.handle != 0) {
+    gpu.rawEndImage(image.handle, mut pixels);
+    image.handle = 0;
+    return;
+  }
+  const n = image.color.length;
+  for (let i: u32 = 0; i < n; i++) {
+    pixels[i] = image.color[i];
+  }
+}
+
+// fragment function の色（0〜1 の浮動小数点）を 0xAARRGGBB にする。GPU の BGRA8Unorm と同じく、
+// 0〜1 に収めてから 255 倍して最も近い整数にする（NaN は 0）。
+kernel function renderUnorm8(v: f32): u32 {
+  if (!(v > 0)) {
+    return 0;
+  }
+  if (v >= 1) {
+    return 255;
+  }
+  return Math.floor(v * 255 + 0.5) as u32;
+}
+
+kernel function renderPack(c: vec4<f32>): u32 {
+  return (renderUnorm8(c.w) << 24) | (renderUnorm8(c.x) << 16) | (renderUnorm8(c.y) << 8) | renderUnorm8(c.z);
+}
+
+// 三角形の辺 p → q の上か左か（辺の上の画素の中心を、どちらの三角形が塗るかの決まり。GPU と同じ top-left rule）。
+// 画面の座標は y が下向きで、三角形は内側の辺の関数が正になる向き。
+kernel function renderTopLeft(dx: f32, dy: f32): bool {
+  return (dy == 0 && dx > 0) || dy < 0;
+}
+
+// 辺の関数の値 e が、その辺について内側か。
+kernel function renderInside(e: f32, dx: f32, dy: f32): bool {
+  return e > 0 || (e == 0 && renderTopLeft(dx, dy));
+}

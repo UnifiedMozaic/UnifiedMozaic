@@ -1354,9 +1354,13 @@ static WGPUTexture um_texture(uint32_t w, uint32_t h, WGPUTextureFormat format, 
   return t;
 }
 
+// GPU が使えなければ 0 を返す（画像は CPU に用意され、CPU で描く。runtime/render.um）。
 int32_t um_gpu_image_begin(int32_t width, int32_t height, int32_t clear) {
   um_lock();
-  if (!um_init_locked()) um_render_panic("gpu.beginImage: no GPU is available (drawing needs one)");
+  if (!um_init_locked()) {
+    um_unlock();
+    return 0;
+  }
   if (width <= 0 || height <= 0 || (uint32_t)width > um_limits.maxTextureDimension2D || (uint32_t)height > um_limits.maxTextureDimension2D) {
     char msg[160];
     snprintf(msg, sizeof msg, "gpu.beginImage: the size %d x %d is not between 1 and %u", (int)width, (int)height, um_limits.maxTextureDimension2D);

@@ -13,7 +13,7 @@ fragment function fs(v: Other): vec4<f32> {
   return v.position;
 }
 export function main(): i32 {
-  const img = gpu.beginImage(4, 4, 0);
-  gpu.draw(img, 3, vs(), fs());
+  let img = gpu.beginImage(4, 4, 0);
+  gpu.draw(mut img, 3, vs(), fs());
   return 0;
 }

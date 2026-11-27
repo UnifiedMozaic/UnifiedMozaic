@@ -1,8 +1,13 @@
 # 描画（GPU で三角形を塗る）
 
-GPU の三角形のラスタライザ（WebGPU の render pipeline）を UM から使います。シェーダは UM で書き、kernel と同じく WGSL に変換して GPU で実行します。
+三角形を塗る描画です。シェーダは UM で書きます。GPU が使えるときは GPU の三角形のラスタライザ（WebGPU の render pipeline）で、使えないときは CPU のラスタライザで、同じプログラムが同じ絵を描きます（kernel の `dispatch` と同じ考え方）。
 
-**いまできること（段階 1）:** 画面なしの画像に描いて、画素を `Buffer<u32>` に読み戻す。ネイティブの wgpu の経路（`UM_WGPU=1`。[wgpu での GPU 実行](wgpu.ja.md)）だけです。
+**いまできること（段階 1）:** 画面なしの画像に描いて、画素を `Buffer<u32>` に読み戻す。
+
+| ビルド | 描く場所 |
+| --- | --- |
+| ネイティブ（`UM_WGPU=1`。[wgpu での GPU 実行](wgpu.ja.md)） | GPU。GPU が使えなければ CPU |
+| ネイティブ（`UM_WGPU=1` なし）、wasm32、Metal（`UM_METAL=1`） | CPU |
 
 **これから:** ウィンドウに描く、ブラウザ（wasm32 と WebGPU）で描く、インデックスとインスタンス、テクスチャ、裏面を描かない設定・半透明の合成など。
 
@@ -37,16 +42,17 @@ export function main(): i32 {
   verts[0] = { x: -0.9, y: -0.9, r: 1, g: 0, b: 0 };
   verts[1] = { x: 0.9, y: -0.9, r: 0, g: 1, b: 0 };
   verts[2] = { x: 0, y: 0.9, r: 0, g: 0, b: 1 };
-  const img = gpu.beginImage(320, 240, 0xFF000000);
-  gpu.draw(img, 3, vs(verts, 1.0 as f32), fs(1.0 as f32));
+  let img = gpu.beginImage(320, 240, 0xFF000000);
+  gpu.draw(mut img, 3, vs(verts, 1.0 as f32), fs(1.0 as f32));
   let px = new Buffer<u32>(320 * 240);
-  gpu.endImage(img, mut px);   // px は 0xAARRGGBB の画素。上の行から
+  gpu.endImage(mut img, mut px);   // px は 0xAARRGGBB の画素。上の行から
   return 0;
 }
 ```
 
 ```sh
-UM_WGPU=1 node src/cli.ts build tri.um --target host -o tri && ./tri
+UM_WGPU=1 node src/cli.ts build tri.um --target host -o tri && ./tri   # GPU で描く
+node src/cli.ts build tri.um --target host -o tri && ./tri             # CPU で描く
 ```
 
 ## シェーダの関数
@@ -61,21 +67,37 @@ UM_WGPU=1 node src/cli.ts build tri.um --target host -o tri && ./tri
 - **受け渡す struct のフィールド**は `f32` / `i32` / `u32` か、それらの `vec2`〜`vec4` です。浮動小数点は三角形の中で補間し、整数は補間しません（最初の頂点の値）。fragment function の `position` は、画素の座標（左上が (0, 0)、画素の中心は 0.5）と深度です。
 - 本体の決まりは kernel と同じです（GPU で使える型だけ、`kernel function` を呼べる）。Buffer の要素と値は 32 ビットの型（`i32` / `u32` / `f32` と、その struct・固定長配列）だけで、Buffer には書けません。
 - シェーダの関数は `gpu.draw` の中でだけ使えます（普通の関数として呼ぶことも、`dispatch` することもできません）。共通の計算は `kernel function` にして、両方から呼びます。
+- シェーダの関数は CPU でも動きます（GPU のないときの描画。下の「CPU のラスタライザ」）。
 
 ## 組み込みの関数
 
 | 関数 | 内容 |
 | --- | --- |
-| `gpu.beginImage(width: i32, height: i32, clear: u32): i32` | 画像（色と深度）を GPU に用意し、色を `clear`（0xAARRGGBB）で、深度を 1 で埋める。番号を返す |
-| `gpu.draw(image: i32, vertexCount: u32, vs(引数...), fs(引数...))` | vertex function を頂点の番号 0 から `vertexCount` 未満について実行し、3 つずつを三角形として塗る。`vs(...)` と `fs(...)` は呼び出しではなく、引数の指定（vs は頂点の番号、fs は受け取る値を除いた引数） |
-| `gpu.endImage(image: i32, mut pixels: Buffer<u32>)` | 色を `pixels` に写し（0xAARRGGBB、上の行から）、画像を片づける。`pixels` は `width × height` 以上の長さが要る |
+| `gpu.beginImage(width: i32, height: i32, clear: u32): GpuImage` | 画像（色と深度）を用意し、色を `clear`（0xAARRGGBB）で、深度を 1 で埋める。GPU が使えれば GPU に、使えなければ CPU に用意する |
+| `gpu.draw(mut image: GpuImage, vertexCount: u32, vs(引数...), fs(引数...))` | vertex function を頂点の番号 0 から `vertexCount` 未満について実行し、3 つずつを三角形として塗る。`vs(...)` と `fs(...)` は呼び出しではなく、引数の指定（vs は頂点の番号、fs は受け取る値を除いた引数） |
+| `gpu.endImage(mut image: GpuImage, mut pixels: Buffer<u32>)` | 色を `pixels` に写す（0xAARRGGBB、上の行から）。`pixels` は `width × height` 以上の長さが要る。GPU の画像はここで片づける |
+
+- `GpuImage` は標準の class です（`runtime/render.um`）。`handle` が 0 でなければ GPU の画像、0 なら CPU の画像で、色と深度を `color` / `depth` の Buffer に持ちます。`new GpuImage(width, height, 0, clear)` と書くと、GPU があっても CPU で描く画像を作れます（GPU と CPU の結果を比べるときなど）。
 
 - **深度テスト**があります。深度の小さい（近い）ものが残り、同じか遠いものは塗りません。同じ画像への `gpu.draw` は、前の結果に重ねて描きます。
 - いまは、裏面も描きます（カリングなし）。色はそのまま書きます（半透明の合成なし）。
 - `gpu.draw` は dispatch と同じ順に GPU に積まれます。前に dispatch した kernel が書いた Buffer を、続けて描けます。
-- `UM_WGPU=1` でないビルドや wasm32 では、コンパイルエラーです。GPU が使えない環境では、`gpu.beginImage` で停止します（GPU のない Linux では、lavapipe を入れると試せます。[wgpu での GPU 実行](wgpu.ja.md)）。
+- GPU の画像の大きさが GPU の上限を超えると停止します。
 
-## 仕組み
+## CPU のラスタライザ
+
+GPU のない環境でも同じプログラムが動くよう、コンパイラは `gpu.draw` の vertex function と fragment function の組ごとに、描画の関数（`umRenderDraw__vs__fs`。`src/render.ts` の `drawSource`）を UM で作ります。その関数は、画像が GPU にあれば GPU に頼み、CPU にあれば次のように描きます。
+
+1. vertex function を CPU で呼んで、3 つずつの頂点を作る
+2. クリップ空間で、近い面（z ≥ 0）と遠い面（z ≤ w）で切る（GPU と同じ）
+3. 画面の座標にし、画素の中心が三角形の中にある画素を塗る。辺の上の画素は top-left rule（GPU と同じ決まり）
+4. 深度を比べ、近ければ、遠近を考えた補間で受け渡す値を作り、fragment function を呼んで色を書く
+
+**GPU と同じ絵になります。** 透視投影の立方体と近い面で切られる三角形の場面（`tests/wgpu/draw_compare.um`）で、塗られた画素も補間した色も GPU（lavapipe）と一致しました。ただし GPU は頂点の位置を画素の細かい格子（ふつう 1/256 画素）に丸めるので、辺のすぐ近くの画素は、GPU によって分かれることがあります。
+
+CPU の描画は画素ごとに fragment function を呼ぶので、GPU よりずっと遅くなります（試作・テスト・GPU のない環境のためのもの）。
+
+## 仕組み（GPU）
 
 vertex function と fragment function の組を、1 つの WGSL のモジュール（`@vertex fn um_vs` と `@fragment fn um_fs`）にします（`src/wgsl.ts` の `render`）。束縛の並びは kernel と同じで、binding 0 が `UmParams`（頂点の数、0、Buffer ごとの長さ、値の引数）、binding 1 からが Buffer です。引数は vertex の引数、fragment の引数の順に並びます。画像の色は `BGRA8Unorm`（読み戻すと 0xAARRGGBB の `u32` と同じバイトの並び）、深度は `Depth32Float` のテクスチャです（`runtime/wgpu.c` の `um_gpu_image_begin` など）。
 
