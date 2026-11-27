@@ -1,0 +1,425 @@
+// 3D のデモ: 宝石あつめ。市松模様の広場で立方体を動かし、回る宝石を全部あつめる。
+//   移動: W A S D（か ↑ ↓）  向き: ← → かマウスのドラッグ  ジャンプ: Space  やり直し: R  終わり: Esc
+// シェーダ（光・市松模様・霧）、1 フレームに何回もの gpu.draw、深度テスト、三角関数と行列、キーとマウスの入力を使う。
+// 同じソースが、GPU（UM_WGPU=1）でも CPU でも、ネイティブでもブラウザ（--web）でも動く（docs/render.ja.md、docs/web.ja.md）。
+//   UM_WGPU=1 node src/cli.ts build examples/window/demo.um --target host -o demo && ./demo
+//   node src/cli.ts build examples/window/demo.um --web -o demo-web   （HTTP で開く）
+// 引数に数を渡すと、そのフレーム数だけ動かして終わる（テスト用。宝石は自動で集める）。
+
+// ---- 形 ----
+
+struct Vertex {
+  pos: vec3<f32>;
+  normal: vec3<f32>;
+  color: vec3<f32>;
+  checker: f32;  // 1 なら、fragment function が市松模様を塗る（地面）
+}
+
+// 頂点の配列に、軸にそろった直方体（中心 c、半分の大きさ h）を足す。
+function addBox(out: mut Vertex[], c: vec3<f32>, h: vec3<f32>, color: vec3<f32>): void {
+  const us: f32[6] = [-1, 1, 1, -1, 1, -1];
+  const ws: f32[6] = [-1, -1, 1, -1, 1, 1];
+  for (let axis: u32 = 0; axis < 3; axis++) {
+    for (let side: u32 = 0; side < 2; side++) {
+      const s: f32 = side == 0 ? -1 : 1;
+      for (let k: u32 = 0; k < 6; k++) {
+        let p: vec3<f32> = vec3(s, us[k], ws[k]);
+        let n: vec3<f32> = vec3(s, 0, 0);
+        if (axis == 1) {
+          p = vec3(us[k], s, ws[k]);
+          n = vec3(0, s, 0);
+        } else if (axis == 2) {
+          p = vec3(us[k], ws[k], s);
+          n = vec3(0, 0, s);
+        }
+        out.push({ pos: vec3(c.x + p.x * h.x, c.y + p.y * h.y, c.z + p.z * h.z), normal: n, color: color, checker: 0 });
+      }
+    }
+  }
+}
+
+// 宝石（正八面体）。8 つの面それぞれに法線を一つ。
+function addGem(out: mut Vertex[], color: vec3<f32>): void {
+  for (let f: u32 = 0; f < 8; f++) {
+    const sx: f32 = (f & 1) != 0 ? 1 : -1;
+    const sy: f32 = (f & 2) != 0 ? 1 : -1;
+    const sz: f32 = (f & 4) != 0 ? 1 : -1;
+    const n = vec3Normalize(vec3(sx, sy * 0.7, sz));
+    out.push({ pos: vec3(sx * 0.5, 0, 0), normal: n, color: color, checker: 0 });
+    out.push({ pos: vec3(0.0 as f32, sy * 0.8, 0), normal: n, color: color, checker: 0 });
+    out.push({ pos: vec3(0, 0, sz * 0.5), normal: n, color: color, checker: 0 });
+  }
+}
+
+function toBuffer(vs: Vertex[]): Buffer<Vertex> {
+  let b = new Buffer<Vertex>(vs.length);
+  for (let i: usize = 0; i < vs.length; i++) {
+    b[i] = vs[i];
+  }
+  return b;
+}
+
+// ---- シェーダ ----
+
+struct Camera {
+  viewProj: mat4<f32>;
+}
+
+// 物ごとの変換と色の掛け算。
+struct Object {
+  model: mat4<f32>;
+  tint: vec3<f32>;
+}
+
+struct Scene {
+  light: vec3<f32>;  // 光の来る向き（長さ 1）
+  fog: vec3<f32>;    // 霧の色（背景と同じ）
+  eye: vec3<f32>;    // カメラの位置
+}
+
+struct VOut {
+  position: vec4<f32>;
+  world: vec3<f32>;
+  normal: vec3<f32>;
+  color: vec3<f32>;
+  checker: f32;
+}
+
+vertex function vs(i: u32, verts: Buffer<Vertex>, cam: Camera, obj: Object): VOut {
+  const v = verts[i];
+  const wp = mat4MulVec(obj.model, vec4(v.pos.x, v.pos.y, v.pos.z, 1.0 as f32));
+  const wn = mat4MulVec(obj.model, vec4(v.normal.x, v.normal.y, v.normal.z, 0.0 as f32));
+  return {
+    position: mat4MulVec(cam.viewProj, wp),
+    world: vec3(wp.x, wp.y, wp.z),
+    normal: vec3(wn.x, wn.y, wn.z),
+    color: vec3(v.color.x * obj.tint.x, v.color.y * obj.tint.y, v.color.z * obj.tint.z),
+    checker: v.checker,
+  };
+}
+
+fragment function fs(v: VOut, scene: Scene): vec4<f32> {
+  let base = v.color;
+  if (v.checker > 0.5) {
+    // 地面の市松模様（2 マスで 1 周期）。
+    const cx = Math.floor(v.world.x * 0.5);
+    const cz = Math.floor(v.world.z * 0.5);
+    const odd = cx + cz - Math.floor((cx + cz) * 0.5) * 2;
+    if (odd > 0.5) {
+      base = vec3(base.x * 0.72, base.y * 0.72, base.z * 0.72);
+    }
+  }
+  const diffuse = Math.max(vec3Dot(vec3Normalize(v.normal), scene.light), 0);
+  const lit = diffuse * 0.75 + 0.25;
+  // 遠いほど霧の色に近づける。
+  const d = vec3Length(v.world - scene.eye);
+  const f = Math.min(Math.max((d - 18) / 30, 0), 1);
+  const r = base.x * lit * (1 - f) + scene.fog.x * f;
+  const g = base.y * lit * (1 - f) + scene.fog.y * f;
+  const b = base.z * lit * (1 - f) + scene.fog.z * f;
+  return vec4(r, g, b, 1.0 as f32);
+}
+
+// ---- 遊びの状態 ----
+
+const GEMS: u32 = 8;
+const ARENA: f32 = 18;
+
+class Game {
+  x: f32 = 0;
+  y: f32 = 0;   // 高さ（地面で 0）
+  z: f32 = 6;
+  vy: f32 = 0;  // 縦の速さ
+  yaw: f32 = 0; // 向き（ラジアン。0 で -z の向き）
+  gemX: f32[8];
+  gemZ: f32[8];
+  taken: bool[8];
+  score: u32 = 0;
+  forward: bool = false;
+  back: bool = false;
+  left: bool = false;
+  right: bool = false;
+  turnL: bool = false;
+  turnR: bool = false;
+  dragging: bool = false;
+  lastMouse: i32 = 0;
+
+  constructor() {
+    this.gemX = [0, 0, 0, 0, 0, 0, 0, 0];
+    this.gemZ = [0, 0, 0, 0, 0, 0, 0, 0];
+    this.taken = [false, false, false, false, false, false, false, false];
+    this.reset();
+  }
+
+  // 宝石を円く並べ直し、立方体を真ん中に戻す。
+  reset(): void {
+    for (let k: u32 = 0; k < GEMS; k++) {
+      const a = (k as f32) * (2 * Math.PI / (GEMS as f32));
+      const r: f32 = (k % 2 == 0) ? 12 : 7;
+      this.gemX[k] = Math.sin(a) * r;
+      this.gemZ[k] = Math.cos(a) * r;
+      this.taken[k] = false;
+    }
+    this.score = 0;
+    this.x = 0;
+    this.y = 0;
+    this.z = 0;
+    this.vy = 0;
+  }
+}
+
+// 柱（ぶつかる）。中心と半分の幅。
+const PILLAR_X: f32[4] = [-9, 9, -9, 9];
+const PILLAR_Z: f32[4] = [-9, -9, 9, 9];
+const PILLAR_H: f32 = 1.2;
+
+// 立方体（半分の幅 0.5）を柱の外に押し出す。
+function pushOut(game: mut Game): void {
+  for (let k: u32 = 0; k < 4; k++) {
+    const dx = game.x - PILLAR_X[k];
+    const dz = game.z - PILLAR_Z[k];
+    const r = PILLAR_H + 0.5;
+    if (Math.abs(dx) < r && Math.abs(dz) < r) {
+      // 食い込みの浅い向きへ戻す。
+      if (r - Math.abs(dx) < r - Math.abs(dz)) {
+        game.x = PILLAR_X[k] + (dx < 0 ? -r : r);
+      } else {
+        game.z = PILLAR_Z[k] + (dz < 0 ? -r : r);
+      }
+    }
+  }
+}
+
+function update(game: mut Game, dt: f32, auto: bool): void {
+  // 向き
+  if (game.turnL) {
+    game.yaw += 2.2 * dt;
+  }
+  if (game.turnR) {
+    game.yaw -= 2.2 * dt;
+  }
+  game.yaw = game.yaw - Math.floor(game.yaw / (2 * Math.PI)) * (2 * Math.PI);
+  // 移動（向きに合わせて）。テストでは、残っている宝石へ自動で向かう。
+  let mx: f32 = 0;
+  let mz: f32 = 0;
+  const fx = -Math.sin(game.yaw);
+  const fz = -Math.cos(game.yaw);
+  if (game.forward) {
+    mx += fx;
+    mz += fz;
+  }
+  if (game.back) {
+    mx -= fx;
+    mz -= fz;
+  }
+  if (game.left) {
+    mx += fz;
+    mz -= fx;
+  }
+  if (game.right) {
+    mx -= fz;
+    mz += fx;
+  }
+  if (auto) {
+    for (let k: u32 = 0; k < GEMS; k++) {
+      if (!game.taken[k]) {
+        mx = game.gemX[k] - game.x;
+        mz = game.gemZ[k] - game.z;
+        break;
+      }
+    }
+  }
+  const len = Math.sqrt(mx * mx + mz * mz);
+  if (len > 0.001) {
+    const speed: f32 = 7;
+    game.x += mx / len * speed * dt;
+    game.z += mz / len * speed * dt;
+  }
+  game.x = Math.min(Math.max(game.x, -ARENA + 0.5), ARENA - 0.5);
+  game.z = Math.min(Math.max(game.z, -ARENA + 0.5), ARENA - 0.5);
+  pushOut(mut game);
+  // ジャンプと重力
+  game.vy -= 22 * dt;
+  game.y += game.vy * dt;
+  if (game.y < 0) {
+    game.y = 0;
+    game.vy = 0;
+  }
+  // 宝石を取る
+  for (let k: u32 = 0; k < GEMS; k++) {
+    if (!game.taken[k]) {
+      const dx = game.gemX[k] - game.x;
+      const dz = game.gemZ[k] - game.z;
+      if (dx * dx + dz * dz < 1.1 && game.y < 1.5) {
+        game.taken[k] = true;
+        game.score++;
+      }
+    }
+  }
+}
+
+function key(game: mut Game, k: Key, down: bool): void {
+  match (k) {
+    Key.Up => { game.forward = down; }
+    Key.Down => { game.back = down; }
+    Key.Left => { game.turnL = down; }
+    Key.Right => { game.turnR = down; }
+    Key.Char(c) => {
+      if (c == 119) {
+        game.forward = down;  // w
+      } else if (c == 115) {
+        game.back = down;     // s
+      } else if (c == 97) {
+        game.left = down;     // a
+      } else if (c == 100) {
+        game.right = down;    // d
+      }
+    }
+    _ => {}
+  }
+}
+
+export function main(): i32 {
+  const opened = windowOpen("UM demo", 960, 600);
+  if (opened == null) {
+    eprint("could not open a window");
+    return 1;
+  }
+  const win = opened;
+  let limit: i32 = -1;
+  const a = args();
+  if (a.length > 0) {
+    limit = 0;
+    for (const c of a[0]) {
+      limit = limit * 10 + ((c as i32) - 48);
+    }
+  }
+
+  // 動かない物（地面・壁・柱）は 1 つの Buffer にまとめて、1 回の draw で描く。
+  let worldVerts: Vertex[] = [];
+  const ground: vec3<f32> = vec3(0.55 as f32, 0.78, 0.5);
+  worldVerts.push({ pos: vec3(-ARENA, 0, -ARENA), normal: vec3(0.0 as f32, 1, 0), color: ground, checker: 1 });
+  worldVerts.push({ pos: vec3(ARENA, 0, -ARENA), normal: vec3(0.0 as f32, 1, 0), color: ground, checker: 1 });
+  worldVerts.push({ pos: vec3(ARENA, 0, ARENA), normal: vec3(0.0 as f32, 1, 0), color: ground, checker: 1 });
+  worldVerts.push({ pos: vec3(-ARENA, 0, -ARENA), normal: vec3(0.0 as f32, 1, 0), color: ground, checker: 1 });
+  worldVerts.push({ pos: vec3(ARENA, 0, ARENA), normal: vec3(0.0 as f32, 1, 0), color: ground, checker: 1 });
+  worldVerts.push({ pos: vec3(-ARENA, 0, ARENA), normal: vec3(0.0 as f32, 1, 0), color: ground, checker: 1 });
+  const wall: vec3<f32> = vec3(0.85 as f32, 0.8, 0.7);
+  addBox(mut worldVerts, vec3(0.0 as f32, 0.6, -ARENA - 0.3), vec3(ARENA + 0.6, 0.6, 0.3), wall);
+  addBox(mut worldVerts, vec3(0.0 as f32, 0.6, ARENA + 0.3), vec3(ARENA + 0.6, 0.6, 0.3), wall);
+  addBox(mut worldVerts, vec3(-ARENA - 0.3, 0.6, 0), vec3(0.3 as f32, 0.6, ARENA), wall);
+  addBox(mut worldVerts, vec3(ARENA + 0.3, 0.6, 0), vec3(0.3 as f32, 0.6, ARENA), wall);
+  for (let k: u32 = 0; k < 4; k++) {
+    addBox(mut worldVerts, vec3(PILLAR_X[k], 2.0, PILLAR_Z[k]), vec3(PILLAR_H, 2.0, PILLAR_H), vec3(0.75 as f32, 0.55, 0.85));
+  }
+  const world = toBuffer(worldVerts);
+  let cubeVerts: Vertex[] = [];
+  addBox(mut cubeVerts, vec3(0.0 as f32, 0.5, 0), vec3(0.5 as f32, 0.5, 0.5), vec3(0.95 as f32, 0.45, 0.3));
+  const cube = toBuffer(cubeVerts);
+  let gemVerts: Vertex[] = [];
+  addGem(mut gemVerts, vec3(0.35 as f32, 0.85, 1));
+  const gem = toBuffer(gemVerts);
+
+  const sky: vec3<f32> = vec3(0.62 as f32, 0.78, 0.95);
+  const clear: u32 = 0xFF000000 | (((sky.x * 255) as u32) << 16) | (((sky.y * 255) as u32) << 8) | ((sky.z * 255) as u32);
+  const white: vec3<f32> = vec3(1.0 as f32, 1, 1);
+  let game = new Game();
+  let shown: u32 = 999;
+  let last = ticksNs();
+  let frames: i32 = 0;
+  let time: f32 = 0;
+  let running = true;
+  while (running) {
+    while (true) {
+      const e = pollWindowEvent(0);
+      if (e == null) {
+        break;
+      }
+      match (e) {
+        WindowEvent.Close(w) => { running = false; }
+        WindowEvent.Quit => { running = false; }
+        WindowEvent.KeyDown(w, k, mods, repeat) => {
+          match (k) {
+            Key.Escape => { running = false; }
+            Key.Space => {
+              if (game.y == 0) {
+                game.vy = 9;
+              }
+            }
+            Key.Char(c) => {
+              if (c == 114) {
+                game.reset();  // r
+              }
+            }
+            _ => {}
+          }
+          key(mut game, k, true);
+        }
+        WindowEvent.KeyUp(w, k, mods) => { key(mut game, k, false); }
+        WindowEvent.MouseDown(w, x, y, button) => {
+          game.dragging = true;
+          game.lastMouse = x;
+        }
+        WindowEvent.MouseUp(w, x, y, button) => { game.dragging = false; }
+        WindowEvent.MouseMove(w, x, y) => {
+          if (game.dragging) {
+            game.yaw -= ((x - game.lastMouse) as f32) * 0.008;
+            game.lastMouse = x;
+          }
+        }
+        _ => {}
+      }
+    }
+
+    // 時間を進める（止まっていた分を一度に進めないよう、1 フレームは 1/20 秒まで）。テストでは 1/60 秒ずつ。
+    const now = ticksNs();
+    let dt = ((now - last) as f64 / 1.0e9) as f32;
+    last = now;
+    if (limit >= 0) {
+      dt = 1.0 / 60.0;
+    }
+    dt = Math.min(dt, 0.05);
+    time += dt;
+    update(mut game, dt, limit >= 0);
+    if (game.score != shown) {
+      shown = game.score;
+      if (game.score == GEMS) {
+        windowSetTitle(win, `UM demo - all ${GEMS} gems! (R to play again)`);
+      } else {
+        windowSetTitle(win, `UM demo - gems ${game.score} / ${GEMS}`);
+      }
+    }
+
+    let frame = gpu.beginFrame(win, clear);
+    // カメラは立方体の後ろ上から見下ろす。
+    const back: f32 = 9;
+    const eye: vec3<f32> = vec3(game.x + Math.sin(game.yaw) * back, game.y + 5.5, game.z + Math.cos(game.yaw) * back);
+    const target: vec3<f32> = vec3(game.x, game.y + 1, game.z);
+    const aspect = (frame.width as f32) / Math.max(frame.height as f32, 1);
+    const view = mat4LookAt(eye, target, vec3(0.0 as f32, 1, 0));
+    const proj = mat4Perspective(Math.PI / 3.2, aspect, 0.3, 120);
+    const cam: Camera = { viewProj: mat4Mul(proj, view) };
+    const scene: Scene = { light: vec3Normalize(vec3(0.5 as f32, 1, 0.35)), fog: sky, eye: eye };
+
+    gpu.draw(mut frame, world.length as u32, vs(world, cam, { model: mat4Identity(), tint: white }), fs(scene));
+    const player: Object = { model: mat4Mul(mat4Translate(game.x, game.y, game.z), mat4RotateY(game.yaw)), tint: white };
+    gpu.draw(mut frame, cube.length as u32, vs(cube, cam, player), fs(scene));
+    for (let k: u32 = 0; k < GEMS; k++) {
+      if (!game.taken[k]) {
+        const bob = Math.sin(time * 2.5 + (k as f32)) * 0.25 + 1.2;
+        const spin = mat4RotateY(time * 1.8 + (k as f32));
+        const g: Object = { model: mat4Mul(mat4Translate(game.gemX[k], bob, game.gemZ[k]), spin), tint: white };
+        gpu.draw(mut frame, gem.length as u32, vs(gem, cam, g), fs(scene));
+      }
+    }
+    gpu.endFrame(mut frame);
+
+    frames++;
+    if (limit >= 0 && frames >= limit) {
+      running = false;
+    }
+  }
+  windowClose(win);
+  print(`gems ${game.score} / ${GEMS}`);
+  return 0;
+}
