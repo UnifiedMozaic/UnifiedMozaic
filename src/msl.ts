@@ -512,6 +512,10 @@ class Emitter {
             // 浮動小数点は CPU 版と同じ「比較して選ぶ」定義にする（NaN の扱いを揃えるため）。
             if (ty.k === 'float') return `um_f${e.fn}(${a[0]}, ${a[1]})`;
             return `${e.fn}(${a[0]}, ${a[1]})`;
+          case 'toBits':
+          case 'fromBits':
+            // 同じビットを別の型として読む（f32 ⇄ uint / int）。
+            return `as_type<${this.ty(ty)}>(${a[0]})`;
           case 'popcount':
             return cast(`popcount(${a[0]})`);
           case 'clz':

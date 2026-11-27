@@ -1,0 +1,64 @@
+// Math.toBits / Math.fromBits は、値を変えずに、同じビットを別の型として読む（f32 ⇄ u32、f64 ⇄ u64）。
+// 0 以上の f32 は、ビットを u32 として比べても大小の順が同じ。これを使うと、深度（0〜1）を
+// u32 のアトミック演算で比べられる（kernel の中のアトミック演算は 32 ビットの整数だけ）。
+// expect: 1065353216
+// expect: -1
+// expect: 13835058055282163712
+// expect: 2
+// expect: 1.0000001192092896
+// expect: true
+// expect: 0.0015106201171875
+
+// 深度テスト: 同じ画素に重なる点のうち、いちばん近い（深度の小さい）ものを残す。
+kernel function depthTest(i: u32, depth: mut RacyBuffer<u32>, pixel: Buffer<u32>, z: Buffer<f32>): void {
+  const p = pixel[i];
+  const mine = Math.toBits(z[i]);
+  let old = depth.load(p);
+  while (mine < old) {
+    const seen = depth.compareExchange(p, old, mine);
+    if (seen == old) {
+      break;
+    }
+    old = seen;
+  }
+}
+
+export function main(): i32 {
+  const one: f32 = 1;
+  print(Math.toBits(one));
+  print(Math.fromBits(0xbf800000));
+  print(Math.toBits(-2.0));
+  print(Math.fromBits(4611686018427387904 as u64));
+  // 1 の次に大きい f32
+  print(Math.fromBits(Math.toBits(one) + 1));
+
+  // 1000 個の点を 16 画素に散らし、画素ごとの最小の深度を求める。
+  const n: u32 = 1000;
+  let pixel = new Buffer<u32>(n);
+  let z = new Buffer<f32>(n);
+  let s: u32 = 7;
+  for (let i: u32 = 0; i < n; i++) {
+    s = s * 1664525 + 1013904223;
+    pixel[i] = s >> 28;
+    z[i] = ((s & 0xffff) as f32) / 65536;
+  }
+  let depth = new RacyBuffer<u32>(16);
+  depth.fill(Math.toBits(one));
+  dispatch(depthTest, n, mut depth, pixel, z);
+
+  // CPU で順に求めたものと比べる。
+  let want = new Array<f32>(16);
+  want.fill(1);
+  for (let i: u32 = 0; i < n; i++) {
+    want[pixel[i]] = Math.min(want[pixel[i]], z[i]);
+  }
+  let same = true;
+  for (let p: u32 = 0; p < 16; p++) {
+    if (Math.fromBits(depth[p]) != want[p]) {
+      same = false;
+    }
+  }
+  print(same);
+  print(Math.fromBits(depth[0]));
+  return 0;
+}

@@ -4863,6 +4863,13 @@ class FnGen {
       return this.cast(w, F32T, ty);
     }
     const t = llTy(ty);
+    if (e.fn === 'toBits' || e.fn === 'fromBits') {
+      // 同じビットを別の型として読む（f32 ⇄ 32 ビットの整数、f64 ⇄ 64 ビットの整数）。
+      const x = this.expr(e.args[0]);
+      const v = this.tmp();
+      this.emit(`${v} = bitcast ${llTy(e.args[0].ty!)} ${x} to ${t}`);
+      return v;
+    }
     if ((e.fn === 'shl' || e.fn === 'shr') && ty.k === 'int') {
       // マスクつきシフト: シフト量を値のビット幅で割った余りにする（範囲検査なし）。kernel の `<<` / `>>` と同じ意味。
       const val = this.expr(e.args[0]);

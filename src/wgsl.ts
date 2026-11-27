@@ -526,6 +526,10 @@ class Emitter {
             // 浮動小数点は CPU 版と同じ「比較して選ぶ」定義にする（NaN の扱いを揃えるため）。
             if (ty.k === 'float') return `select(${a[1]}, ${a[0]}, ${a[0]} ${e.fn === 'min' ? '<' : '>'} ${a[1]})`;
             return `${e.fn}(${a[0]}, ${a[1]})`;
+          case 'toBits':
+          case 'fromBits':
+            // 同じビットを別の型として読む。kernel は 32 ビット（f32 ⇄ u32 / i32）。
+            return `bitcast<${this.ty(ty)}>(${a[0]})`;
           case 'popcount':
             return `countOneBits(${a[0]})`;
           case 'clz':

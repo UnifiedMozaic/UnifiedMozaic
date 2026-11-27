@@ -259,6 +259,10 @@ const MATH: Record<string, { argc: number; kind: 'float' | 'num' | 'int' }> = {
   acos: { argc: 1, kind: 'float' },
   atan: { argc: 1, kind: 'float' },
   atan2: { argc: 2, kind: 'float' },
+  // ビットの並びの読み替え。toBits(f32) は u32、toBits(f64) は u64。fromBits は逆（32 ビットの整数は f32、64 ビットは f64）。
+  // 型の検査は inferMath の専用の分岐で行う（kind は使わない）。
+  toBits: { argc: 1, kind: 'float' },
+  fromBits: { argc: 1, kind: 'int' },
   // ビット演算。立っているビットの数、上位・下位から続く 0 の数（値が 0 ならビット幅）。
   popcount: { argc: 1, kind: 'int' },
   clz: { argc: 1, kind: 'int' },
@@ -3382,6 +3386,25 @@ class Checker {
       node.fn = e.name;
       node.args = exprs;
       return VOID;
+    }
+    // ビットの並びの読み替え（値は変えず、同じビットを別の型として読む）。深度を整数のアトミック演算で比べる、など。
+    if (e.name === 'toBits' || e.name === 'fromBits') {
+      const to = e.name === 'toBits';
+      // 型の決まらない整数リテラルは u32 として読む（`Math.fromBits(0xbf800000)`）。
+      const at = !to && exprs[0].kind === 'int' && !exprs[0].fixed ? this.checkExpr(exprs[0], U32) : this.checkExpr(exprs[0]);
+      let ret: Ty | undefined;
+      if (to && at.k === 'float' && (at.bits === 32 || at.bits === 64)) ret = at.bits === 32 ? U32 : U64;
+      if (!to && at.k === 'int' && (at.bits === 32 || at.bits === 64)) ret = at.bits === 32 ? F32 : F64;
+      if (!ret) {
+        this.err('type-mismatch', to ? `\`Math.toBits\` needs f32 or f64 but found ${tyStr(at)}` : `\`Math.fromBits\` needs a 32- or 64-bit integer but found ${tyStr(at)}`, e.pos,
+          to ? 'convert first, e.g. `x as f32`' : 'use u32 for an f32 (`Math.fromBits(b as u32)`) or u64 for an f64');
+      }
+      if (at.bits === 64) this.noKernel(`\`Math.${e.name}\` on 64-bit values`, e.pos, 'kernels have no f64; use f32 and u32');
+      const node = e as unknown as { kind: string; fn: string; args: Expr[] };
+      node.kind = 'math';
+      node.fn = e.name;
+      node.args = exprs;
+      return ret;
     }
     // マスクつきシフトは、値とシフト量の型を揃えない（量はどの整数型でもよい。値のビット幅で割った余りにする）。
     if (e.name === 'shl' || e.name === 'shr') {

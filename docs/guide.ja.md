@@ -85,7 +85,7 @@ Windows で exe にアイコンを付けるには、`llvm-rc`（LLVM に入っ�
 | 文 | `let` / `const`（`let x: T;` はゼロで初期化）、代入と複合代入、`++` / `--`、`if` / `else`、`while`、`do ... while`、`for (;;)`、`for...of`、`switch`、`match`、`break`、`continue`、`return` |
 | 式 | 四則演算と剰余、比較、`&&` / `\|\|` / `!`、条件式 `a ? b : c`、`x ?? 既定値`、ビット演算とシフト、`as` による変換、関数とメソッドの呼び出し、`new`、`this`、フィールドと添字、オブジェクトリテラル、配列リテラル、`new Array<T>(n)`、`xs.length`、テンプレート文字列 `` `x = ${x}` ``、`String(x)` |
 | 配列のメソッド | `push`、`pop`、`clear`、`clone`、一括の書き込み `fill(v)` / `fill(v, start, end)`（Buffer / RacyBuffer にも。下の「一括の書き込み」） |
-| 組み込み | `print(x)`（数、`bool`、文字列）、`dispatch` / `cpu.dispatch` / `gpu.dispatch`、グループで実行する `dispatchGroups`（下の「グループ（共有配列・barrier）と kernel の中のアトミック演算」）、`gpu.submit` / `gpu.ready` / `gpu.wait`、`gpu.flags` / `gpu.commit` / `gpu.untracked`（下の「Metal（Mac）での GPU 実行」）、実行時に WGSL の kernel を読み込む `gpu.loadKernel` / `gpu.runKernel`（[wgpu での GPU 実行](wgpu.ja.md)）、`thread.*`（下の「スレッド」）、`Math.sqrt` / `floor` / `ceil` / `abs` / `min` / `max`、三角関数の `Math.sin` / `cos` / `tan` / `asin` / `acos` / `atan` / `atan2` と定数 `Math.PI`（下の「三角関数」）、ビット演算の `Math.popcount` / `clz` / `ctz`、マスクつきシフト `Math.shl` / `Math.shr`（下の「マスクつきシフトと範囲チェックの除去」）、先読み `Math.prefetch(arr, i)`（下の「先読み」）、SIMD の `Simd.*`（下の「SIMD のベクトル」） |
+| 組み込み | `print(x)`（数、`bool`、文字列）、`dispatch` / `cpu.dispatch` / `gpu.dispatch`、グループで実行する `dispatchGroups`（下の「グループ（共有配列・barrier）と kernel の中のアトミック演算」）、`gpu.submit` / `gpu.ready` / `gpu.wait`、`gpu.flags` / `gpu.commit` / `gpu.untracked`（下の「Metal（Mac）での GPU 実行」）、実行時に WGSL の kernel を読み込む `gpu.loadKernel` / `gpu.runKernel`（[wgpu での GPU 実行](wgpu.ja.md)）、`thread.*`（下の「スレッド」）、`Math.sqrt` / `floor` / `ceil` / `abs` / `min` / `max`、三角関数の `Math.sin` / `cos` / `tan` / `asin` / `acos` / `atan` / `atan2` と定数 `Math.PI`（下の「三角関数」）、ビットの読み替え `Math.toBits` / `Math.fromBits`（下の「ビットの読み替え」）、ビット演算の `Math.popcount` / `clz` / `ctz`、マスクつきシフト `Math.shl` / `Math.shr`（下の「マスクつきシフトと範囲チェックの除去」）、先読み `Math.prefetch(arr, i)`（下の「先読み」）、SIMD の `Simd.*`（下の「SIMD のベクトル」） |
 | 入出力の組み込み | `readLine()`、`inputReady()`、`clock()`、`stringFromBytes(bytes)`、`readFile(path)`、`writeFile(path, bytes)`、`fileSize(path)`、`readFileRange(path, offset, length)`、`appendFile(path, bytes)`、`readFileInto(...)`、開いたままのファイル `fileOpen` / `fileRead` / `fileReadAt` / `fileWrite` / `fileSeek` / `fileLength` / `fileClose`、フォルダ `listDir` / `makeDir` / `isDir`、パス `cwd()` / `exePath()` / `exeDir()` / `absPath(path)`、環境変数 `envVar(name)`、名前の変更と削除 `fileRename` / `fileRemove` / `dirRemove`、プロセス `processRun` / `processStart` / `processId`、`args()`、`eprint(text)`（下の「入出力」） |
 | ネイティブだけの組み込み | ウィンドウ（`windowOpen` など。[window.ja.md](window.ja.md)）、WebAssembly のモジュールの実行（`wasmLoad` / `wasmNew` / `wasmCall` など。[wasm.ja.md](wasm.ja.md)）、動画・音声の読み書き（`mediaOpenVideo` / `mediaFrame` / `mediaSamples` / `mediaCreate` など。FFmpeg を使う。[media.ja.md](media.ja.md)）、HTTP(S) の要求（`httpStart` / `httpReadLine` / `httpPoll` など。裏のスレッドで送受信し、届いた分から読む。[http.ja.md](http.ja.md)） |
 
@@ -777,6 +777,21 @@ const t = Math.atan2(-1.0, -1.0); // f64。-3π/4
 | `mat4LookAt(eye, target, up)` | カメラの行列。eye から target を見て、up が画面の上 |
 
 行列は列ベクトルに左から掛ける形です（`mat4MulVec(m, v)` は m × v）。続けて掛けるときは `mat4Mul(proj, mat4Mul(view, model))` のように、先に掛けたいものを右に置きます。
+
+## ビットの読み替え
+
+`Math.toBits(x)` は、浮動小数点の値のビットをそのまま整数として読みます（`f32` は `u32`、`f64` は `u64`）。`Math.fromBits(b)` はその逆です（32 ビットの整数（`u32` / `i32`）は `f32`、64 ビットの整数は `f64`）。値の変換（`as`）とは違い、ビットは変わりません。型の決まらない整数リテラルは `u32` として読みます。
+
+```ts
+const one: f32 = 1;
+print(Math.toBits(one));               // 1065353216（0x3f800000）
+print(Math.fromBits(0xbf800000));      // -1
+print(Math.fromBits(Math.toBits(one) + 1)); // 1 の次に大きい f32
+```
+
+- **kernel の中でも使えます（32 ビットだけ）。** GPU では WGSL の `bitcast`、MSL の `as_type` になります。
+- **0 以上の `f32` は、ビットを `u32` として比べても大小の順が同じです。** kernel の中のアトミック演算は 32 ビットの整数だけなので、深度（0〜1）のような値は `Math.toBits` で `u32` にしてから `compareExchange` で比べます（[float_bits.um](../examples/float_bits.um) の深度テスト）。負の値も含めて比べるときは、符号のビットで分けて並べ替える必要があります。
+- NaN のビットの並び（符号や payload）は、GPU では CPU と揃うとは限りません（[wgpu での GPU 実行](wgpu.ja.md)の「残る違い」）。
 
 ## マスクつきシフトと範囲チェックの除去
 
