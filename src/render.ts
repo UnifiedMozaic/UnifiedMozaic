@@ -43,7 +43,7 @@ const IMAGE: Ty = { k: 'struct', name: 'GpuImage' };
 /** 標準の関数（runtime/render.um）と、コンパイラが作る描画の関数のファイルの名前。gpu.raw* はこの中でだけ使える。 */
 export const RENDER_FILES = ['render.um', 'render-draw.um'];
 
-export const RENDER_NAMES = ['beginImage', 'draw', 'endImage', 'rawBeginImage', 'rawDraw', 'rawEndImage'];
+export const RENDER_NAMES = ['beginImage', 'draw', 'endImage', 'beginFrame', 'endFrame', 'rawBeginImage', 'rawDraw', 'rawEndImage', 'rawBeginFrame', 'rawEndFrame'];
 
 /** `gpu.beginImage` / `gpu.draw` / `gpu.endImage`（と gpu.raw*）の呼び出しか（同じ名前の変数があれば違う）。 */
 export function isRenderCall(e: Expr & { kind: 'mcall' }, lookup: (name: string) => unknown): boolean {
@@ -84,10 +84,10 @@ export function inferRender(c: RenderChecker, e: Expr & { kind: 'mcall' }): Ty {
     }
     return inferRaw(c, e, node);
   }
-  if (e.name === 'beginImage' || e.name === 'endImage') {
-    // 標準の関数（runtime/render.um）の呼び出しにする。引数の検査はその関数の型で行う。
+  if (e.name === 'beginImage' || e.name === 'endImage' || e.name === 'beginFrame' || e.name === 'endFrame') {
+    // 標準の関数（runtime/render.um と render_window.um）の呼び出しにする。引数の検査はその関数の型で行う。
     node.kind = 'call';
-    node.callee = e.name === 'beginImage' ? 'gpuBeginImage' : 'gpuEndImage';
+    node.callee = `gpu${e.name[0].toUpperCase()}${e.name.slice(1)}`;
     return c.checkExpr(e as unknown as Expr);
   }
   // gpu.draw(mut image, vertexCount, vs(...), fs(...))
@@ -123,6 +123,19 @@ function inferRaw(c: RenderChecker, e: Expr & { kind: 'mcall' }, node: { kind: s
     node.kind = 'call';
     node.callee = '__gpu_image_begin';
     return I32;
+  }
+  if (e.name === 'rawBeginFrame') {
+    builtin(c, 'gpu.rawBeginFrame', [{ name: 'window', mode: 'none', ty: I32 }, { name: 'width', mode: 'none', ty: I32 }, { name: 'height', mode: 'none', ty: I32 },
+      { name: 'clear', mode: 'none', ty: U32 }], I32, e.args, e.pos);
+    node.kind = 'call';
+    node.callee = '__gpu_frame_begin';
+    return I32;
+  }
+  if (e.name === 'rawEndFrame') {
+    builtin(c, 'gpu.rawEndFrame', [{ name: 'frame', mode: 'none', ty: I32 }], VOID, e.args, e.pos);
+    node.kind = 'call';
+    node.callee = '__gpu_frame_end';
+    return VOID;
   }
   if (e.name === 'rawEndImage') {
     builtin(c, 'gpu.rawEndImage', [{ name: 'image', mode: 'none', ty: I32 }, { name: 'pixels', mode: 'mut', ty: PIXELS }], VOID, e.args, e.pos);

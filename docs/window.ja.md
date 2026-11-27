@@ -39,7 +39,7 @@ node src/cli.ts build examples/window/paint.um --target host -o paint
 | 例 | 内容 |
 | --- | --- |
 | [paint.um](../examples/window/paint.um) | 四角をマウスでドラッグするか、矢印キーで動かす |
-| [cube.um](../examples/window/cube.um) | 回る立方体。三角関数と行列で頂点を動かし、kernel のソフトウェアのラスタライザで塗る（`UM_WGPU=1` なら GPU で塗る）。Space で止める |
+| [cube.um](../examples/window/cube.um) | 回る立方体。シェーダ（vertex / fragment function）で描き、`gpu.beginFrame` / `gpu.endFrame` で表示する（[描画](render.ja.md)）。`UM_WGPU=1` なら GPU で、なければ CPU で描く。Space で止める |
 | [tone.um](../examples/window/tone.um) | 440 Hz の音を鳴らし、再生した標本の数を時計にして経過時間を出す（ウィンドウなし） |
 | [open_dialog.um](../examples/window/open_dialog.um) | 開く・保存・フォルダのダイアログ。ボタンの上でカーソルが手になる。Ctrl+C / Ctrl+V でクリップボード |
 | [drop.um](../examples/window/drop.um) | ファイルやフォルダを落とすと、パスと位置が出る。ドラッグ中は落とす先が明るくなる |

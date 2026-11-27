@@ -454,6 +454,8 @@ const MEDIA_PRELUDE = join(import.meta.dirname, '..', 'runtime', 'media.um');
 const HTTP_PRELUDE = join(import.meta.dirname, '..', 'runtime', 'http.um');
 /** 描画の標準の型と関数（GpuImage、gpuBeginImage など）。プログラムが gpu.beginImage / gpu.draw / gpu.endImage を使うときだけ加える。 */
 const RENDER_PRELUDE = join(import.meta.dirname, '..', 'runtime', 'render.um');
+/** ウィンドウに描く標準の関数（gpuBeginFrame、gpuEndFrame）。gpu.beginFrame / gpu.endFrame を使うときだけ加える。 */
+const RENDER_WINDOW_PRELUDE = join(import.meta.dirname, '..', 'runtime', 'render_window.um');
 
 /** ファイル番号を、宣言とその中のメソッドに付ける。 */
 function tag(d: Decl, file: number): void {
@@ -546,8 +548,11 @@ export function parseProgram(src: string, file?: string): Module {
     if (texts.some((t) => used.test(t))) standard.push(...extra.decls);
   }
   // 描画: 標準の関数と、gpu.draw の vs と fs の組ごとの描画の関数（src/render.ts の drawSources）。
-  if (texts.some((t) => /\bgpu\s*\.\s*(beginImage|draw|endImage)\b/.test(t))) {
+  if (texts.some((t) => /\bgpu\s*\.\s*(beginImage|draw|endImage|beginFrame|endFrame)\b/.test(t))) {
     standard.push(...parse(readFileSync(RENDER_PRELUDE, 'utf8'), 'render.um').decls);
+    if (texts.some((t) => /\bgpu\s*\.\s*(beginFrame|endFrame)\b/.test(t))) {
+      standard.push(...parse(readFileSync(RENDER_WINDOW_PRELUDE, 'utf8'), 'render.um').decls);
+    }
     const draws = drawSources(merged.decls);
     if (draws) standard.push(...parse(draws, 'render-draw.um').decls);
   }

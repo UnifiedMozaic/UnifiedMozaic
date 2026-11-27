@@ -2,14 +2,14 @@
 
 三角形を塗る描画です。シェーダは UM で書きます。GPU が使えるときは GPU の三角形のラスタライザ（WebGPU の render pipeline）で、使えないときは CPU のラスタライザで、同じプログラムが同じ絵を描きます（kernel の `dispatch` と同じ考え方）。
 
-**いまできること（段階 1）:** 画面なしの画像に描いて、画素を `Buffer<u32>` に読み戻す。
+**いまできること:** 画面なしの画像に描いて画素を `Buffer<u32>` に読み戻す（`gpu.beginImage`）。ウィンドウに描く（`gpu.beginFrame`。ネイティブ）。
 
 | ビルド | 描く場所 |
 | --- | --- |
 | ネイティブ（`UM_WGPU=1`。[wgpu での GPU 実行](wgpu.ja.md)） | GPU。GPU が使えなければ CPU |
 | ネイティブ（`UM_WGPU=1` なし）、wasm32、Metal（`UM_METAL=1`） | CPU |
 
-**これから:** ウィンドウに描く、ブラウザ（wasm32 と WebGPU）で描く、インデックスとインスタンス、テクスチャ、裏面を描かない設定・半透明の合成など。
+**これから:** ブラウザ（wasm32 と WebGPU）でウィンドウ（canvas）に描く、インデックスとインスタンス、テクスチャ、裏面を描かない設定・半透明の合成など。
 
 ## 例
 
@@ -83,6 +83,31 @@ node src/cli.ts build tri.um --target host -o tri && ./tri             # CPU で
 - いまは、裏面も描きます（カリングなし）。色はそのまま書きます（半透明の合成なし）。
 - `gpu.draw` は dispatch と同じ順に GPU に積まれます。前に dispatch した kernel が書いた Buffer を、続けて描けます。
 - GPU の画像の大きさが GPU の上限を超えると停止します。
+
+## ウィンドウに描く
+
+```ts
+const win = windowOpen("game", 1280, 720) ?? 0;
+while (running) {
+  // ...入力（pollWindowEvent）...
+  let frame = gpu.beginFrame(win, 0xFF202028);
+  gpu.draw(mut frame, 36, vs(verts, camera), fs(light));
+  gpu.endFrame(mut frame);   // 表示する（画面の更新に合わせて待つ）
+}
+```
+
+| 関数 | 内容 |
+| --- | --- |
+| `gpu.beginFrame(window: i32, clear: u32): GpuImage` | ウィンドウに描くフレームを始める。大きさはウィンドウの画素の大きさ（`windowPixelSize`）で、`frame.width` / `frame.height` で分かる。色を `clear` で、深度を 1 で埋める |
+| `gpu.endFrame(mut frame: GpuImage)` | 描いたフレームをウィンドウに表示する |
+
+- **GPU が使えれば**（`UM_WGPU=1` のビルドで GPU があれば）、ウィンドウの GPU の面（surface）に直接描きます。初めてのフレームで、ウィンドウは SDL の描画の装置を手放すので、**以後そのウィンドウに `windowPresent` は使えません**（使うと停止）。表示は画面の更新（vsync）に合わせて待ちます。
+- **GPU が使えなければ**、CPU の画像に描き、`gpu.endFrame` が `windowPresent` で表示します。
+- ウィンドウの大きさが変わっても、次の `gpu.beginFrame` から新しい大きさになります。縦横比は `frame.width / frame.height` で求めます（[examples/window/cube.um](../examples/window/cube.um)）。
+- 最小化の途中などで GPU の面を得られないときは、そのフレームは描かずに捨てます。
+- ウィンドウの関数と同じく、メインスレッドから呼びます。
+
+**確かめた環境:** Linux（Xvfb の X11 と lavapipe の Vulkan）で、GPU と CPU のどちらでも回る立方体が描けることを画面の写しで確かめました。Windows と macOS のウィンドウ（HWND と CAMetalLayer の面）は、コードはありますが未確認です。
 
 ## CPU のラスタライザ
 

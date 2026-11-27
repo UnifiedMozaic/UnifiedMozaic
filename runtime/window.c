@@ -16,6 +16,7 @@
 #include <SDL3/SDL.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 _Noreturn void um_panic(int32_t code, int32_t line);
@@ -78,6 +79,7 @@ typedef struct {
   SDL_Texture *tex;
   int tex_w, tex_h;
   int tex_valid;  // テクスチャの中身が前回の表示のまま残っているか（windowPresentRect は残りを使う）
+  SDL_MetalView metal;  // GPU で描くときの Metal の view（macOS。um_window_native）
 } um_window;
 
 static um_window windows[MAX_WINDOWS];  // 番号 n は windows[n - 1]
@@ -163,7 +165,8 @@ void um_window_close(int32_t id, int32_t line) {
   main_only(line);
   um_window *w = lookup(id, line);
   if (w->tex) SDL_DestroyTexture(w->tex);
-  SDL_DestroyRenderer(w->ren);
+  if (w->ren) SDL_DestroyRenderer(w->ren);
+  if (w->metal) SDL_Metal_DestroyView(w->metal);
   SDL_DestroyWindow(w->win);
   memset(w, 0, sizeof *w);
   if (pending_text.window == id) pending_text.n = pending_text.next = 0;
@@ -190,6 +193,15 @@ static void show_texture(um_window *w) {
   SDL_RenderPresent(w->ren);
 }
 
+// GPU で描いているウィンドウ（um_window_native で SDL の描画の装置を手放したもの）には、画素を写して表示できない。
+static void need_renderer(um_window *w, int32_t line) {
+  if (!w->ren) {
+    fflush(stdout);
+    fprintf(stderr, "windowPresent: this window is drawn by the GPU (gpu.beginFrame); keep using gpu.beginFrame / gpu.endFrame for it\n");
+    um_panic(UM_PANIC_WINDOW_ARGS, line);
+  }
+}
+
 static void check_pixels(const uint32_t *pixels, size_t len, int32_t width, int32_t height, int32_t line) {
   if (width <= 0 || height <= 0 || (uint64_t)width * (uint64_t)height > (uint64_t)len) um_panic(UM_PANIC_WINDOW_ARGS, line);
   // UM_WGPU=1 のビルドでは、GPU が書いた画素はまだ CPU に読み戻していないことがある（runtime/wgpu.c）。
@@ -200,6 +212,7 @@ static void check_pixels(const uint32_t *pixels, size_t len, int32_t width, int3
 void um_window_present(int32_t id, const uint32_t *pixels, size_t len, int32_t width, int32_t height, int32_t line) {
   main_only(line);
   um_window *w = lookup(id, line);
+  need_renderer(w, line);
   check_pixels(pixels, len, width, height, line);
   if (!fit_texture(w, width, height)) return;
   SDL_UpdateTexture(w->tex, NULL, pixels, width * 4);
@@ -213,6 +226,7 @@ void um_window_present_rect(int32_t id, const uint32_t *pixels, size_t len, int3
                             int32_t x, int32_t y, int32_t rw, int32_t rh, int32_t show, int32_t line) {
   main_only(line);
   um_window *w = lookup(id, line);
+  need_renderer(w, line);
   check_pixels(pixels, len, width, height, line);
   if (x < 0 || y < 0 || rw < 0 || rh < 0 || (int64_t)x + rw > width || (int64_t)y + rh > height) um_panic(UM_PANIC_WINDOW_ARGS, line);
   if (!fit_texture(w, width, height)) return;
@@ -224,6 +238,55 @@ void um_window_present_rect(int32_t id, const uint32_t *pixels, size_t len, int3
     SDL_UpdateTexture(w->tex, &r, pixels + (size_t)y * (size_t)width + (size_t)x, width * 4);
   }
   if (show) show_texture(w);
+}
+
+// GPU（runtime/wgpu.c の um_gpu_frame_begin）がウィンドウに描くための、OS の窓の情報。
+// 種類: 1 = Win32（a = HWND、b = HINSTANCE）、2 = Metal（a = CAMetalLayer）、3 = X11（a = Display *、c = Window）、
+//       4 = Wayland（a = wl_display *、b = wl_surface *）。取れなければ 0 を返す。
+// GPU の surface と取り合わないよう、SDL の描画の装置を手放す（以後このウィンドウに windowPresent は使えない）。
+// wgpu.c はこの関数を直接は呼ばず、コンパイラが関数の場所を渡す（ウィンドウを使わないプログラムに window.c をリンクしないため）。
+typedef struct {
+  int32_t kind;
+  void *a;
+  void *b;
+  uint64_t c;
+} um_native_window;
+
+int32_t um_window_native(int32_t id, um_native_window *out, int32_t line) {
+  main_only(line);
+  um_window *w = lookup(id, line);
+  if (w->ren) {
+    if (w->tex) SDL_DestroyTexture(w->tex);
+    w->tex = NULL;
+    w->tex_w = w->tex_h = 0;
+    w->tex_valid = 0;
+    SDL_DestroyRenderer(w->ren);
+    w->ren = NULL;
+  }
+  memset(out, 0, sizeof *out);
+  SDL_PropertiesID p = SDL_GetWindowProperties(w->win);
+#if defined(_WIN32)
+  out->kind = 1;
+  out->a = SDL_GetPointerProperty(p, SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);
+  out->b = SDL_GetPointerProperty(p, SDL_PROP_WINDOW_WIN32_INSTANCE_POINTER, NULL);
+#elif defined(__APPLE__)
+  (void)p;
+  if (!w->metal) w->metal = SDL_Metal_CreateView(w->win);
+  out->kind = 2;
+  out->a = w->metal ? SDL_Metal_GetLayer(w->metal) : NULL;
+#else
+  const char *driver = SDL_GetCurrentVideoDriver();
+  if (driver && strcmp(driver, "x11") == 0) {
+    out->kind = 3;
+    out->a = SDL_GetPointerProperty(p, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, NULL);
+    out->c = (uint64_t)SDL_GetNumberProperty(p, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0);
+  } else if (driver && strcmp(driver, "wayland") == 0) {
+    out->kind = 4;
+    out->a = SDL_GetPointerProperty(p, SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER, NULL);
+    out->b = SDL_GetPointerProperty(p, SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER, NULL);
+  }
+#endif
+  return out->a != NULL;
 }
 
 // 窓のアイコン（題名の帯・タスクバー・Alt+Tab）。画素は windowPresent と同じ 0xAARRGGBB。

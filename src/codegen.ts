@@ -1707,6 +1707,7 @@ class ModuleGen {
         out.push('declare i32 @um_gpu_set_flags(i32) #0', 'declare i32 @um_gpu_pick_bufs(i32, i32, ptr, i32) #0');
         out.push('declare i32 @um_gpu_image_begin(i32, i32, i32) #0', 'declare void @um_gpu_draw(i32, i32, ptr, i32, i32, ptr, i32, ptr, i32) #0');
         out.push(`declare void @um_gpu_image_end(i32, ptr, ${this.usz}) #0`);
+        out.push('declare i32 @um_gpu_frame_begin(i32, ptr, i32, i32, i32, i32) #0', 'declare void @um_gpu_frame_end(i32) #0');
       } else {
         out.push(`define internal ptr @um_wgpu_alloc(${this.usz} %n, ${this.usz} %s) #0 {`, `  %p = call ptr @um_alloc_zeroed(${this.usz} %n, ${this.usz} %s)`, '  ret ptr %p', '}');
       }
@@ -1761,6 +1762,7 @@ class ModuleGen {
       out.push(`declare i32 @um_window_poll(ptr, ${this.usz}, i32, i32) #0`, `declare void @um_window_present(i32, ptr, ${this.usz}, i32, i32, i32) #0`);
       out.push(`declare void @um_window_present_rect(i32, ptr, ${this.usz}, i32, i32, i32, i32, i32, i32, i32, i32) #0`);
       out.push(`declare i32 @um_window_set_icon(i32, ptr, ${this.usz}, i32, i32, i32) #0`);
+      out.push('declare i32 @um_window_native(i32, ptr, i32) #0');
       out.push(`declare i64 @um_window_ctl(i32, i32, ptr, ${this.usz}, i32) #0`, 'declare double @um_window_ctl_f(i32, i32, i64, i32) #0');
       out.push(`declare i64 @um_window_set_text(i32, i32, i64, ptr, ${this.usz}, i32) #0`, 'declare void @um_window_get_text(i32, i32, i64, ptr, ptr, i32) #0');
       out.push(`declare i32 @um_audio_write(i32, ptr, ${this.usz}, i64, i64, i32) #0`);
@@ -4294,7 +4296,8 @@ class FnGen {
       return b;
     }
     if (e.callee === '__gpu_load' || e.callee === '__gpu_run') return this.gpuLoadCall(e);
-    if (e.callee === '__gpu_image_begin' || e.callee === '__gpu_draw' || e.callee === '__gpu_image_end') return this.renderCall(e);
+    if (e.callee === '__gpu_image_begin' || e.callee === '__gpu_draw' || e.callee === '__gpu_image_end'
+      || e.callee === '__gpu_frame_begin' || e.callee === '__gpu_frame_end') return this.renderCall(e);
     if (e.callee === '__gpu_commit') {
       if (this.m.gpu === 'metal') this.emit('call void @um_gpu_commit()');
       return '';
@@ -4775,11 +4778,9 @@ class FnGen {
    * dispatch と同じ形（gpuArgs）にして渡す。WGSL の束縛の並び（wgsl.ts の render）と同じ。
    */
   renderCall(e: Expr & { kind: 'call' }): string {
-    const name = ({ __gpu_image_begin: 'beginImage', __gpu_draw: 'draw', __gpu_image_end: 'endImage' } as Record<string, string>)[e.callee];
     if (this.m.gpu !== 'wgpu') {
-      // GPU の描画の経路がないビルド。画像はいつも CPU に用意する（番号 0）ので、draw と end は呼ばれない。
-      void name;
-      if (e.callee === '__gpu_image_begin') {
+      // GPU の描画の経路がないビルド。画像とフレームはいつも CPU に用意する（番号 0）ので、draw と end は呼ばれない。
+      if (e.callee === '__gpu_image_begin' || e.callee === '__gpu_frame_begin') {
         for (const a of e.args) this.expr(a.expr);
         return '0';
       }
@@ -4791,6 +4792,19 @@ class FnGen {
       const r = this.tmp();
       this.emit(`${r} = call i32 @um_gpu_image_begin(i32 ${w}, i32 ${h}, i32 ${c})`);
       return r;
+    }
+    if (e.callee === '__gpu_frame_begin') {
+      // ウィンドウの OS の情報を取る関数（runtime/window.c の um_window_native）の場所を渡す。GPU が使えるときだけ呼ばれる。
+      this.m.usesWindow = true;
+      const [win, w, h, c] = e.args.map((a) => this.expr(a.expr));
+      const r = this.tmp();
+      this.emit(`${r} = call i32 @um_gpu_frame_begin(i32 ${win}, ptr @um_window_native, i32 ${w}, i32 ${h}, i32 ${c}, i32 ${e.pos.line})`);
+      return r;
+    }
+    if (e.callee === '__gpu_frame_end') {
+      const f = this.expr(e.args[0].expr);
+      this.emit(`call void @um_gpu_frame_end(i32 ${f})`);
+      return '';
     }
     if (e.callee === '__gpu_image_end') {
       const img = this.expr(e.args[0].expr);

@@ -1,0 +1,53 @@
+// gpu.beginFrame / gpu.endFrame でウィンドウに描く。tests/run.ts は SDL_VIDEO_DRIVER=offscreen で、GPU の経路のない
+// ビルドとして実行するので、フレームは CPU で描いて windowPresent で表示する（docs/render.ja.md の「ウィンドウに描く」）。
+// expect: size ok
+// expect: center 4294901760
+// expect: corner 4278190335
+// expect: 3
+
+struct VOut {
+  position: vec4<f32>;
+}
+
+vertex function vs(i: u32): VOut {
+  const xs: f32[3] = [-0.8, 0.8, 0];
+  const ys: f32[3] = [-0.8, -0.8, 0.8];
+  return { position: vec4(xs[i % 3], ys[i % 3], 0.5, 1) };
+}
+
+fragment function fs(v: VOut): vec4<f32> {
+  return vec4(1.0 as f32, 0, 0, 1);
+}
+
+export function main(): i32 {
+  const opened = windowOpen("frame", 64, 48);
+  if (opened == null) {
+    print(windowError());
+    return 1;
+  }
+  const win = opened;
+  let frames: i32 = 0;
+  for (let k = 0; k < 3; k++) {
+    let frame = gpu.beginFrame(win, 0xFF0000FF);
+    if (k == 0) {
+      const size = windowPixelSize(win);
+      if (frame.width == size.width && frame.height == size.height) {
+        print("size ok");
+      } else {
+        print(`size differs ${frame.width} x ${frame.height}`);
+      }
+    }
+    gpu.draw(mut frame, 3, vs(), fs());
+    if (k == 0 && frame.handle == 0) {
+      const w = frame.width as u32;
+      const h = frame.height as u32;
+      print(`center ${frame.color[(h / 2) * w + w / 2]}`);
+      print(`corner ${frame.color[0]}`);
+    }
+    gpu.endFrame(mut frame);
+    frames++;
+  }
+  windowClose(win);
+  print(frames);
+  return 0;
+}

@@ -2788,7 +2788,8 @@ class Checker {
 
     // gpu.loadKernel / gpu.runKernel（src/gpuload.ts）と gpu.available / gpu.prefer の検査済みの式をもう一度検査するときは、前の結果の型。
     if ((e.callee === '__gpu_load' || e.callee === '__gpu_run' || e.callee === '__gpu_available' || e.callee === '__gpu_prefer'
-      || e.callee === '__gpu_image_begin' || e.callee === '__gpu_draw' || e.callee === '__gpu_image_end') && e.ty) return e.ty;
+      || e.callee === '__gpu_image_begin' || e.callee === '__gpu_draw' || e.callee === '__gpu_image_end'
+      || e.callee === '__gpu_frame_begin' || e.callee === '__gpu_frame_end') && e.ty) return e.ty;
     // 入出力の組み込み。検査済みの式（名前が `__io_...` になっている）をもう一度検査することもある。
     const io = e.callee.startsWith('__io_') ? e.callee.slice(5) : e.callee;
     if (IO_BUILTINS.has(io) && (io !== e.callee || (!this.fns.has(io) && !this.generics.has(io)))) return this.inferIo(e, io);

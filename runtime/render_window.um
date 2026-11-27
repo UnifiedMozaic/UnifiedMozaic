@@ -1,0 +1,25 @@
+// ウィンドウに描く標準の関数（docs/render.ja.md の「ウィンドウに描く」）。プログラムが gpu.beginFrame / gpu.endFrame を
+// 使うときだけ、ドライバが render.um と一緒に加える（ウィンドウの関数を使うので、window.um も要る）。
+//
+// GPU が使えれば、フレームはウィンドウの GPU の面（surface）に描き、gpu.endFrame で表示する。
+// 使えなければ、CPU の画像に描き、gpu.endFrame で windowPresent する。
+
+// gpu.beginFrame(window, clear)。大きさはウィンドウの画素の大きさ（windowPixelSize）。
+function gpuBeginFrame(window: i32, clear: u32): GpuImage {
+  const size = windowPixelSize(window);
+  let frame = new GpuImage(size.width, size.height, gpu.rawBeginFrame(window, size.width, size.height, clear), clear);
+  frame.window = window;
+  return frame;
+}
+
+// gpu.endFrame(mut frame)。描いたフレームをウィンドウに表示する。
+function gpuEndFrame(frame: mut GpuImage): void {
+  if (frame.handle != 0) {
+    gpu.rawEndFrame(frame.handle);
+    frame.handle = 0;
+    return;
+  }
+  if (frame.width > 0 && frame.height > 0) {
+    windowPresent(frame.window, frame.color, frame.width, frame.height);
+  }
+}

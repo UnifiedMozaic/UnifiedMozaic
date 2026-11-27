@@ -778,7 +778,7 @@ const t = Math.atan2(-1.0, -1.0); // f64。-3π/4
 
 行列は列ベクトルに左から掛ける形です（`mat4MulVec(m, v)` は m × v）。続けて掛けるときは `mat4Mul(proj, mat4Mul(view, model))` のように、先に掛けたいものを右に置きます。
 
-これらを使ったソフトウェアのラスタライザの例が [raster.um](../examples/raster.um)（立方体を文字の絵で出す）と [window/cube.um](../examples/window/cube.um)（ウィンドウで回す）です。kernel が画素ごとにすべての三角形を調べ、いちばん近いものを塗ります。
+これらを使って立方体を描く例が [window/cube.um](../examples/window/cube.um)（シェーダで描き、ウィンドウで回す。[描画](render.ja.md)）と [raster.um](../examples/raster.um)（kernel で書いた小さなソフトウェアのラスタライザで、文字の絵に出す）です。
 
 ## ビットの読み替え
 

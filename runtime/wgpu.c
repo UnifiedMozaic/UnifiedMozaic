@@ -1327,6 +1327,9 @@ typedef struct {
   uint32_t width, height;
   uint32_t clear;   // 0xAARRGGBB
   int drawn;        // 色と深度を埋めるパスをもう積んだか
+  int32_t window;   // ウィンドウに描くフレーム（gpu.beginFrame）なら、そのウィンドウの番号。画像なら 0
+  int skip;         // ウィンドウの面を得られなかったフレーム（描かずに捨てる）
+  WGPUTextureFormat format;
   WGPUTexture color, depth;
   WGPUTextureView color_view, depth_view;
 } um_image;
@@ -1355,6 +1358,19 @@ static WGPUTexture um_texture(uint32_t w, uint32_t h, WGPUTextureFormat format, 
 }
 
 // GPU が使えなければ 0 を返す（画像は CPU に用意され、CPU で描く。runtime/render.um）。
+// 空いている画像の場所を取る（鍵を持って呼ぶ）。
+static size_t um_image_slot_locked(void) {
+  for (size_t i = 0; i < um_nimages; i++) {
+    if (!um_images[i].used) return i;
+  }
+  if (um_nimages == um_capimages) {
+    um_capimages = um_capimages ? um_capimages * 2 : 4;
+    um_images = realloc(um_images, um_capimages * sizeof *um_images);
+    if (!um_images) um_panic(5, 0);
+  }
+  return um_nimages++;
+}
+
 int32_t um_gpu_image_begin(int32_t width, int32_t height, int32_t clear) {
   um_lock();
   if (!um_init_locked()) {
@@ -1366,27 +1382,14 @@ int32_t um_gpu_image_begin(int32_t width, int32_t height, int32_t clear) {
     snprintf(msg, sizeof msg, "gpu.beginImage: the size %d x %d is not between 1 and %u", (int)width, (int)height, um_limits.maxTextureDimension2D);
     um_render_panic(msg);
   }
-  size_t slot = um_nimages;
-  for (size_t i = 0; i < um_nimages; i++) {
-    if (!um_images[i].used) {
-      slot = i;
-      break;
-    }
-  }
-  if (slot == um_nimages) {
-    if (um_nimages == um_capimages) {
-      um_capimages = um_capimages ? um_capimages * 2 : 4;
-      um_images = realloc(um_images, um_capimages * sizeof *um_images);
-      if (!um_images) um_panic(5, 0);
-    }
-    um_nimages++;
-  }
+  size_t slot = um_image_slot_locked();
   um_image *im = &um_images[slot];
   memset(im, 0, sizeof *im);
   im->used = 1;
   im->width = (uint32_t)width;
   im->height = (uint32_t)height;
   im->clear = (uint32_t)clear;
+  im->format = WGPUTextureFormat_BGRA8Unorm;
   im->color = um_texture(im->width, im->height, WGPUTextureFormat_BGRA8Unorm, WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_CopySrc);
   im->depth = um_texture(im->width, im->height, WGPUTextureFormat_Depth32Float, WGPUTextureUsage_RenderAttachment);
   im->color_view = wgpuTextureCreateView(im->color, NULL);
@@ -1395,19 +1398,20 @@ int32_t um_gpu_image_begin(int32_t width, int32_t height, int32_t clear) {
   return (int32_t)slot + 1;
 }
 
-// 描画のパイプライン（シェーダの組の番号と Buffer の数ごと）。
+// 描画のパイプライン（シェーダの組の番号、Buffer の数、色の形式ごと）。
 typedef struct {
   int32_t key;
   int32_t nbufs;
+  WGPUTextureFormat format;
   WGPURenderPipeline pipeline;
   WGPUBindGroupLayout layout;
 } um_rpipe;
 static um_rpipe *um_rpipes;
 static size_t um_nrpipes, um_caprpipes;
 
-static um_rpipe *um_rpipeline_locked(int32_t key, const char *src, int32_t src_len, int32_t nbufs) {
+static um_rpipe *um_rpipeline_locked(int32_t key, const char *src, int32_t src_len, int32_t nbufs, WGPUTextureFormat format) {
   for (size_t i = 0; i < um_nrpipes; i++) {
-    if (um_rpipes[i].key == key && um_rpipes[i].nbufs == nbufs) return &um_rpipes[i];
+    if (um_rpipes[i].key == key && um_rpipes[i].nbufs == nbufs && um_rpipes[i].format == format) return &um_rpipes[i];
   }
   if (um_nrpipes == um_caprpipes) {
     um_caprpipes = um_caprpipes ? um_caprpipes * 2 : 8;
@@ -1418,6 +1422,7 @@ static um_rpipe *um_rpipeline_locked(int32_t key, const char *src, int32_t src_l
   memset(p, 0, sizeof *p);
   p->key = key;
   p->nbufs = nbufs;
+  p->format = format;
   WGPUShaderModule module = um_module(src, (size_t)src_len);
   // 束縛はどれも読むだけ。vertex と fragment のどちらからも見える。
   WGPUBindGroupLayoutEntry entries[65];
@@ -1438,7 +1443,7 @@ static um_rpipe *um_rpipeline_locked(int32_t key, const char *src, int32_t src_l
   WGPUPipelineLayout pl = wgpuDeviceCreatePipelineLayout(um_dev, &pld);
 
   WGPUColorTargetState target = WGPU_COLOR_TARGET_STATE_INIT;
-  target.format = WGPUTextureFormat_BGRA8Unorm;
+  target.format = format;
   target.writeMask = WGPUColorWriteMask_All;
   WGPUFragmentState fragment = WGPU_FRAGMENT_STATE_INIT;
   fragment.module = module;
@@ -1502,7 +1507,11 @@ void um_gpu_draw(int32_t image, int32_t key, const char *src, int32_t src_len, i
                  const uint64_t *table, int32_t nbufs) {
   um_lock();
   um_image *im = um_image_at(image, "gpu.draw");
-  um_rpipe *pipe = um_rpipeline_locked(key, src, src_len, nbufs);
+  if (im->skip) {
+    um_unlock();
+    return;
+  }
+  um_rpipe *pipe = um_rpipeline_locked(key, src, src_len, nbufs, im->format);
 
   // Buffer は dispatch と同じく、CPU だけが新しければ GPU へ送る（描画は読むだけなので、GPU の写しは新しいまま）。
   WGPUBindGroupEntry entries[65];
@@ -1554,6 +1563,7 @@ void um_gpu_draw(int32_t image, int32_t key, const char *src, int32_t src_len, i
 void um_gpu_image_end(int32_t image, uint32_t *pixels, size_t len) {
   um_lock();
   um_image *im = um_image_at(image, "gpu.endImage");
+  if (im->window) um_render_panic("gpu.endImage: this is a frame of a window; end it with gpu.endFrame");
   uint64_t n = (uint64_t)im->width * im->height;
   if ((uint64_t)len < n) {
     char msg[200];
@@ -1607,6 +1617,154 @@ void um_gpu_image_end(int32_t image, uint32_t *pixels, size_t len) {
   wgpuTextureViewRelease(im->depth_view);
   wgpuTextureRelease(im->color);
   wgpuTextureRelease(im->depth);
+  im->used = 0;
+  um_unlock();
+}
+
+// ---- ウィンドウに描く（gpu.beginFrame / gpu.endFrame）----
+// ウィンドウごとに wgpu の surface を1つ持つ。初めてのフレームで、ウィンドウ（runtime/window.c の um_window_native）から
+// OS の窓の情報をもらって作る。そのときウィンドウは SDL の描画の装置を手放す（以後 windowPresent は使えない）。
+// GPU が使えなければ um_window_native を呼ばずに 0 を返し、フレームは CPU で描いて windowPresent で表示する（runtime/render_window.um）。
+
+typedef struct {
+  int32_t kind;
+  void *a;
+  void *b;
+  uint64_t c;
+} um_native_window;
+typedef int32_t (*um_native_fn)(int32_t window, um_native_window *out, int32_t line);
+
+#define UM_MAX_SURFACES 16
+static struct {
+  WGPUSurface surface;
+  WGPUTextureFormat format;
+  uint32_t width, height;  // 設定した大きさ（0 はまだ設定していない）
+} um_surfaces[UM_MAX_SURFACES];
+
+static void um_configure_locked(int slot, uint32_t width, uint32_t height) {
+  WGPUSurfaceConfiguration c = WGPU_SURFACE_CONFIGURATION_INIT;
+  c.device = um_dev;
+  c.format = um_surfaces[slot].format;
+  c.usage = WGPUTextureUsage_RenderAttachment;
+  c.width = width;
+  c.height = height;
+  c.presentMode = WGPUPresentMode_Fifo;  // 画面の更新（vsync）に合わせる
+  c.alphaMode = WGPUCompositeAlphaMode_Auto;
+  wgpuSurfaceConfigure(um_surfaces[slot].surface, &c);
+  um_surfaces[slot].width = width;
+  um_surfaces[slot].height = height;
+}
+
+static WGPUSurface um_make_surface_locked(const um_native_window *nw) {
+  WGPUSurfaceDescriptor d = WGPU_SURFACE_DESCRIPTOR_INIT;
+  WGPUSurfaceSourceWindowsHWND hwnd = WGPU_SURFACE_SOURCE_WINDOWS_HWND_INIT;
+  WGPUSurfaceSourceMetalLayer metal = WGPU_SURFACE_SOURCE_METAL_LAYER_INIT;
+  WGPUSurfaceSourceXlibWindow xlib = WGPU_SURFACE_SOURCE_XLIB_WINDOW_INIT;
+  WGPUSurfaceSourceWaylandSurface wl = WGPU_SURFACE_SOURCE_WAYLAND_SURFACE_INIT;
+  switch (nw->kind) {
+    case 1:
+      hwnd.hwnd = nw->a;
+      hwnd.hinstance = nw->b;
+      d.nextInChain = &hwnd.chain;
+      break;
+    case 2:
+      metal.layer = nw->a;
+      d.nextInChain = &metal.chain;
+      break;
+    case 3:
+      xlib.display = nw->a;
+      xlib.window = nw->c;
+      d.nextInChain = &xlib.chain;
+      break;
+    case 4:
+      wl.display = nw->a;
+      wl.surface = nw->b;
+      d.nextInChain = &wl.chain;
+      break;
+    default:
+      return NULL;
+  }
+  return wgpuInstanceCreateSurface(um_inst, &d);
+}
+
+int32_t um_gpu_frame_begin(int32_t window, um_native_fn native, int32_t width, int32_t height, int32_t clear, int32_t line) {
+  if (width <= 0 || height <= 0 || window < 1 || window > UM_MAX_SURFACES) return 0;
+  um_lock();
+  if (!um_init_locked()) {
+    um_unlock();
+    return 0;
+  }
+  int slot = window - 1;
+  if (!um_surfaces[slot].surface) {
+    um_native_window nw;
+    if (!native(window, &nw, line)) um_render_panic("gpu.beginFrame: could not get the window from the OS for the GPU");
+    WGPUSurface surface = um_make_surface_locked(&nw);
+    if (!surface) um_render_panic("gpu.beginFrame: could not create a GPU surface for the window");
+    WGPUSurfaceCapabilities caps = WGPU_SURFACE_CAPABILITIES_INIT;
+    if (wgpuSurfaceGetCapabilities(surface, um_adapter, &caps) != WGPUStatus_Success || caps.formatCount == 0) {
+      um_render_panic("gpu.beginFrame: the GPU cannot draw to this window");
+    }
+    // 画像と同じ BGRA8Unorm（色をそのまま書く）を選ぶ。なければ RGBA8Unorm、それもなければ最初の形式。
+    WGPUTextureFormat format = caps.formats[0];
+    for (size_t i = 0; i < caps.formatCount; i++) {
+      if (caps.formats[i] == WGPUTextureFormat_RGBA8Unorm) format = caps.formats[i];
+    }
+    for (size_t i = 0; i < caps.formatCount; i++) {
+      if (caps.formats[i] == WGPUTextureFormat_BGRA8Unorm) format = caps.formats[i];
+    }
+    wgpuSurfaceCapabilitiesFreeMembers(caps);
+    um_surfaces[slot].surface = surface;
+    um_surfaces[slot].format = format;
+    um_surfaces[slot].width = 0;
+  }
+  if (um_surfaces[slot].width != (uint32_t)width || um_surfaces[slot].height != (uint32_t)height) um_configure_locked(slot, (uint32_t)width, (uint32_t)height);
+
+  size_t i = um_image_slot_locked();
+  um_image *im = &um_images[i];
+  memset(im, 0, sizeof *im);
+  im->used = 1;
+  im->width = (uint32_t)width;
+  im->height = (uint32_t)height;
+  im->clear = (uint32_t)clear;
+  im->window = window;
+  im->format = um_surfaces[slot].format;
+  // 前に積んだ dispatch を先に提出しておく（面を待つあいだに GPU が進められるように）。
+  um_submit_locked();
+  WGPUSurfaceTexture st = WGPU_SURFACE_TEXTURE_INIT;
+  for (int attempt = 0; attempt < 2; attempt++) {
+    wgpuSurfaceGetCurrentTexture(um_surfaces[slot].surface, &st);
+    if (st.status == WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal || st.status == WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal) break;
+    if (st.texture) wgpuTextureRelease(st.texture);
+    st.texture = NULL;
+    // 大きさが変わった・面を失ったなど。設定し直してもう一度だけ試す。
+    um_configure_locked(slot, (uint32_t)width, (uint32_t)height);
+  }
+  if (!st.texture) {
+    im->skip = 1;  // このフレームは描かずに捨てる（最小化の途中など）
+    um_unlock();
+    return (int32_t)i + 1;
+  }
+  im->color = st.texture;
+  im->color_view = wgpuTextureCreateView(im->color, NULL);
+  im->depth = um_texture(im->width, im->height, WGPUTextureFormat_Depth32Float, WGPUTextureUsage_RenderAttachment);
+  im->depth_view = wgpuTextureCreateView(im->depth, NULL);
+  um_unlock();
+  return (int32_t)i + 1;
+}
+
+void um_gpu_frame_end(int32_t frame) {
+  um_lock();
+  um_image *im = um_image_at(frame, "gpu.endFrame");
+  if (!im->window) um_render_panic("gpu.endFrame: this is an image; end it with gpu.endImage");
+  if (!im->skip) {
+    if (!im->drawn) um_render_pass_locked(im, NULL, NULL, 0);
+    um_submit_locked();
+    wgpuSurfacePresent(um_surfaces[im->window - 1].surface);
+    wgpuTextureViewRelease(im->color_view);
+    wgpuTextureViewRelease(im->depth_view);
+    wgpuTextureRelease(im->color);
+    wgpuTextureRelease(im->depth);
+  }
   im->used = 0;
   um_unlock();
 }

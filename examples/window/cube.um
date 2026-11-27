@@ -1,122 +1,72 @@
-// 回る立方体をウィンドウに出す。kernel のソフトウェアのラスタライザで塗り（examples/raster.um と同じ仕組み）、
-// windowPresent で表示する。Esc か閉じるボタンで終わる。ネイティブだけ（SDL3 が必要。docs/window.ja.md）。
-//   UM_WGPU=1 node src/cli.ts build examples/window/cube.um --target host -o cube && ./cube   （GPU で塗る）
-//   node src/cli.ts build examples/window/cube.um --target host -o cube && ./cube             （CPU で塗る）
-// 引数に数を渡すと、そのフレーム数だけ描いて終わる（テスト用。SDL_VIDEO_DRIVER=offscreen と一緒に使う）。
+// 回る立方体をウィンドウに出す。シェーダ（vertex function / fragment function）で描き、深度テストで奥の面を隠す。
+// GPU が使えれば GPU で（UM_WGPU=1 のビルド）、使えなければ CPU で同じ絵を描く（docs/render.ja.md）。
+// Esc か閉じるボタンで終わる。Space で止める。ネイティブだけ（SDL3 が必要。docs/window.ja.md）。
+//   UM_WGPU=1 node src/cli.ts build examples/window/cube.um --target host -o cube && ./cube   （GPU で描く）
+//   node src/cli.ts build examples/window/cube.um --target host -o cube && ./cube             （CPU で描く）
+// 引数に数を渡すと、そのフレーム数だけ描いて終わる（テスト用）。
 
-const WIDTH: u32 = 640;
-const HEIGHT: u32 = 480;
-
-// 画面の座標の三角形。x, y は画素、z は深度（0〜1。小さいほど近い）。shade は塗る値（ここでは文字）。
-struct Tri {
-  x0: f32;
-  y0: f32;
-  z0: f32;
-  x1: f32;
-  y1: f32;
-  z1: f32;
-  x2: f32;
-  y2: f32;
-  z2: f32;
-  shade: u32;
+struct Vertex {
+  pos: vec3<f32>;
+  normal: vec3<f32>;
+  color: vec3<f32>;
 }
 
-// 辺 (ax, ay)→(bx, by) から見て、点 (px, py) がどちら側か（2倍の符号つき面積）。
-kernel function edge(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32): f32 {
-  return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
+struct Camera {
+  mvp: mat4<f32>;    // 頂点をクリップ空間へ
+  model: mat4<f32>;  // 法線を回す
 }
 
-// 1画素ぶん: 画素の中心を含む三角形のうち、いちばん近いものの shade を書く。
-kernel function raster(i: u32, out: mut Buffer<u32>, tris: Buffer<Tri>, count: u32, width: u32, background: u32): void {
-  const px = (i % width) as f32 + 0.5;
-  const py = (i / width) as f32 + 0.5;
-  let best: f32 = 2;
-  let color = background;
-  for (let t: u32 = 0; t < count; t++) {
-    const tri = tris[t];
-    let area = edge(tri.x0, tri.y0, tri.x1, tri.y1, tri.x2, tri.y2);
-    let w0 = edge(tri.x1, tri.y1, tri.x2, tri.y2, px, py);
-    let w1 = edge(tri.x2, tri.y2, tri.x0, tri.y0, px, py);
-    let w2 = edge(tri.x0, tri.y0, tri.x1, tri.y1, px, py);
-    if (area == 0) {
-      continue;
-    }
-    // 頂点の並びの向き（時計回りか）によらず、内側を正にする。
-    if (area < 0) {
-      area = -area;
-      w0 = -w0;
-      w1 = -w1;
-      w2 = -w2;
-    }
-    if (w0 >= 0 && w1 >= 0 && w2 >= 0) {
-      // 深度は、三角形の中での位置（重心座標）で頂点の深度を混ぜたもの。
-      const z = (w0 * tri.z0 + w1 * tri.z1 + w2 * tri.z2) / area;
-      if (z >= 0 && z < best) {
-        best = z;
-        color = tri.shade;
-      }
-    }
-  }
-  out[i] = color;
+struct VOut {
+  position: vec4<f32>;
+  normal: vec3<f32>;
+  color: vec3<f32>;
 }
 
-// 0xAARRGGBB の色の RGB を k 倍する（0〜1）。
-function scaleColor(c: u32, k: f32): u32 {
-  const r = (((c >> 16) & 255) as f32 * k) as u32;
-  const g = (((c >> 8) & 255) as f32 * k) as u32;
-  const b = ((c & 255) as f32 * k) as u32;
-  return 0xFF000000 | (r << 16) | (g << 8) | b;
+vertex function vs(i: u32, verts: Buffer<Vertex>, cam: Camera): VOut {
+  const v = verts[i];
+  const p: vec4<f32> = vec4(v.pos.x, v.pos.y, v.pos.z, 1);
+  const n: vec4<f32> = vec4(v.normal.x, v.normal.y, v.normal.z, 0);
+  const r = mat4MulVec(cam.model, n);
+  return { position: mat4MulVec(cam.mvp, p), normal: vec3(r.x, r.y, r.z), color: v.color };
 }
 
-// 立方体の 6 面（12 個の三角形）を、角度 angle で回して画面の座標にする。
-// 面の明るさ（0〜1）は、回した法線と光の向きの内積で決め、面の色（colors）に掛ける。
-function cube(tris: mut Buffer<Tri>, angle: f32, width: f32, height: f32, aspect: f32, colors: u32[]): void {
-  const model = mat4Mul(mat4RotateY(angle), mat4RotateX(angle * 0.6));
-  const view = mat4LookAt(vec3(0.0 as f32, 0, 4), vec3(0.0 as f32, 0, 0), vec3(0.0 as f32, 1, 0));
-  const proj = mat4Perspective(Math.PI / 3, aspect, 0.5, 20);
-  const m = mat4Mul(proj, mat4Mul(view, model));
-  const light = vec3Normalize(vec3(0.4 as f32, 0.8, 1));
-  const us: f32[4] = [-1, 1, 1, -1];
-  const vs: f32[4] = [-1, -1, 1, 1];
+// 光の向きとの内積で明るさを決める（少しの環境光を足す）。
+fragment function fs(v: VOut, light: vec3<f32>): vec4<f32> {
+  const d = Math.max(vec3Dot(vec3Normalize(v.normal), light), 0) * 0.8 + 0.2;
+  return vec4(v.color.x * d, v.color.y * d, v.color.z * d, 1);
+}
+
+// 立方体の 36 頂点（6 面 × 2 三角形）。面ごとに色と法線が一つ。
+function cubeVertices(): Buffer<Vertex> {
+  const colors: vec3<f32>[6] = [vec3(0.9 as f32, 0.3, 0.3), vec3(0.3 as f32, 0.9, 0.4), vec3(0.3 as f32, 0.5, 0.95),
+    vec3(0.95 as f32, 0.85, 0.3), vec3(0.8 as f32, 0.4, 0.9), vec3(0.3 as f32, 0.85, 0.9)];
+  const us: f32[6] = [-1, 1, 1, -1, 1, -1];
+  const ws: f32[6] = [-1, -1, 1, -1, 1, 1];
+  let verts = new Buffer<Vertex>(36);
   let n: u32 = 0;
   for (let axis: u32 = 0; axis < 3; axis++) {
     for (let side: u32 = 0; side < 2; side++) {
       const s: f32 = side == 0 ? -1 : 1;
-      // 面の 4 つの角を、ぐるりと回る順に画面の座標にする。
-      let xs: f32[4];
-      let ys: f32[4];
-      let zs: f32[4];
-      for (let k: u32 = 0; k < 4; k++) {
-        let p: vec4<f32> = vec4(s, us[k], vs[k], 1);
+      for (let k: u32 = 0; k < 6; k++) {
+        let p: vec3<f32> = vec3(s, us[k], ws[k]);
+        let nrm: vec3<f32> = vec3(s, 0, 0);
         if (axis == 1) {
-          p = vec4(us[k], s, vs[k], 1);
+          p = vec3(us[k], s, ws[k]);
+          nrm = vec3(0, s, 0);
         } else if (axis == 2) {
-          p = vec4(us[k], vs[k], s, 1);
+          p = vec3(us[k], ws[k], s);
+          nrm = vec3(0, 0, s);
         }
-        const c = mat4MulVec(m, p);
-        xs[k] = (c.x / c.w * 0.5 + 0.5) * width;
-        ys[k] = (0.5 - c.y / c.w * 0.5) * height;
-        zs[k] = c.z / c.w;
+        verts[n] = { pos: p, normal: nrm, color: colors[axis * 2 + side] };
+        n++;
       }
-      // 法線を回して、光の向きとの内積で明るさを決める。
-      let nrm: vec4<f32> = vec4(s, 0, 0, 0);
-      if (axis == 1) {
-        nrm = vec4(0, s, 0, 0);
-      } else if (axis == 2) {
-        nrm = vec4(0, 0, s, 0);
-      }
-      const r = mat4MulVec(model, nrm);
-      const lit = Math.max(vec3Dot(vec3(r.x, r.y, r.z), light), 0) * 0.85 + 0.15;
-      const shade = scaleColor(colors[axis * 2 + side], lit);
-      tris[n] = { x0: xs[0], y0: ys[0], z0: zs[0], x1: xs[1], y1: ys[1], z1: zs[1], x2: xs[2], y2: ys[2], z2: zs[2], shade: shade };
-      tris[n + 1] = { x0: xs[0], y0: ys[0], z0: zs[0], x1: xs[2], y1: ys[2], z1: zs[2], x2: xs[3], y2: ys[3], z2: zs[3], shade: shade };
-      n += 2;
     }
   }
+  return verts;
 }
 
 export function main(): i32 {
-  const opened = windowOpen("cube", WIDTH as i32, HEIGHT as i32);
+  const opened = windowOpen("cube", 640, 480);
   if (opened == null) {
     eprint("could not open a window");
     return 1;
@@ -131,14 +81,12 @@ export function main(): i32 {
     }
   }
 
-  // 面の色（-x, +x, -y, +y, -z, +z）
-  const colors: u32[] = [0xFFE05050, 0xFF50E070, 0xFF5080F0, 0xFFF0D050, 0xFFD060E0, 0xFF50D0E0];
-  let tris = new Buffer<Tri>(12);
-  let px = new Buffer<u32>((WIDTH * HEIGHT) as usize);
+  const verts = cubeVertices();
+  const light = vec3Normalize(vec3(0.4 as f32, 0.8, 1));
   const start = ticksNs();
   let paused = false;
   let angle: f32 = 0;
-  let frame: i32 = 0;
+  let frames: i32 = 0;
   let running = true;
   while (running) {
     while (true) {
@@ -167,15 +115,21 @@ export function main(): i32 {
       // 1 秒に 1 ラジアンほど回す。角度は 2π の中に保つ（三角関数の誤差が小さい範囲）。
       angle = ((ticksNs() - start) as f64 / 1.0e9 % (2 * Math.PI)) as f32;
     }
-    cube(mut tris, angle, WIDTH as f32, HEIGHT as f32, (WIDTH as f32) / (HEIGHT as f32), colors);
-    dispatch(raster, WIDTH * HEIGHT, mut px, tris, 12, WIDTH, 0xFF202028);
-    windowPresent(win, px, WIDTH as i32, HEIGHT as i32);
-    frame++;
-    if (limit >= 0 && frame >= limit) {
+    let frame = gpu.beginFrame(win, 0xFF202028);
+    // 縦横比はフレーム（ウィンドウの画素）の大きさから。大きさを変えても歪まない。
+    const aspect = (frame.width as f32) / Math.max(frame.height as f32, 1);
+    const model = mat4Mul(mat4RotateY(angle), mat4RotateX(angle * 0.6));
+    const view = mat4LookAt(vec3(0.0 as f32, 0, 5), vec3(0.0 as f32, 0, 0), vec3(0.0 as f32, 1, 0));
+    const proj = mat4Perspective(Math.PI / 3, aspect, 0.5, 50);
+    const cam: Camera = { mvp: mat4Mul(proj, mat4Mul(view, model)), model: model };
+    gpu.draw(mut frame, 36, vs(verts, cam), fs(light));
+    gpu.endFrame(mut frame);
+    frames++;
+    if (limit >= 0 && frames >= limit) {
       running = false;
     }
   }
   windowClose(win);
-  print(frame);
+  print(frames);
   return 0;
 }

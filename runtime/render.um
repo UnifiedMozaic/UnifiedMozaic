@@ -12,6 +12,8 @@ class GpuImage {
   handle: i32;
   color: Buffer<u32>;
   depth: Buffer<f32>;
+  // ウィンドウに描くフレーム（gpu.beginFrame）なら、そのウィンドウの番号。画像（gpu.beginImage）なら 0。
+  window: i32 = 0;
 
   constructor(width: i32, height: i32, handle: i32, clear: u32) {
     this.width = width;
