@@ -1,0 +1,10 @@
+// error: kernel-type
+struct VOut {
+  position: vec4<f32>;
+}
+fragment function fs(v: VOut): vec3<f32> {
+  return vec3(1.0 as f32, 0, 0);
+}
+export function main(): i32 {
+  return 0;
+}

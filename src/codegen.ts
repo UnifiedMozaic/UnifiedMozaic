@@ -2,7 +2,7 @@ import { isCollectiveLet, tyStr } from './ast.ts';
 import type { Arg, Expr, FnDecl, Stmt, Sym, Ty } from './ast.ts';
 import { isCopyTy, isPlace, passByPtr, simdInfo } from './checker.ts';
 import type { FnSig, Program } from './checker.ts';
-import { emitWgsl, gpuLayout, has64, WGSL_SIMDGROUP } from './wgsl.ts';
+import { emitWgsl, emitWgslRender, gpuLayout, has64, WGSL_SIMDGROUP } from './wgsl.ts';
 import { CompileError } from './diag.ts';
 import type { Pos } from './diag.ts';
 import { emitMsl } from './msl.ts';
@@ -1123,6 +1123,8 @@ class ModuleGen {
 
   /** wgpu のランタイムを直接呼ぶ組み込み（gpu.loadKernel / gpu.runKernel / gpu.ready / gpu.wait）を使ったか。 */
   usesGpuRuntime = false;
+  /** 描画のシェーダ（vertex と fragment の組。キーは "vs|fs"）。runtime/wgpu.c は番号ごとにパイプラインを作る。 */
+  renderShaders = new Map<string, { id: number; global: string; bytes: number }>();
 
   /** wgpu の経路で、GPU を使う呼び出し（GPU で実行しうる dispatch、gpu.loadKernel）があるか。なければ wgpu をリンクしない。 */
   wgpuUsed(): boolean {
@@ -1397,6 +1399,25 @@ class ModuleGen {
       this.constArrays.set(g.name, name);
     }
     return name;
+  }
+
+  /** 描画のシェーダ（vertex function と fragment function の組）を WGSL にし、文字列定数として埋め込む。同じ組は1回だけ。 */
+  renderShader(vs: string, fs: string): { id: number; global: string; bytes: number } {
+    const key = `${vs}|${fs}`;
+    let k = this.renderShaders.get(key);
+    if (!k) {
+      const source = emitWgslRender(this.prog, this.prog.fns.get(vs)!.decl, this.prog.fns.get(fs)!.decl).source;
+      const bytes = Buffer.from(source, 'utf8');
+      let text = '';
+      for (const b of bytes) {
+        text += b >= 0x20 && b < 0x7f && b !== 0x22 && b !== 0x5c ? String.fromCharCode(b) : `\\${b.toString(16).toUpperCase().padStart(2, '0')}`;
+      }
+      const global = `@um.render.${vs}.${fs}`;
+      this.globals.push(`${global} = private unnamed_addr constant [${bytes.length} x i8] c"${text}"`);
+      k = { id: this.renderShaders.size, global, bytes: bytes.length };
+      this.renderShaders.set(key, k);
+    }
+    return k;
   }
 
   /**
@@ -1684,6 +1705,8 @@ class ModuleGen {
         out.push('declare i64 @um_gpu_submit(i32, ptr, i32, i32, ptr, i32, ptr, i32) #0', 'declare i32 @um_gpu_ready(i64) #0', 'declare void @um_gpu_wait(i64) #0');
         out.push(`declare i32 @um_gpu_load(ptr, ${this.usz}) #0`, 'declare i32 @um_gpu_run(i32, i32, ptr, i32, ptr, i32) #0');
         out.push('declare i32 @um_gpu_set_flags(i32) #0', 'declare i32 @um_gpu_pick_bufs(i32, i32, ptr, i32) #0');
+        out.push('declare i32 @um_gpu_image_begin(i32, i32, i32) #0', 'declare void @um_gpu_draw(i32, i32, ptr, i32, i32, ptr, i32, ptr, i32) #0');
+        out.push(`declare void @um_gpu_image_end(i32, ptr, ${this.usz}) #0`);
       } else {
         out.push(`define internal ptr @um_wgpu_alloc(${this.usz} %n, ${this.usz} %s) #0 {`, `  %p = call ptr @um_alloc_zeroed(${this.usz} %n, ${this.usz} %s)`, '  ret ptr %p', '}');
       }
@@ -4271,6 +4294,7 @@ class FnGen {
       return b;
     }
     if (e.callee === '__gpu_load' || e.callee === '__gpu_run') return this.gpuLoadCall(e);
+    if (e.callee === '__gpu_image_begin' || e.callee === '__gpu_draw' || e.callee === '__gpu_image_end') return this.renderCall(e);
     if (e.callee === '__gpu_commit') {
       if (this.m.gpu === 'metal') this.emit('call void @um_gpu_commit()');
       return '';
@@ -4743,6 +4767,44 @@ class FnGen {
     this.emit(`${ok} = call i32 @um_gpu_run(i32 ${kernel}, i32 ${count}, ptr ${block}, i32 ${bytes}, ptr ${table}, i32 ${nbufs})`);
     this.emit(`${r} = icmp ne i32 ${ok}, 0`);
     return r;
+  }
+
+  /**
+   * 描画（src/render.ts）: gpu.beginImage / gpu.draw / gpu.endImage。いまは wgpu の経路（UM_WGPU=1）だけ。
+   * draw の値の引数と Buffer は、vertex の引数（頂点の番号を除く）、fragment の引数（受け取る値を除く）の順に
+   * dispatch と同じ形（gpuArgs）にして渡す。WGSL の束縛の並び（wgsl.ts の render）と同じ。
+   */
+  renderCall(e: Expr & { kind: 'call' }): string {
+    const name = ({ __gpu_image_begin: 'beginImage', __gpu_draw: 'draw', __gpu_image_end: 'endImage' } as Record<string, string>)[e.callee];
+    if (this.m.gpu !== 'wgpu') {
+      throw new CompileError('not-implemented', `\`gpu.${name}\` needs a native build with wgpu (UM_WGPU=1)`, e.pos,
+        'build with `UM_WGPU=1 node src/cli.ts build x.um --target host` (docs/wgpu.ja.md); drawing in the browser (wasm32) is not available yet');
+    }
+    this.m.usesGpuRuntime = true;
+    if (e.callee === '__gpu_image_begin') {
+      const [w, h, c] = e.args.map((a) => this.expr(a.expr));
+      const r = this.tmp();
+      this.emit(`${r} = call i32 @um_gpu_image_begin(i32 ${w}, i32 ${h}, i32 ${c})`);
+      return r;
+    }
+    if (e.callee === '__gpu_image_end') {
+      const img = this.expr(e.args[0].expr);
+      const [data, len] = this.heapParts(e.args[1].expr)();
+      this.emit(`call void @um_gpu_image_end(i32 ${img}, ptr ${data}, ${this.m.usz} ${len})`);
+      return '';
+    }
+    const node = e as unknown as { vs: string; fs: string; vsArgc: number };
+    const vs = this.m.prog.fns.get(node.vs)!;
+    const fs = this.m.prog.fns.get(node.fs)!;
+    const shader = this.m.renderShader(node.vs, node.fs);
+    const img = this.expr(e.args[0].expr);
+    const count = this.expr(e.args[1].expr);
+    const rest = e.args.slice(2);
+    const params: FnSig['params'] = [...vs.params.slice(1), ...fs.params.slice(1)];
+    const args = this.prepArgs({ key: '', name: '', params, ret: { k: 'void' }, exported: false, decl: this.d }, rest).map((a) => a());
+    const [block, bytes, table, nbufs] = this.gpuArgs(params, args);
+    this.emit(`call void @um_gpu_draw(i32 ${img}, i32 ${shader.id}, ptr ${shader.global}, i32 ${shader.bytes}, i32 ${count}, ptr ${block}, i32 ${bytes}, ptr ${table}, i32 ${nbufs})`);
+    return '';
   }
 
   /**

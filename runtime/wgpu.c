@@ -1310,3 +1310,299 @@ int32_t um_gpu_run(int32_t id, uint32_t count, const void *block, int32_t block_
   um_unlock();
   return ok;
 }
+
+// ---- 描画（gpu.beginImage / gpu.draw / gpu.endImage。src/render.ts、docs/render.ja.md）----
+// 画像は色（BGRA8Unorm。読み戻すと 0xAARRGGBB の u32 と同じバイトの並び）と深度（Depth32Float）のテクスチャの組。
+// draw は dispatch と同じ命令（um_enc）に描画のパスを積むので、前後の dispatch との順序は保たれる。
+// 最初の draw のパスが色と深度を埋め（clear）、あとの draw は前の結果に重ねて描く。
+
+static void um_render_panic(const char *msg) {
+  fflush(stdout);
+  fprintf(stderr, "panic: %s\n", msg);
+  um_exit_failure();
+}
+
+typedef struct {
+  int used;
+  uint32_t width, height;
+  uint32_t clear;   // 0xAARRGGBB
+  int drawn;        // 色と深度を埋めるパスをもう積んだか
+  WGPUTexture color, depth;
+  WGPUTextureView color_view, depth_view;
+} um_image;
+static um_image *um_images;
+static size_t um_nimages, um_capimages;
+
+static um_image *um_image_at(int32_t image, const char *what) {
+  if (image < 1 || (size_t)image > um_nimages || !um_images[image - 1].used) {
+    char msg[128];
+    snprintf(msg, sizeof msg, "%s: %d is not an image from gpu.beginImage (or it has already ended)", what, (int)image);
+    um_render_panic(msg);
+  }
+  return &um_images[image - 1];
+}
+
+static WGPUTexture um_texture(uint32_t w, uint32_t h, WGPUTextureFormat format, WGPUTextureUsage usage) {
+  WGPUTextureDescriptor d = WGPU_TEXTURE_DESCRIPTOR_INIT;
+  d.size.width = w;
+  d.size.height = h;
+  d.size.depthOrArrayLayers = 1;
+  d.format = format;
+  d.usage = usage;
+  WGPUTexture t = wgpuDeviceCreateTexture(um_dev, &d);
+  if (!t) um_fail0("creating a texture");
+  return t;
+}
+
+int32_t um_gpu_image_begin(int32_t width, int32_t height, int32_t clear) {
+  um_lock();
+  if (!um_init_locked()) um_render_panic("gpu.beginImage: no GPU is available (drawing needs one)");
+  if (width <= 0 || height <= 0 || (uint32_t)width > um_limits.maxTextureDimension2D || (uint32_t)height > um_limits.maxTextureDimension2D) {
+    char msg[160];
+    snprintf(msg, sizeof msg, "gpu.beginImage: the size %d x %d is not between 1 and %u", (int)width, (int)height, um_limits.maxTextureDimension2D);
+    um_render_panic(msg);
+  }
+  size_t slot = um_nimages;
+  for (size_t i = 0; i < um_nimages; i++) {
+    if (!um_images[i].used) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot == um_nimages) {
+    if (um_nimages == um_capimages) {
+      um_capimages = um_capimages ? um_capimages * 2 : 4;
+      um_images = realloc(um_images, um_capimages * sizeof *um_images);
+      if (!um_images) um_panic(5, 0);
+    }
+    um_nimages++;
+  }
+  um_image *im = &um_images[slot];
+  memset(im, 0, sizeof *im);
+  im->used = 1;
+  im->width = (uint32_t)width;
+  im->height = (uint32_t)height;
+  im->clear = (uint32_t)clear;
+  im->color = um_texture(im->width, im->height, WGPUTextureFormat_BGRA8Unorm, WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_CopySrc);
+  im->depth = um_texture(im->width, im->height, WGPUTextureFormat_Depth32Float, WGPUTextureUsage_RenderAttachment);
+  im->color_view = wgpuTextureCreateView(im->color, NULL);
+  im->depth_view = wgpuTextureCreateView(im->depth, NULL);
+  um_unlock();
+  return (int32_t)slot + 1;
+}
+
+// 描画のパイプライン（シェーダの組の番号と Buffer の数ごと）。
+typedef struct {
+  int32_t key;
+  int32_t nbufs;
+  WGPURenderPipeline pipeline;
+  WGPUBindGroupLayout layout;
+} um_rpipe;
+static um_rpipe *um_rpipes;
+static size_t um_nrpipes, um_caprpipes;
+
+static um_rpipe *um_rpipeline_locked(int32_t key, const char *src, int32_t src_len, int32_t nbufs) {
+  for (size_t i = 0; i < um_nrpipes; i++) {
+    if (um_rpipes[i].key == key && um_rpipes[i].nbufs == nbufs) return &um_rpipes[i];
+  }
+  if (um_nrpipes == um_caprpipes) {
+    um_caprpipes = um_caprpipes ? um_caprpipes * 2 : 8;
+    um_rpipes = realloc(um_rpipes, um_caprpipes * sizeof *um_rpipes);
+    if (!um_rpipes) um_panic(5, 0);
+  }
+  um_rpipe *p = &um_rpipes[um_nrpipes++];
+  memset(p, 0, sizeof *p);
+  p->key = key;
+  p->nbufs = nbufs;
+  WGPUShaderModule module = um_module(src, (size_t)src_len);
+  // 束縛はどれも読むだけ。vertex と fragment のどちらからも見える。
+  WGPUBindGroupLayoutEntry entries[65];
+  for (int32_t i = 0; i <= nbufs; i++) {
+    WGPUBindGroupLayoutEntry e = WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT;
+    e.binding = (uint32_t)i;
+    e.visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
+    e.buffer.type = WGPUBufferBindingType_ReadOnlyStorage;
+    entries[i] = e;
+  }
+  WGPUBindGroupLayoutDescriptor ld = WGPU_BIND_GROUP_LAYOUT_DESCRIPTOR_INIT;
+  ld.entryCount = (size_t)nbufs + 1;
+  ld.entries = entries;
+  p->layout = wgpuDeviceCreateBindGroupLayout(um_dev, &ld);
+  WGPUPipelineLayoutDescriptor pld = WGPU_PIPELINE_LAYOUT_DESCRIPTOR_INIT;
+  pld.bindGroupLayoutCount = 1;
+  pld.bindGroupLayouts = &p->layout;
+  WGPUPipelineLayout pl = wgpuDeviceCreatePipelineLayout(um_dev, &pld);
+
+  WGPUColorTargetState target = WGPU_COLOR_TARGET_STATE_INIT;
+  target.format = WGPUTextureFormat_BGRA8Unorm;
+  target.writeMask = WGPUColorWriteMask_All;
+  WGPUFragmentState fragment = WGPU_FRAGMENT_STATE_INIT;
+  fragment.module = module;
+  fragment.entryPoint = um_sv("um_fs");
+  fragment.targetCount = 1;
+  fragment.targets = &target;
+  WGPUDepthStencilState depth = WGPU_DEPTH_STENCIL_STATE_INIT;
+  depth.format = WGPUTextureFormat_Depth32Float;
+  depth.depthWriteEnabled = WGPUOptionalBool_True;
+  depth.depthCompare = WGPUCompareFunction_Less;
+
+  WGPURenderPipelineDescriptor rd = WGPU_RENDER_PIPELINE_DESCRIPTOR_INIT;
+  rd.layout = pl;
+  rd.vertex.module = module;
+  rd.vertex.entryPoint = um_sv("um_vs");
+  rd.primitive.topology = WGPUPrimitiveTopology_TriangleList;
+  rd.primitive.cullMode = WGPUCullMode_None;
+  rd.depthStencil = &depth;
+  rd.multisample.count = 1;
+  rd.multisample.mask = 0xFFFFFFFFu;
+  rd.fragment = &fragment;
+  p->pipeline = wgpuDeviceCreateRenderPipeline(um_dev, &rd);
+  wgpuPipelineLayoutRelease(pl);
+  wgpuShaderModuleRelease(module);
+  if (!p->pipeline) um_fail0("creating the render pipeline");
+  return p;
+}
+
+// 画像に描画のパスを1つ積む。pipe が NULL なら、埋めるだけ（何も描かない）。鍵を持って呼ぶ。
+static void um_render_pass_locked(um_image *im, um_rpipe *pipe, WGPUBindGroup bg, uint32_t count) {
+  WGPURenderPassColorAttachment ca = WGPU_RENDER_PASS_COLOR_ATTACHMENT_INIT;
+  ca.view = im->color_view;
+  ca.loadOp = im->drawn ? WGPULoadOp_Load : WGPULoadOp_Clear;
+  ca.storeOp = WGPUStoreOp_Store;
+  ca.clearValue.r = ((im->clear >> 16) & 255) / 255.0;
+  ca.clearValue.g = ((im->clear >> 8) & 255) / 255.0;
+  ca.clearValue.b = (im->clear & 255) / 255.0;
+  ca.clearValue.a = ((im->clear >> 24) & 255) / 255.0;
+  WGPURenderPassDepthStencilAttachment da = WGPU_RENDER_PASS_DEPTH_STENCIL_ATTACHMENT_INIT;
+  da.view = im->depth_view;
+  da.depthLoadOp = im->drawn ? WGPULoadOp_Load : WGPULoadOp_Clear;
+  da.depthStoreOp = WGPUStoreOp_Store;
+  da.depthClearValue = 1.0f;
+  WGPURenderPassDescriptor rp = WGPU_RENDER_PASS_DESCRIPTOR_INIT;
+  rp.colorAttachmentCount = 1;
+  rp.colorAttachments = &ca;
+  rp.depthStencilAttachment = &da;
+  if (!um_enc) um_enc = wgpuDeviceCreateCommandEncoder(um_dev, NULL);
+  WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(um_enc, &rp);
+  if (pipe) {
+    wgpuRenderPassEncoderSetPipeline(pass, pipe->pipeline);
+    wgpuRenderPassEncoderSetBindGroup(pass, 0, bg, 0, NULL);
+    if (count > 0) wgpuRenderPassEncoderDraw(pass, count, 1, 0, 0);
+  }
+  wgpuRenderPassEncoderEnd(pass);
+  wgpuRenderPassEncoderRelease(pass);
+  im->drawn = 1;
+}
+
+void um_gpu_draw(int32_t image, int32_t key, const char *src, int32_t src_len, int32_t count, const void *block, int32_t block_bytes,
+                 const uint64_t *table, int32_t nbufs) {
+  um_lock();
+  um_image *im = um_image_at(image, "gpu.draw");
+  um_rpipe *pipe = um_rpipeline_locked(key, src, src_len, nbufs);
+
+  // Buffer は dispatch と同じく、CPU だけが新しければ GPU へ送る（描画は読むだけなので、GPU の写しは新しいまま）。
+  WGPUBindGroupEntry entries[65];
+  for (int32_t i = 0; i < nbufs; i++) {
+    void *host = (void *)(uintptr_t)table[i * 4];
+    um_region *r = um_region_at((uintptr_t)host);
+    if (!r) um_render_panic("gpu.draw: a Buffer was not allocated for the GPU");
+    if (!r->gpu_valid || !um_lazy) um_upload_locked(r);
+    WGPUBindGroupEntry e = WGPU_BIND_GROUP_ENTRY_INIT;
+    e.binding = (uint32_t)i + 1;
+    e.buffer = r->gbuf;
+    e.size = r->used;
+    entries[i + 1] = e;
+  }
+  // 引数の塊: 頂点の数、0（row。um_z の元）、各 Buffer の長さ、値の引数（dispatch と同じ並び）。
+  uint64_t header = (uint64_t)(2 + nbufs) * 4;
+  uint64_t psize = (header + (uint64_t)block_bytes + 3) / 4 * 4;
+  WGPUBuffer params = um_make_buffer(psize, WGPUBufferUsage_Storage, 1);
+  unsigned char *pp = wgpuBufferGetMappedRange(params, 0, (size_t)psize);
+  if (!pp) um_fail0("mapping the argument buffer");
+  memset(pp, 0, (size_t)psize);
+  uint32_t words[2] = {(uint32_t)count, 0};
+  memcpy(pp, words, sizeof words);
+  for (int32_t i = 0; i < nbufs; i++) {
+    uint32_t len = (uint32_t)table[i * 4 + 1];
+    memcpy(pp + 8 + 4 * i, &len, 4);
+  }
+  if (block_bytes > 0) memcpy(pp + header, block, (size_t)block_bytes);
+  wgpuBufferUnmap(params);
+  WGPUBindGroupEntry pe = WGPU_BIND_GROUP_ENTRY_INIT;
+  pe.binding = 0;
+  pe.buffer = params;
+  pe.size = psize;
+  entries[0] = pe;
+  WGPUBindGroupDescriptor bd = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
+  bd.layout = pipe->layout;
+  bd.entryCount = (size_t)nbufs + 1;
+  bd.entries = entries;
+  WGPUBindGroup bg = wgpuDeviceCreateBindGroup(um_dev, &bd);
+
+  um_render_pass_locked(im, pipe, bg, (uint32_t)count);
+  wgpuBindGroupRelease(bg);
+  wgpuBufferRelease(params);
+  um_enc_count++;
+  if (um_trace) fprintf(stderr, "wgpu: draw %d vertices\n", (int)count);
+  um_unlock();
+}
+
+void um_gpu_image_end(int32_t image, uint32_t *pixels, size_t len) {
+  um_lock();
+  um_image *im = um_image_at(image, "gpu.endImage");
+  uint64_t n = (uint64_t)im->width * im->height;
+  if ((uint64_t)len < n) {
+    char msg[200];
+    snprintf(msg, sizeof msg, "gpu.endImage: the Buffer holds %llu elements but the image has %u x %u pixels",
+             (unsigned long long)len, im->width, im->height);
+    um_render_panic(msg);
+  }
+  if (!im->drawn) um_render_pass_locked(im, NULL, NULL, 0);
+
+  // テクスチャから読み戻し用のバッファへ写す（1行のバイト数は 256 の倍数）。
+  uint32_t row = (im->width * 4 + 255) / 256 * 256;
+  uint64_t bytes = (uint64_t)row * im->height;
+  WGPUBuffer staging = um_make_buffer(bytes, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst, 0);
+  if (!um_enc) um_enc = wgpuDeviceCreateCommandEncoder(um_dev, NULL);
+  WGPUTexelCopyTextureInfo from = WGPU_TEXEL_COPY_TEXTURE_INFO_INIT;
+  from.texture = im->color;
+  WGPUTexelCopyBufferInfo to = WGPU_TEXEL_COPY_BUFFER_INFO_INIT;
+  to.buffer = staging;
+  to.layout.bytesPerRow = row;
+  to.layout.rowsPerImage = im->height;
+  WGPUExtent3D size = {im->width, im->height, 1};
+  wgpuCommandEncoderCopyTextureToBuffer(um_enc, &from, &to, &size);
+  um_submit_locked();
+  _Atomic int done = 0;
+  WGPUBufferMapCallbackInfo ci = WGPU_BUFFER_MAP_CALLBACK_INFO_INIT;
+  ci.mode = WGPUCallbackMode_AllowProcessEvents;
+  ci.callback = um_on_mapped;
+  ci.userdata1 = (void *)&done;
+  wgpuBufferMapAsync(staging, WGPUMapMode_Read, 0, (size_t)bytes, ci);
+  um_wait_flag(&done);
+  const unsigned char *src = wgpuBufferGetConstMappedRange(staging, 0, (size_t)bytes);
+  if (!src) um_fail0("mapping a buffer");
+
+  // pixels が GPU と写し合う領域なら、ランタイムの別名に書き、CPU の写しを新しいとする。
+  um_region *r = um_region_at((uintptr_t)pixels);
+  unsigned char *dst = (unsigned char *)pixels;
+  if (r) {
+    if (!r->host_valid) um_readback_locked(r);  // 画像より後ろの要素を保つ
+    dst = r->alias;
+  }
+  for (uint32_t y = 0; y < im->height; y++) memcpy(dst + (size_t)y * im->width * 4, src + (size_t)y * row, (size_t)im->width * 4);
+  wgpuBufferUnmap(staging);
+  wgpuBufferRelease(staging);
+  if (r) {
+    r->host_valid = 1;
+    r->gpu_valid = 0;
+    um_reprotect(r);
+  }
+
+  wgpuTextureViewRelease(im->color_view);
+  wgpuTextureViewRelease(im->depth_view);
+  wgpuTextureRelease(im->color);
+  wgpuTextureRelease(im->depth);
+  im->used = 0;
+  um_unlock();
+}

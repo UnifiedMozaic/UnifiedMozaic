@@ -8,6 +8,8 @@
 | Linux | Vulkan |
 | macOS | Metal |
 
+三角形を GPU で塗る描画（`gpu.draw`。[描画](render.ja.md)）も、この経路で使えます。
+
 この経路は、Metal の経路（`UM_METAL=1`、Mac だけ。[言語ガイド](guide.ja.md)の「Metal（Mac）での GPU 実行」）と並ぶ、ネイティブの主な GPU の経路です。kernel の意味（範囲外の添字の切り詰め、ゼロ除算の決まった結果、浮動小数点の丸めなど）は CPU・Metal と同じで、同じ kernel は CPU と GPU で同じ結果になります（下の「CPU と GPU で同じ結果にするために」）。
 
 **確かめた環境:** Windows 11（NVIDIA GeForce RTX 5060 Ti、Vulkan と Direct3D 12）と、Linux（Ubuntu 24.04、ソフトウェアの Vulkan の lavapipe（Mesa 25.2、llvmpipe）。GPU のない環境で試すとき）、wgpu-native v29.0.1.1。`tests/metal` と `tests/wgpu` の全部が CPU と同じ結果になります。**macOS では未確認です**（コードはありますが、実行していません）。

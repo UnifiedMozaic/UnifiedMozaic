@@ -792,6 +792,164 @@ class Emitter {
     ].join('\n');
     return { source, buffers };
   }
+
+  /**
+   * vertex function と fragment function の組から、描画のシェーダ（@vertex um_vs と @fragment um_fs）を作る。
+   * 束縛は kernel と同じ形: binding 0 が UmParams（count = 頂点の数、row = 0、Buffer ごとの長さ、値の引数）、
+   * binding 1 からが Buffer。引数は vertex の引数（頂点の番号を除く）、fragment の引数（受け取る値を除く）の順。
+   * 名前がぶつからないよう、vertex の引数は v_、fragment の引数は f_ を付ける。
+   * 本体は普通の WGSL の関数（um_vs_body / um_fs_body）にし、入口が UM の struct と WGSL の組み込みの型を写し替える。
+   */
+  render(vs: FnDecl, fs: FnDecl): WgslKernel {
+    const buffers: WgslBuffer[] = [];
+    const paramFields = ['  count: u32,', '  row: u32,'];
+    const globals: string[] = [];
+    const stages = [{ d: vs, tag: 'v' }, { d: fs, tag: 'f' }];
+    for (const { d, tag } of stages) {
+      for (const p of d.params.slice(1)) {
+        const ty = p.ty!;
+        if (ty.k !== 'heap') continue;
+        const global = `b_${tag}_${p.name}`;
+        const binding = buffers.length + 1;
+        buffers.push({ name: `${tag}_${p.name}`, writable: false, elem: ty.elem });
+        paramFields.push(`  len_${tag}_${p.name}: u32,`);
+        globals.push(`@group(0) @binding(${binding}) var<storage, read> ${global}: array<${this.ty(ty.elem)}>;`);
+        this.bufs.set(p.sym!.id, { global, len: `um_params.len_${tag}_${p.name}` });
+      }
+    }
+    for (const { d, tag } of stages) {
+      for (const p of d.params.slice(1)) {
+        const ty = p.ty!;
+        if (ty.k === 'heap') continue;
+        paramFields.push(`  p_${tag}_${p.name}: ${ty.k === 'bool' ? 'u32' : this.ty(ty)},`);
+      }
+    }
+
+    // 本体を WGSL の関数にする。値の引数は UmParams から変数に写す。
+    const body = (d: FnDecl, tag: string, head: string, first: string): string[] => {
+      this.lines = [];
+      this.indent = 1;
+      if (first) this.line(`var ${this.name(d.params[0].sym!)}: ${this.ty(d.params[0].ty!)} = ${first};`);
+      for (const p of d.params.slice(1)) {
+        const ty = p.ty!;
+        if (ty.k === 'heap') continue;
+        const value = ty.k === 'bool' ? `(um_params.p_${tag}_${p.name} != 0u)` : `um_params.p_${tag}_${p.name}`;
+        this.line(`var ${this.name(p.sym!)}: ${this.ty(ty)} = ${value};`);
+      }
+      for (const st of d.body) this.stmt(st);
+      return [head, ...this.lines, '}', ''];
+    };
+    this.names.set(vs.params[0].sym!.id, 'um_i');
+    const out = vs.ret as Ty & { k: 'struct' };
+    const outTy = this.ty(out);
+    const color = this.ty(fs.ret!);
+    const vsText = body(vs, 'v', `fn um_vs_body(um_i: u32) -> ${outTy} {`, '');
+    const fsText = body(fs, 'f', `fn um_fs_body(a_in: ${outTy}) -> ${color} {`, 'a_in');
+
+    // 受け渡す値（varyings）。position は @builtin(position)、ほかは @location の順。整数は補間しない（flat）。
+    const info = this.prog.structs.get(out.name)!;
+    const wgslOf = (t: Ty): { ty: string; to: (x: string) => string; from: (x: string) => string; flat: boolean } => {
+      const v = vecInfo(this.prog, t);
+      if (v) {
+        const comps = ['x', 'y', 'z', 'w'].slice(0, v.n);
+        const ty = `vec${v.n}<${this.ty(v.elem)}>`;
+        return {
+          ty,
+          to: (x) => `${ty}(${comps.map((c) => `${x}.f_${c}`).join(', ')})`,
+          from: (x) => `${this.ty(t)}(${comps.map((c) => `${x}.${c}`).join(', ')})`,
+          flat: v.elem.k === 'int',
+        };
+      }
+      return { ty: this.ty(t), to: (x) => x, from: (x) => x, flat: t.k === 'int' };
+    };
+    const varyings: string[] = [];
+    const toVaryings: string[] = [];
+    const fromVaryings: string[] = [];
+    let loc = 0;
+    for (const f of info.fields) {
+      const w = wgslOf(f.ty);
+      const attr = f.name === 'position' ? '@builtin(position)' : `@location(${loc++})${w.flat ? ' @interpolate(flat)' : ''}`;
+      varyings.push(`  ${attr} f_${f.name}: ${w.ty},`);
+      toVaryings.push(`  r.f_${f.name} = ${w.to(`o.f_${f.name}`)};`);
+      fromVaryings.push(`  o.f_${f.name} = ${w.from(`v.f_${f.name}`)};`);
+    }
+    const colorOut = wgslOf(fs.ret!);
+    const setZ = this.uses.has('um_fmul') ? ['  um_z = um_params.row >> 30u;'] : [];
+
+    const source = [
+      `// UnifiedMozaic が vertex function '${vs.name}' と fragment function '${fs.name}' から生成した WGSL。手で編集しない。`,
+      '',
+      ...this.out,
+      'struct UmParams {',
+      ...paramFields,
+      '}',
+      '',
+      '@group(0) @binding(0) var<storage, read> um_params: UmParams;',
+      ...globals,
+      '',
+      'fn um_clamp(i: u32, len: u32) -> u32 {',
+      '  return min(i, max(len, 1u) - 1u);',
+      '}',
+      '',
+      'fn um_f2i(v: f32) -> i32 {',
+      '  let r: i32 = i32(clamp(v, -2147483648.0f, 2147483520.0f));',
+      '  let hi: i32 = select(r, 2147483647i, v >= 2147483648.0f);',
+      '  let lo: i32 = select(hi, -2147483647i - 1i, v <= -2147483648.0f);',
+      '  return select(lo, 0i, v != v);',
+      '}',
+      '',
+      'fn um_f2u(v: f32) -> u32 {',
+      '  let r: u32 = u32(clamp(v, 0.0f, 4294967040.0f));',
+      '  let hi: u32 = select(r, 4294967295u, v >= 4294967296.0f);',
+      '  let lo: u32 = select(hi, 0u, v <= 0.0f);',
+      '  return select(lo, 0u, v != v);',
+      '}',
+      '',
+      ...[...this.uses].filter((u) => HELPERS[u]).flatMap((u) => [...HELPERS[u], '']),
+      ...this.constDecls,
+      ...(this.constDecls.length > 0 ? [''] : []),
+      ...this.fnText,
+      ...vsText,
+      ...fsText,
+      'struct UmVaryings {',
+      ...varyings,
+      '}',
+      '',
+      '@vertex',
+      'fn um_vs(@builtin(vertex_index) um_vi: u32) -> UmVaryings {',
+      ...setZ,
+      '  let o = um_vs_body(um_vi);',
+      '  var r: UmVaryings;',
+      ...toVaryings,
+      '  return r;',
+      '}',
+      '',
+      '@fragment',
+      `fn um_fs(v: UmVaryings) -> @location(0) ${colorOut.ty} {`,
+      ...setZ,
+      `  var o: ${outTy};`,
+      ...fromVaryings,
+      `  return ${colorOut.to('um_fs_body(o)')};`,
+      '}',
+      '',
+    ].join('\n');
+    return { source, buffers };
+  }
+}
+
+/** vec2<T>〜vec4<T>（prelude の struct）なら、成分の数と型。 */
+function vecInfo(prog: Program, t: Ty): { n: number; elem: Ty } | null {
+  if (t.k !== 'struct') return null;
+  const m = /^vec([234])__(f32|i32|u32)$/.exec(t.name);
+  if (!m) return null;
+  const info = prog.structs.get(t.name);
+  if (!info) return null;
+  return { n: Number(m[1]), elem: info.fields[0].ty };
+}
+
+/** vertex function と fragment function の組から、描画のシェーダの WGSL を作る（Emitter.render）。 */
+export function emitWgslRender(prog: Program, vs: FnDecl, fs: FnDecl): WgslKernel {
+  return new Emitter(prog).render(vs, fs);
 }
 
 /** 補助関数の WGSL（Emitter.uses に入れた名前ごと）。 */

@@ -1,0 +1,10 @@
+// error: kernel-type
+struct Out {
+  pos: vec4<f32>;
+}
+vertex function vs(i: u32): Out {
+  return { pos: vec4(0.0 as f32, 0, 0, 1) };
+}
+export function main(): i32 {
+  return 0;
+}

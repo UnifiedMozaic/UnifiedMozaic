@@ -243,6 +243,13 @@ class Parser {
       // kernel の export は「他のファイルから import できる」という意味だけを持つ。
       return { ...this.fnDecl(pos, false), isKernel: true, importable: exported };
     }
+    // 描画のシェーダ。vertex / fragment は予約語ではなく、すぐ後ろに function があるときだけの印。
+    for (const stage of ['vertex', 'fragment'] as const) {
+      if (this.tok.kind === 'ident' && this.tok.text === stage && this.toks[this.i + 1]?.text === 'function') {
+        this.i += 2;
+        return { ...this.fnDecl(pos, false), isKernel: true, stage, importable: exported };
+      }
+    }
     if (this.eatK('function')) return { ...this.fnDecl(pos, exported), importable: exported };
     if (this.eatK('struct')) return { ...this.structDecl(pos), importable: exported };
     if (this.eatK('enum')) return { ...this.enumDecl(pos), importable: exported };

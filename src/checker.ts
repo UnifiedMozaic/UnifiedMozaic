@@ -1,4 +1,5 @@
 import { inferGpuLoad, isGpuLoadCall } from './gpuload.ts';
+import { inferRender, isRenderCall } from './render.ts';
 import { CompileError, CompileErrors } from './diag.ts';
 import type { Pos } from './diag.ts';
 import { displayNames, GROUP_COLLECTIVE, isAgg, isCollectiveLet, isNumeric, tyEq, tyStr } from './ast.ts';
@@ -1405,10 +1406,75 @@ class Checker {
     if (d.ret!.k !== 'void' && !this.isKernelValue(d.ret!)) {
       this.err('kernel-type', `return type ${tyStr(d.ret!)} is not available in a kernel function`, d.pos, hint);
     }
+    if (d.stage) return; // 描画のシェーダの決まりは、本体を検査するときに確かめる（checkStageSignature。struct のフィールドが決まってから）
     const first = d.params[0]?.ty;
     if (writes && !(first && first.k === 'int' && first.bits === 32 && !first.signed)) {
       this.err('kernel-restriction', `kernel '${d.name}' writes to a Buffer, so its first parameter must be the element index`, d.pos,
         'declare it as `i: u32`; the kernel may only write to `buf[i]`');
+    }
+  }
+
+  /**
+   * 描画のシェーダ（vertex function / fragment function。src/render.ts）の引数と戻り値の決まり:
+   *   vertex:   第1引数は頂点の番号（u32）。戻り値は `position: vec4<f32>` を持つ struct（受け渡す値）
+   *   fragment: 第1引数はその struct（補間された値。position は画素の座標と深度）。戻り値は色の vec4<f32>（0〜1）
+   * どちらも Buffer は読むだけ（`mut` なし）。Buffer の要素と値は WGSL の 32 ビットの型だけ。
+   * 受け渡す struct のフィールドは f32 / i32 / u32 か、それらの vec2〜vec4（整数は補間しない）。
+   */
+  checkStageSignature(d: FnDecl): void {
+    const what = `${d.stage} function '${d.name}'`;
+    // 型引数を埋めた struct の名前は vec4__f32 の形（tyStr では vec4<f32>）。
+    const vec4f = (t: Ty): boolean => t.k === 'struct' && t.name === 'vec4__f32';
+    const wide = (t: Ty): boolean => {
+      if (t.k === 'int') return t.bits !== 32;
+      if (t.k === 'float') return t.bits !== 32;
+      if (t.k === 'bool') return true;
+      if (t.k === 'array') return wide(t.elem);
+      if (t.k === 'struct') return (this.structs.get(t.name)?.fields ?? []).some((f) => wide(f.ty));
+      return false;
+    };
+    const varyingOk = (t: Ty): boolean => {
+      if ((t.k === 'int' || t.k === 'float') && t.bits === 32) return true;
+      if (t.k !== 'struct' || !/^vec[234]__(f32|i32|u32)$/.test(t.name)) return false;
+      return true;
+    };
+    const checkVaryings = (t: Ty, pos: Pos, role: string): void => {
+      const info = t.k === 'struct' ? this.structs.get(t.name) : undefined;
+      if (!info || info.isClass || !info.fields.some((f) => f.name === 'position' && vec4f(f.ty))) {
+        this.err('kernel-type', `${role} of ${what} must be a struct with a field \`position: vec4<f32>\``, pos,
+          'e.g. `struct VOut { position: vec4<f32>; color: vec3<f32>; }`; position is the clip-space position');
+      }
+      for (const f of info.fields) {
+        if (!varyingOk(f.ty)) {
+          this.err('kernel-type', `field '${f.name}' of ${tyStr(t)} has type ${tyStr(f.ty)}, which cannot be passed from the vertex to the fragment function`, pos,
+            'use f32, i32, u32, or vec2 / vec3 / vec4 of those');
+        }
+      }
+    };
+    d.params.forEach((p, i) => {
+      const ty = p.ty!;
+      if (p.mode === 'mut') {
+        this.err('kernel-restriction', `${what} cannot write to a Buffer (\`mut\`)`, p.pos, 'shaders only read Buffers; compute data with a kernel and `dispatch` before drawing');
+      }
+      if (i === 0) return;
+      if (ty.k === 'heap' && ty.racy) this.err('kernel-type', `${what} cannot take a RacyBuffer`, p.pos, 'pass a `Buffer<T>`');
+      const inner = ty.k === 'heap' ? ty.elem : ty;
+      if (wide(inner)) {
+        this.err('kernel-type', `parameter '${p.name}' of ${what} has type ${tyStr(ty)}, which a shader cannot use`, p.pos,
+          'shaders use 32-bit values only: i32, u32, f32, and structs / fixed-length arrays of those');
+      }
+    });
+    const first = d.params[0];
+    if (!first) {
+      this.err('kernel-type', `${what} needs a first parameter`, d.pos,
+        d.stage === 'vertex' ? 'the vertex index: `vertex function vs(i: u32, ...): VOut`' : 'the values from the vertex function: `fragment function fs(v: VOut, ...): vec4<f32>`');
+    }
+    if (d.stage === 'vertex') {
+      if (!tyEq(first.ty!, U32)) this.err('kernel-type', `the first parameter of ${what} must be the vertex index \`${first.name}: u32\``, first.pos);
+      checkVaryings(d.ret!, d.pos, 'the return type');
+    } else {
+      checkVaryings(first.ty!, first.pos, 'the first parameter');
+      if (!vec4f(d.ret!)) this.err('kernel-type', `${what} must return the color as vec4<f32> (red, green, blue, alpha from 0 to 1)`, d.pos);
     }
   }
 
@@ -1470,6 +1536,7 @@ class Checker {
     this.loops = [];
     this.movedAt = new Map();
     this.inKernel = !!d.isKernel;
+    if (d.stage) this.checkStageSignature(d);
     this.idxParam = null;
     if (d.cls) {
       // this は書き換え可能として検査し、実際に書き換えたかどうかを記録する（mutatesThis の推論）。
@@ -2718,7 +2785,8 @@ class Checker {
     }
 
     // gpu.loadKernel / gpu.runKernel（src/gpuload.ts）と gpu.available / gpu.prefer の検査済みの式をもう一度検査するときは、前の結果の型。
-    if ((e.callee === '__gpu_load' || e.callee === '__gpu_run' || e.callee === '__gpu_available' || e.callee === '__gpu_prefer') && e.ty) return e.ty;
+    if ((e.callee === '__gpu_load' || e.callee === '__gpu_run' || e.callee === '__gpu_available' || e.callee === '__gpu_prefer'
+      || e.callee === '__gpu_image_begin' || e.callee === '__gpu_draw' || e.callee === '__gpu_image_end') && e.ty) return e.ty;
     // 入出力の組み込み。検査済みの式（名前が `__io_...` になっている）をもう一度検査することもある。
     const io = e.callee.startsWith('__io_') ? e.callee.slice(5) : e.callee;
     if (IO_BUILTINS.has(io) && (io !== e.callee || (!this.fns.has(io) && !this.generics.has(io)))) return this.inferIo(e, io);
@@ -2729,6 +2797,10 @@ class Checker {
     if (!sig) {
       const hint = this.structs.get(e.callee)?.isClass ? `write \`new ${e.callee}(...)\`` : undefined;
       this.err('unknown-name', `unknown function '${e.callee}'`, e.pos, hint);
+    }
+    if (sig.decl.stage) {
+      this.err('kernel-restriction', `'${sig.name}' is a ${sig.decl.stage} function, so it can only be used in \`gpu.draw\``, e.pos,
+        'e.g. `gpu.draw(image, vertexCount, vs(...), fs(...))`; share code through a `kernel function` that both can call');
     }
     if (this.inKernel) {
       if (!sig.decl.isKernel) {
@@ -3109,7 +3181,7 @@ class Checker {
     const k = args[0].expr;
     if (k.kind === 'ident' && this.fns.has(k.name)) this.visible(k.name, k.pos);
     const sig = k.kind === 'ident' ? this.fns.get(k.name) : undefined;
-    if (args[0].mode !== 'none' || !sig || !sig.decl.isKernel) {
+    if (args[0].mode !== 'none' || !sig || !sig.decl.isKernel || sig.decl.stage) {
       this.err('type-mismatch', 'the first argument of `dispatch` must be the name of a kernel function', k.pos,
         'declare it as `kernel function name(i: u32, ...): void`');
     }
@@ -3660,6 +3732,8 @@ class Checker {
     }
     // `gpu.loadKernel(wgsl)` / `gpu.runKernel(k, count, ...)`: 実行時に読み込む kernel（src/gpuload.ts）。
     if (isGpuLoadCall(e, (n) => this.lookup(n))) return inferGpuLoad(this, e);
+    // `gpu.beginImage` / `gpu.draw` / `gpu.endImage`: 描画（src/render.ts）。
+    if (isRenderCall(e, (n) => this.lookup(n))) return inferRender(this, e);
     if (this.isThreadCall(e)) return this.inferThread(e);
     // `Shape.Circle(1.5)`: enum の値を作る。
     if (e.recv.kind === 'ident' && !this.lookup(e.recv.name) && this.isEnumName(e.recv.name)) {

@@ -1,0 +1,10 @@
+// error: kernel-restriction
+struct VOut {
+  position: vec4<f32>;
+}
+fragment function fs(v: VOut, out: mut Buffer<f32>): vec4<f32> {
+  return v.position;
+}
+export function main(): i32 {
+  return 0;
+}
