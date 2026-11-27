@@ -1,0 +1,35 @@
+// 浮動小数点の剰余（%）。結果は C の fmod と同じく正確で、符号は割られる数と同じ。
+// wasm32 では LLVM が fmod / fmodf を呼ぶので、ランタイム（runtime/wasm_rt.c）が提供する。
+// expect: 1.5
+// expect: 1.5
+// expect: -1.5
+// expect: -1.5
+// expect: 0
+// expect: NaN
+// expect: 0.010000000000000009
+// expect: 0.01000000350177288
+// expect: 5e-324
+// expect: NaN
+// expect: 0
+// expect: 0
+// expect: 4.764084535494021
+// expect: 4.760711669921875
+// expect: NaN
+// expect: NaN
+
+export function main(): i32 {
+  let xs = new Array<f64>(0);
+  xs.push(7.5); xs.push(-7.5); xs.push(1e300); xs.push(0.1); xs.push(5e-324); xs.push(-0.0); xs.push(123456.789);
+  let ys = new Array<f64>(0);
+  ys.push(2.0); ys.push(2.0); ys.push(3.0); ys.push(0.03); ys.push(1e-320); ys.push(1.0); ys.push(6.283185307179586);
+  for (let i: usize = 0; i < xs.length; i++) {
+    print(xs[i] % ys[i]);
+    const a = xs[i] as f32;
+    const b = ys[i] as f32;
+    print(a % b);
+  }
+  let z = new Array<f64>(0); z.push(0.0);
+  print(z[0] / z[0] % 1.0);
+  print(1.0 % z[0]);
+  return 0;
+}

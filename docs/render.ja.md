@@ -2,14 +2,15 @@
 
 三角形を塗る描画です。シェーダは UM で書きます。GPU が使えるときは GPU の三角形のラスタライザ（WebGPU の render pipeline）で、使えないときは CPU のラスタライザで、同じプログラムが同じ絵を描きます（kernel の `dispatch` と同じ考え方）。
 
-**いまできること:** 画面なしの画像に描いて画素を `Buffer<u32>` に読み戻す（`gpu.beginImage`）。ウィンドウに描く（`gpu.beginFrame`。ネイティブ）。
+**いまできること:** 画面なしの画像に描いて画素を `Buffer<u32>` に読み戻す（`gpu.beginImage`）。ウィンドウに描く（`gpu.beginFrame`。ネイティブとブラウザ）。
 
 | ビルド | 描く場所 |
 | --- | --- |
 | ネイティブ（`UM_WGPU=1`。[wgpu での GPU 実行](wgpu.ja.md)） | GPU。GPU が使えなければ CPU |
-| ネイティブ（`UM_WGPU=1` なし）、wasm32、Metal（`UM_METAL=1`） | CPU |
+| ブラウザ（wasm32。[ブラウザで動かす](web.ja.md)） | WebGPU。WebGPU がなければ CPU |
+| ネイティブ（`UM_WGPU=1` なし）、Metal（`UM_METAL=1`）、Node で動かす wasm32 | CPU |
 
-**これから:** ブラウザ（wasm32 と WebGPU）でウィンドウ（canvas）に描く、インデックスとインスタンス、テクスチャ、裏面を描かない設定・半透明の合成など。
+**これから:** インデックスとインスタンス、テクスチャ、裏面を描かない設定・半透明の合成など。
 
 ## 例
 

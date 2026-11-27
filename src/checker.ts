@@ -3051,10 +3051,7 @@ class Checker {
     // wasm.um の中の呼び出しは報告しない（wasm.um の関数を呼んだ所で報告する。下の wasmOnly）。
     if (name.startsWith('wasm') && this.ptrBits === 32 && e.pos.file !== 'wasm.um') this.wasmOnly(name, e.pos);
     if (name.startsWith('media') && this.ptrBits === 32 && e.pos.file !== 'media.um') this.mediaOnly(name, e.pos);
-    if ((name.startsWith('window') || name.startsWith('audio')) && this.ptrBits === 32) {
-      this.err('not-implemented', `\`${name}\` is only available in native programs`, e.pos,
-        'windows and audio need a desktop OS; build with `--target host` (the wasm32 target has no window)');
-    }
+    // ウィンドウは wasm32 でも使える（ブラウザの canvas。runtime/host.mjs）。音の出力はまだない（audioOpen は null）。
     const shape = shapes[name];
     const decl: FnDecl = { kind: 'fn', name, exported: false, params: [], body: [], pos: e.pos };
     const sig: FnSig = { key: name, name, params: shape.params.map(([n, ty], i) => ({ name: n, mode: (shape.mut?.includes(i) ? 'mut' : 'none') as Mode, ty })), ret: shape.ret, exported: false, decl };

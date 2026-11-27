@@ -1,0 +1,44 @@
+<!doctype html>
+<!-- UnifiedMozaic のプログラムをブラウザで動かすページ（um build x.um --web が書き出す。docs/web.ja.md）。 -->
+<!-- 同じフォルダに app.wasm、host.mjs、web.mjs を置き、HTTP で開く（file:// では wasm を読み込めない）。 -->
+<!-- URL の ?args=a,b でプログラムの args() に渡す引数を、?gpu=0 で WebGPU を使わないことを指定できる。 -->
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UnifiedMozaic</title>
+<style>
+  html, body { margin: 0; background: #111; color: #ddd; font: 14px/1.5 system-ui, sans-serif; }
+  #screen { display: block; margin: 16px auto; max-width: calc(100vw - 32px); }
+  #out, #err { margin: 0 16px; white-space: pre-wrap; font-family: ui-monospace, monospace; }
+  #err { color: #f88; }
+</style>
+</head>
+<body>
+<canvas id="screen"></canvas>
+<pre id="out"></pre>
+<pre id="err"></pre>
+<script type="module">
+  import { instantiate, UmPanic } from './host.mjs';
+  const out = document.getElementById('out');
+  const err = document.getElementById('err');
+  const params = new URLSearchParams(location.search);
+  const write = (s) => { out.textContent += s + '\n'; console.log(s); };
+  try {
+    const bytes = await (await fetch('app.wasm')).arrayBuffer();
+    const exports = await instantiate(bytes, {
+      print: write,
+      eprint: (s) => { err.textContent += s + '\n'; console.error(s); },
+      canvas: document.getElementById('screen'),
+      args: params.get('args') ? params.get('args').split(',') : [],
+      gpu: params.get('gpu') !== '0',
+    });
+    const code = await exports.main();
+    document.body.dataset.exit = String(code);
+  } catch (e) {
+    err.textContent += (e instanceof UmPanic ? e.message : String(e?.stack ?? e)) + '\n';
+    document.body.dataset.exit = 'error';
+  }
+</script>
+</body>
+</html>

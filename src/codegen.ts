@@ -1694,6 +1694,9 @@ class ModuleGen {
       // GPU（WebGPU）での実行。実装は runtime/host.mjs。
       imports.push('i32 um_gpu_available()', 'i32 um_gpu_pick(i32, i32)', 'void um_gpu_dispatch(i32, ptr, i32, i32, ptr, i32, ptr, i32)');
       imports.push('void um_gpu_group(i32)');
+      // 描画（runtime/web.mjs の RenderRunner）。
+      imports.push('i32 um_gpu_image_begin(i32, i32, i32)', 'void um_gpu_draw(i32, i32, ptr, i32, i32, ptr, i32, ptr, i32)', `void um_gpu_image_end(i32, ptr, ${this.usz})`);
+      imports.push('i32 um_gpu_frame_begin(i32, ptr, i32, i32, i32, i32)', 'void um_gpu_frame_end(i32)');
     }
     if (this.gpu === 'wgpu') {
       // wgpu-native での実行。実装は runtime/wgpu.c。GPU を使う呼び出しがなければ宣言せず（ドライバは wgpu をリンクしない）、
@@ -4778,7 +4781,7 @@ class FnGen {
    * dispatch と同じ形（gpuArgs）にして渡す。WGSL の束縛の並び（wgsl.ts の render）と同じ。
    */
   renderCall(e: Expr & { kind: 'call' }): string {
-    if (this.m.gpu !== 'wgpu') {
+    if (this.m.gpu !== 'wgpu' && this.m.gpu !== 'webgpu') {
       // GPU の描画の経路がないビルド。画像とフレームはいつも CPU に用意する（番号 0）ので、draw と end は呼ばれない。
       if (e.callee === '__gpu_image_begin' || e.callee === '__gpu_frame_begin') {
         for (const a of e.args) this.expr(a.expr);
@@ -4786,7 +4789,7 @@ class FnGen {
       }
       return '';
     }
-    this.m.usesGpuRuntime = true;
+    if (this.m.gpu === 'wgpu') this.m.usesGpuRuntime = true;
     if (e.callee === '__gpu_image_begin') {
       const [w, h, c] = e.args.map((a) => this.expr(a.expr));
       const r = this.tmp();
@@ -4795,10 +4798,12 @@ class FnGen {
     }
     if (e.callee === '__gpu_frame_begin') {
       // ウィンドウの OS の情報を取る関数（runtime/window.c の um_window_native）の場所を渡す。GPU が使えるときだけ呼ばれる。
-      this.m.usesWindow = true;
+      // ブラウザ（webgpu）では canvas を直接使うので渡さない。
+      const native = this.m.gpu === 'wgpu' ? '@um_window_native' : 'null';
+      if (this.m.gpu === 'wgpu') this.m.usesWindow = true;
       const [win, w, h, c] = e.args.map((a) => this.expr(a.expr));
       const r = this.tmp();
-      this.emit(`${r} = call i32 @um_gpu_frame_begin(i32 ${win}, ptr @um_window_native, i32 ${w}, i32 ${h}, i32 ${c}, i32 ${e.pos.line})`);
+      this.emit(`${r} = call i32 @um_gpu_frame_begin(i32 ${win}, ptr ${native}, i32 ${w}, i32 ${h}, i32 ${c}, i32 ${e.pos.line})`);
       return r;
     }
     if (e.callee === '__gpu_frame_end') {

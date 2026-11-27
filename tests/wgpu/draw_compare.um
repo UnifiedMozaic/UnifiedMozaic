@@ -1,8 +1,10 @@
 // 同じ場面を GPU と CPU のラスタライザで描き、画素を比べる。
 //   - 透視投影の立方体（6 面、色は頂点ごとに違い、三角形の中で遠近を考えて補間する）
 //   - カメラの近くを横切る大きな三角形（近い面で切られる）
-// GPU は頂点の位置を画素の細かい格子（ふつう 1/256 画素）に丸めるので、辺のすぐ近くの画素だけは結果が分かれうる。
-// 出力: 分かれた画素が全体の 1% 未満か、両方が塗った画素の色の差が 1 / 255 × 3 以下か、塗られた画素の数が近いか。
+// GPU は頂点の位置を画素の細かい格子（ふつう 1/256 画素）に丸めるので、辺のすぐ近くの画素だけは結果が分かれうる
+// （塗るかどうか、2 つの面が接する辺ならどちらの面の色か。lavapipe では一致し、SwiftShader では数画素が分かれた）。
+// 出力: 塗るかどうかが分かれた画素が全体の 1% 未満か、両方が塗って色が 3 / 255 より違う画素が 0.5% 未満か、
+//       塗られた画素の数が近いか。
 // cpu-build
 // expect: true
 // expect: true
@@ -81,6 +83,7 @@ export function main(): i32 {
 
   let split: u32 = 0;
   let worst: u32 = 0;
+  let differ: u32 = 0;
   let gn: u32 = 0;
   let cn: u32 = 0;
   for (let i: u32 = 0; i < (w * h) as u32; i++) {
@@ -97,11 +100,14 @@ export function main(): i32 {
     } else {
       const d = Math.max(channelDiff(a, b, 16), Math.max(channelDiff(a, b, 8), channelDiff(a, b, 0)));
       worst = Math.max(worst, d);
+      if (d > 3) {
+        differ++;
+      }
     }
   }
   print(split * 100 < (w * h) as u32);
-  print(worst <= 3);
+  print(differ * 200 < gn);
   print(gn > 3000 && (gn > cn ? gn - cn : cn - gn) * 100 < gn);
-  eprint(`split ${split}, worst ${worst}, painted gpu ${gn} cpu ${cn}`);
+  eprint(`split ${split}, differ ${differ}, worst ${worst}, painted gpu ${gn} cpu ${cn}`);
   return 0;
 }

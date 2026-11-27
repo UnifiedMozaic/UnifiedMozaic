@@ -52,6 +52,7 @@
 //       UM_TEST_SKIP='threads/handoff' node tests/run.ts
 
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -1465,6 +1466,64 @@ if (!ffmpegAvailable()) {
     } catch (e) {
       fail(`${f} [host]`, String(e));
     }
+  }
+}
+
+// ブラウザ（docs/web.ja.md）。Playwright（とその Chromium）があれば、`build --web` の形でブラウザで開き、
+// 画面の下の出力を `// expect:` と照合する。`// web-query: ?…` は URL の後ろに付ける（?gpu=0 で WebGPU を使わない、?args=…）。
+// tests/web/*.um と、描画のテスト（tests/wgpu/draw*.um）を WebGPU あり（SwiftShader）となしで開く。
+{
+  let pw: { chromium: { launch(o: unknown): Promise<any> } } | null = null;
+  try {
+    pw = createRequire(import.meta.url)('playwright');
+  } catch {
+    console.log('note: Playwright が見つからないため、ブラウザのテスト（tests/web）は省略します');
+  }
+  if (pw) {
+    const { createServer } = await import('node:http');
+    const types: Record<string, string> = { '.html': 'text/html', '.mjs': 'text/javascript', '.wasm': 'application/wasm' };
+    const webRoot = join(tmp, 'web');
+    mkdirSync(webRoot);
+    const server = createServer((req, res) => {
+      const path = join(webRoot, decodeURIComponent((req.url ?? '/').split('?')[0]));
+      if (!path.startsWith(webRoot) || !existsSync(path)) {
+        res.writeHead(404).end();
+        return;
+      }
+      res.writeHead(200, { 'content-type': types[path.slice(path.lastIndexOf('.'))] ?? 'application/octet-stream' }).end(readFileSync(path));
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as { port: number }).port;
+    const browser = await pw.chromium.launch({ args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-vulkan=swiftshader', '--use-webgpu-adapter=swiftshader'] });
+    const cases: [string, string][] = [];
+    for (const f of files('tests/web')) cases.push([f, directives(readFileSync(join(root, f), 'utf8'), 'web-query')[0] ?? '']);
+    for (const f of files('tests/wgpu').filter((x) => /\/draw/.test(x))) cases.push([f, ''], [f, '?gpu=0']);
+    for (const [f, query] of cases) {
+      const label = `${f} [web${query.includes('gpu=0') ? ', no GPU' : ''}]`;
+      try {
+        const src = readFileSync(join(root, f), 'utf8');
+        const want = directives(src, 'expect');
+        const dir = join(webRoot, f.replace(/[^a-z0-9]/gi, '_'));
+        mkdirSync(dir, { recursive: true });
+        build(compileToLL(src, 'wasm32', false, join(root, f)), 'wasm32', join(dir, 'app.wasm'));
+        for (const name of ['host.mjs', 'web.mjs']) writeFileSync(join(dir, name), readFileSync(join(root, 'runtime', name)));
+        writeFileSync(join(dir, 'index.html'), readFileSync(join(root, 'runtime', 'web', 'index.html')));
+        const page = await browser.newPage();
+        await page.goto(`http://127.0.0.1:${port}/${dir.slice(webRoot.length + 1)}/index.html${query}`);
+        await page.waitForFunction(() => (globalThis as any).document.body.dataset.exit !== undefined, null, { timeout: 120000 });
+        const exit = await page.evaluate(() => (globalThis as any).document.body.dataset.exit);
+        const out = String(await page.evaluate(() => (globalThis as any).document.getElementById('out').textContent)).split('\n').filter((l) => l !== '');
+        const errText = String(await page.evaluate(() => (globalThis as any).document.getElementById('err').textContent)).trim();
+        await page.close();
+        if (exit !== '0') fail(label, `exit ${exit}: ${out.join(' | ')}\n${errText}`);
+        else if (same(out, want)) ok(label);
+        else fail(label, `expected: ${want.join(' | ')}\nactual:   ${out.join(' | ')}`);
+      } catch (e) {
+        fail(label, String(e));
+      }
+    }
+    await browser.close();
+    server.close();
   }
 }
 

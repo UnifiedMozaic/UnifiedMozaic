@@ -11,6 +11,8 @@
 //   - WebGPU では CPU と GPU のメモリが別なので、dispatch のたびに Buffer を送り、
 //     書き込み先の Buffer を読み戻す。
 
+import { RenderRunner, windowHost } from './web.mjs';
+
 // 原因コードは src/codegen.ts の PANIC_* と揃えること。
 const PANIC_MESSAGES = {
   1: 'index out of bounds',
@@ -23,6 +25,8 @@ const PANIC_MESSAGES = {
   8: 'could not start a thread',
   9: 'readLine and inputReady can only be called from the main thread',
   10: 'invalid group size (it must be 1 to 1024, and groups times size must fit in u32)',
+  11: 'window functions must be called from the main thread',
+  12: 'invalid window call (an unknown window, a bad size or Buffer length, or an unknown operation)',
   16: 'invalid file call (an unknown or closed file, an unknown open mode, or a range outside the array)',
 };
 
@@ -693,11 +697,40 @@ export async function instantiate(bytes, options = {}) {
       : () => {
           throw new UmPanic(7, 0);
         },
+    // 描画（docs/render.ja.md）。WebGPU がなければ画像とフレームの番号は 0（CPU で描く）なので、ほかの口は呼ばれない。
+    um_gpu_image_begin: (w, h, clear) => (render ? render.imageBegin(w, h, clear) : 0),
+    um_gpu_draw: (...args) => render.draw(...args),
+    um_gpu_image_end: device ? new WebAssembly.Suspending((h, ptr, len) => render.imageEnd(h, ptr, len)) : () => {},
+    um_gpu_frame_begin: (win, _native, w, h, clear) => (render ? render.frameBegin(win, w, h, clear) : 0),
+    um_gpu_frame_end: device ? new WebAssembly.Suspending((h) => render.frameEnd(h, windows.nextFrame)) : () => {},
   };
 
-  const { instance } = await WebAssembly.instantiate(bytes, { env });
-  if (!device) return instance.exports;
+  // ウィンドウ（canvas。runtime/web.mjs）。表示と待つイベントは JSPI で wasm を一時停止する。
+  // JSPI のない環境では待たずに戻る（ループの中で画面が更新されないので、ウィンドウのプログラムには JSPI が要る）。
+  const windows = windowHost(options, () => instance.exports.memory.buffer, prepare, UmPanic);
+  const suspend = (f, otherwise) => (jspi ? new WebAssembly.Suspending(f) : (...a) => {
+    const r = f(...a);
+    return r && typeof r.then === 'function' ? otherwise : r;
+  });
+  Object.assign(env, windows.env, {
+    um_host_window_poll: suspend(windows.env.um_host_window_poll, 0),
+    um_host_window_present: suspend(windows.env.um_host_window_present, undefined),
+    um_host_window_ctl: suspend(windows.env.um_host_window_ctl, 0n),
+  });
 
+  const module = await WebAssembly.compile(bytes);
+  const usesWindow = WebAssembly.Module.imports(module).some((i) => i.name === 'um_host_window_open');
+  let render = null;
+  const instance = await WebAssembly.instantiate(module, { env });
+  if (!device && !(jspi && usesWindow)) return instance.exports;
+
+  // 一時停止できるよう、export された関数は Promise を返す形に包む。
+  if (!device) {
+    const exports = {};
+    for (const [name, value] of Object.entries(instance.exports)) exports[name] = typeof value === 'function' ? WebAssembly.promising(value) : value;
+    return exports;
+  }
+  render = new RenderRunner(device, instance.exports.memory, windows.windows);
   runner = new GpuRunner(device, instance.exports.memory);
   const exports = { um_gpu: { available: true, dispatches: () => runner.dispatches } };
   for (const [name, value] of Object.entries(instance.exports)) {
