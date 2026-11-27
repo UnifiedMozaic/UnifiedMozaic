@@ -12,6 +12,9 @@
 // expect: こんにちは
 // expect: done
 
+import { httpStart, httpState, httpStatus, httpRead, httpHeaders, httpWait, httpClose } from "um:http";
+
+
 function all(id: i64): string {
   let body = "";
   let st = 0;

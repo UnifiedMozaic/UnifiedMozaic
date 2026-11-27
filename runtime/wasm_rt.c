@@ -685,10 +685,10 @@ long long um_window_set_text(int op, int id, long long a, const char *text, size
 void um_window_get_text(int op, int id, long long a, unsigned char **out, size_t *len, int line) {
   take_pending(um_host_window_get_text(op, id, a, line), out, len);
 }
-// 音の出力はまだない（audioOpen は null になる。window.um の audioOpen は windowCtl の 100 番台で開く）。
+// 音の出力（Web Audio。開く・問い合わせなどは windowCtl の 100 番台で、ホストの um_host_window_ctl が受ける）。
+WIMPORT(um_host_audio_write) int um_host_audio_write(int stream, const float *samples, size_t len, long long start, long long count, int line);
 int um_audio_write(int stream, const float *samples, size_t len, long long start, long long count, int line) {
-  (void)stream, (void)samples, (void)len, (void)start, (void)count, (void)line;
-  return 0;
+  return um_host_audio_write(stream, samples, len, start, count, line);
 }
 // GPU で描くウィンドウの OS の情報（ネイティブだけ。ブラウザの GPU は canvas を直接使うので呼ばれない）。
 int um_window_native(int id, void *out, int line) {

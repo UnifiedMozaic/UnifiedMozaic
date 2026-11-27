@@ -1,5 +1,7 @@
 // windowSetIcon: 画素が幅 × 高さより短ければ停止する。
-// panic: invalid window call (unknown window, a size that is not positive, or a Buffer that is too short) (line 11)
+// panic: invalid window call (unknown window, a size that is not positive, or a Buffer that is too short) (line 13)
+
+import * from "um:window";
 
 export function main(): i32 {
   const opened = windowOpen("icon", 64, 64);

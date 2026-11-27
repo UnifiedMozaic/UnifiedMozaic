@@ -5,6 +5,8 @@
 （libavformat / libavcodec / libavutil / libswscale / libswresample）で、macOS・Windows・Linux で同じコードが動きます。
 wasm32 では使えません（コンパイルエラー `not-implemented`）。
 
+`import { mediaOpenVideo, mediaFrame } from "um:media";` のように、ライブラリ `um:media` から読み込んで使います（[ライブラリ](libraries.ja.md)）。
+
 動画編集ソフトのように、素材を事前に別の形式へ展開せず、プログラムの中でその場で展開・シーク・圧縮するためのものです。
 特定のアプリのためのものではなく、UM の汎用の機能です。
 
@@ -58,6 +60,7 @@ FFmpeg のライブラリか ffmpeg のコマンドが見つからなければ�
 ## 読む
 
 ```ts
+import { mediaOpenVideo, mediaInfoOf } from "um:media";
 match (mediaOpenVideo("clip.mp4", "auto")) {           // Result<i64, string>（読み手の番号）
   Result.Err(why) => { eprint(why); }
   Result.Ok(r) => {
@@ -334,7 +337,7 @@ NVIDIA GeForce RTX 5060 Ti、FFmpeg 9.0（BtbN の lgpl-shared）。素材は 19
 
 ## 組み込み関数（低水準）
 
-`runtime/media.um` の関数は、次の組み込み関数（`runtime/media.c`）を使って書いてあります。ふつうは上の関数を使ってください。
+`lib/media.um` の関数は、次の組み込み関数（`runtime/media.c`）を使って書いてあります。ふつうは上の関数を使ってください。
 
 | 関数 | 説明 |
 | --- | --- |

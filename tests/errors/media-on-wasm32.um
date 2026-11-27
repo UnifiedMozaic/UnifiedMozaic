@@ -1,5 +1,8 @@
 // error: not-implemented
 // 動画・音声の関数は wasm32 では使えない（FFmpeg をリンクするネイティブだけ）。
+
+import { mediaProbe } from "um:media";
+
 export function main(): i32 {
   match (mediaProbe("clip.mp4")) {
     Result.Ok(i) => print(`${i.width}`),

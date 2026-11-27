@@ -26,6 +26,8 @@
 // expect: state ok
 // expect: bad display null ok
 
+import * from "um:window";
+
 // 条件が成り立てば「label ok」、成り立たなければ「label bad」。
 function check(cond: bool, label: string): void {
   if (cond) {
@@ -80,12 +82,12 @@ export function main(): i32 {
   print(`text area ${windowSetTextInputArea(win, 10, 10, 200, 24, 30)}`);
 
   // 試験用の操作（windowSetText の 90 番）でイベントを積む。
-  windowSetText(90, win, 11, "");
-  windowSetText(90, win, 12, "C:\\動画\\a.mp4");
-  windowSetText(90, win, 13, "hello");
-  windowSetText(90, win, 15, "");
-  windowSetText(90, win, 16, "へんかん");
-  windowSetText(90, win, 26, "file.save");
+  windowTestEvent(win, 11, "");
+  windowTestEvent(win, 12, "C:\\動画\\a.mp4");
+  windowTestEvent(win, 13, "hello");
+  windowTestEvent(win, 15, "");
+  windowTestEvent(win, 16, "へんかん");
+  windowTestEvent(win, 26, "file.save");
   let seen = 0;
   while (seen < 6) {
     const e = pollWindowEvent(100);

@@ -5,6 +5,8 @@
 // expect: corner 4278190335
 // expect: 3
 
+import * from "um:window";
+
 struct VOut {
   position: vec4<f32>;
 }
@@ -28,7 +30,7 @@ export function main(): i32 {
   const win = opened;
   let frames: i32 = 0;
   for (let k = 0; k < 3; k++) {
-    let frame = gpu.beginFrame(win, 0xFF0000FF);
+    let frame = gpu.beginFrame(windowSurface(win), 0xFF0000FF);
     if (k == 0) {
       const size = windowPixelSize(win);
       if (frame.width == size.width && frame.height == size.height) {

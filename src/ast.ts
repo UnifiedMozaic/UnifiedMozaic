@@ -249,6 +249,8 @@ export type Decl = FnDecl | StructDecl | ClassDecl | InterfaceDecl | ConstDecl;
 
 export interface Import {
   names: { name: string; pos: Pos }[];
+  /** `import * from "…";`: 相手が export するすべての名前（ライブラリなら組み込みの関数も）。 */
+  all?: boolean;
   path: string;
   pos: Pos;
 }
@@ -258,6 +260,8 @@ export interface Module {
   imports?: Import[];
   /** 複数のファイルをまとめたとき: ファイル番号 → そのファイルが import した名前。 */
   importedNames?: Map<number, Set<string>>;
+  /** ライブラリ（lib/*.um）が export する名前 → ライブラリの名前。読み込んでいない名前を使ったときのヒントに使う。 */
+  libNames?: Map<string, string>;
 }
 
 /** simdgroup の集計（`group.simdSum(x)` など）。barrier と同じく、グループの全スレッドが通る場所に置く集団の操作。 */

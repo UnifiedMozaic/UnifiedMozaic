@@ -4,6 +4,9 @@
 //   順に読む: Yuv420p8（変換が最も少ない）、Argb32、RgbaF32 の素材の大きさ、Argb32 の 960x540（プレビュー）
 //   シーク: 飛び飛びの時刻（キーフレームから遠い場所を含む）、1 コマずつ後ろへ（mediaFrame で時刻を進める）、1 コマずつ前へ
 
+import { MediaPixels, MediaRead, mediaOpenVideo, mediaProbe, mediaFrame, mediaNextFrame, mediaClose, mediaInfoOf } from "um:media";
+
+
 function sequential(path: string, hw: string, label: string, pixels: MediaPixels, w: i32, h: i32, count: i32): void {
   match (mediaOpenVideo(path, hw)) {
     Result.Err(why) => { print(why); }

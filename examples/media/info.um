@@ -6,6 +6,9 @@
 // expect: pixels: yuv420p, 8 bit, rotation 0, sample aspect 1:1
 // expect: audio: aac 44100 Hz, 2 channels (stereo)
 
+import { mediaProbe, mediaVersion } from "um:media";
+
+
 export function main(): i32 {
   let path = "clip.mp4";
   const a = args();

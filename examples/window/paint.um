@@ -3,6 +3,8 @@
 //   node src/cli.ts build examples/window/paint.um --target host -o paint && ./paint
 // 引数に数を渡すと、そのフレーム数だけ描いて終わる（テスト用。SDL_VIDEO_DRIVER=offscreen と一緒に使う）。
 
+import * from "um:window";
+
 const WIDTH: i32 = 640;
 const HEIGHT: i32 = 400;
 const BOX: i32 = 80;

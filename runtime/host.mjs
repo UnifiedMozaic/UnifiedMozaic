@@ -232,6 +232,7 @@ class GpuRunner {
  *   readLine?: () => string | Uint8Array | null,
  *   inputReady?: () => boolean,
  *   readFile?: (path: string) => Uint8Array | null,
+ *   readFileAsync?: (path: string) => Promise<Uint8Array | null>,
  *   writeFile?: (path: string, bytes: Uint8Array) => boolean,
  *   fileSize?: (path: string) => number | bigint | null,
  *   readFileRange?: (path: string, offset: number, length: number) => Uint8Array | null,
@@ -265,6 +266,8 @@ class GpuRunner {
  *     （readLine の口は待たずに返すもので、それもなければ入力は終わっているため）。
  *   readFile / writeFile: プログラムの readFile() / writeFile() の実体。渡さなければ、ファイルは読めず（null）、書けない（false）。
  *     名前は UTF-8 として文字列にして渡す（0 のバイトを含む名前と、UTF-8 として読めない名前は、口を呼ばずに失敗にする）。
+ *   readFileAsync: readFile の代わりに、Promise を返す口（ブラウザの fetch など）。JSPI で wasm を一時停止して待つので、
+ *     プログラムからは readFile() のまま使える（export された関数は Promise を返す形になる）。readFile より先に使う。
  *   fileSize / readFileRange / appendFile: プログラムの fileSize() / readFileRange() / appendFile() の実体。
  *     渡さなければ readFile（と writeFile）の口で代わりに行う（ファイル全体を読むので遅い）。どちらもなければ失敗（null / false）。
  *     readFileRange が length より長いデータを返したときは、length バイトに切り詰める。
@@ -396,7 +399,13 @@ export async function instantiate(bytes, options = {}) {
     um_host_clock: () => (globalThis.performance.now() - origin) / 1000,
     um_host_read_file: (ptr, len) => {
       const path = pathOf(ptr, len);
-      if (path === null || !options.readFile) return -1;
+      if (path === null) return -1;
+      if (options.readFileAsync && jspi) {
+        return Promise.resolve()
+          .then(() => options.readFileAsync(path))
+          .then((data) => prepare(data), () => -1);
+      }
+      if (!options.readFile) return -1;
       try {
         return prepare(options.readFile(path));
       } catch {
@@ -700,6 +709,7 @@ export async function instantiate(bytes, options = {}) {
     // 描画（docs/render.ja.md）。WebGPU がなければ画像とフレームの番号は 0（CPU で描く）なので、ほかの口は呼ばれない。
     um_gpu_image_begin: (w, h, clear) => (render ? render.imageBegin(w, h, clear) : 0),
     um_gpu_draw: (...args) => render.draw(...args),
+    um_gpu_draw_state: (h, state) => render.drawState(h, state),
     um_gpu_image_end: device ? new WebAssembly.Suspending((h, ptr, len) => render.imageEnd(h, ptr, len)) : () => {},
     um_gpu_frame_begin: (win, _native, w, h, clear) => (render ? render.frameBegin(win, w, h, clear) : 0),
     um_gpu_frame_end: device ? new WebAssembly.Suspending((h) => render.frameEnd(h, windows.nextFrame)) : () => {},
@@ -712,6 +722,7 @@ export async function instantiate(bytes, options = {}) {
     const r = f(...a);
     return r && typeof r.then === 'function' ? otherwise : r;
   });
+  if (options.readFileAsync && jspi) env.um_host_read_file = new WebAssembly.Suspending(env.um_host_read_file);
   Object.assign(env, windows.env, {
     um_host_window_poll: suspend(windows.env.um_host_window_poll, 0),
     um_host_window_present: suspend(windows.env.um_host_window_present, undefined),
@@ -719,7 +730,10 @@ export async function instantiate(bytes, options = {}) {
   });
 
   const module = await WebAssembly.compile(bytes);
-  const usesWindow = WebAssembly.Module.imports(module).some((i) => i.name === 'um_host_window_open');
+  // 一時停止しうる取り込み（表示・待つイベント・sleepMs など）を使うなら、export を Promise を返す形に包む。
+  const suspending = new Set(['um_host_window_poll', 'um_host_window_present', 'um_host_window_ctl']);
+  if (options.readFileAsync && jspi) suspending.add('um_host_read_file');
+  const usesWindow = WebAssembly.Module.imports(module).some((i) => suspending.has(i.name));
   let render = null;
   const instance = await WebAssembly.instantiate(module, { env });
   if (!device && !(jspi && usesWindow)) return instance.exports;

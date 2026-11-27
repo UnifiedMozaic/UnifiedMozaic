@@ -1,0 +1,45 @@
+// テクスチャ（画像の色を読む）。`import { textureSample } from "um:texture";` で使う（docs/libraries.ja.md）。
+
+// ---- テクスチャ（画像の色を読む）----
+// 画像は Buffer<u32> の画素（0xAARRGGBB、上の行から）と幅・高さ。シェーダでも kernel でも CPU でも使え、
+// UM の四則演算で計算するので、どこでも同じ値になる。座標 uv は画像の左上が (0, 0)、右下が (1, 1)。
+// 範囲の外は画像を繰り返したとみなす（タイルのように並ぶ）。
+
+// 0xAARRGGBB の色を、0〜1 の vec4<f32>（x = 赤、y = 緑、z = 青、w = 不透明度）にする。
+export kernel function colorFromArgb(c: u32): vec4<f32> {
+  return vec4(((c >> 16) & 255) as f32 / 255, ((c >> 8) & 255) as f32 / 255, (c & 255) as f32 / 255, ((c >> 24) & 255) as f32 / 255);
+}
+
+// 画素 (x, y) の色（補間しない）。範囲の外は繰り返す。
+export kernel function textureFetch(pixels: Buffer<u32>, width: u32, height: u32, x: i32, y: i32): vec4<f32> {
+  const w = width as i32;
+  const h = height as i32;
+  let xi = x % w;
+  if (xi < 0) {
+    xi += w;
+  }
+  let yi = y % h;
+  if (yi < 0) {
+    yi += h;
+  }
+  return colorFromArgb(pixels[(yi as u32) * width + (xi as u32)]);
+}
+
+// 座標 uv の色。隣り合う 4 つの画素の色を、近さで混ぜる（バイリニア）。範囲の外は繰り返す。
+export kernel function textureSample(pixels: Buffer<u32>, width: u32, height: u32, uv: vec2<f32>): vec4<f32> {
+  const fx = uv.x * (width as f32) - 0.5;
+  const fy = uv.y * (height as f32) - 0.5;
+  const x0 = Math.floor(fx);
+  const y0 = Math.floor(fy);
+  const tx = fx - x0;
+  const ty = fy - y0;
+  const ix = x0 as i32;
+  const iy = y0 as i32;
+  const a = textureFetch(pixels, width, height, ix, iy);
+  const b = textureFetch(pixels, width, height, ix + 1, iy);
+  const c = textureFetch(pixels, width, height, ix, iy + 1);
+  const d = textureFetch(pixels, width, height, ix + 1, iy + 1);
+  const top = a * (1 - tx) + b * tx;
+  const bottom = c * (1 - tx) + d * tx;
+  return top * (1 - ty) + bottom * ty;
+}

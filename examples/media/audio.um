@@ -5,6 +5,9 @@
 // expect: peak 0.09, about 440 Hz
 // expect: seek to 1.5 s: got 4800 samples from 1.5 s
 
+import { MediaAudioRead, mediaOpenAudio, mediaSamples, mediaNextSamples, mediaClose } from "um:media";
+
+
 // 小数第 1 位まで（四捨五入）の文字列。
 function fixed1(x: f64): string {
   const n = (x * 10.0 + 0.5) as i64;

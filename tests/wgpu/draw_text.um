@@ -23,6 +23,8 @@
 // expect: 36
 // expect: 12
 
+import { drawText, textWidth } from "um:text";
+
 struct VOut {
   position: vec4<f32>;
 }

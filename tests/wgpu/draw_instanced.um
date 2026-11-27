@@ -19,6 +19,8 @@
 // expect: true
 // expect: true
 
+import { textureSample, textureFetch } from "um:texture";
+
 struct Corner {
   x: f32;
   y: f32;

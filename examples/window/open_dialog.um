@@ -6,6 +6,8 @@
 // args: 3
 // expect: frames 3
 
+import * from "um:window";
+
 const WIDTH: i32 = 480;
 const HEIGHT: i32 = 160;
 

@@ -10,7 +10,7 @@
 //   gpu.endImage(mut image: GpuImage, mut pixels: Buffer<u32>): void
 //       描き終えた画像の色を pixels に写す（0xAARRGGBB、行ごとに上から）。
 //
-// gpu.beginImage / gpu.endImage は標準の関数 gpuBeginImage / gpuEndImage（runtime/render.um）の呼び出しになる。
+// gpu.beginImage / gpu.endImage は標準の関数 __std_gpuBeginImage / __std_gpuEndImage（runtime/render.um）の呼び出しになる。
 // gpu.draw は、vs と fs の組ごとにコンパイラが作る関数 umRenderDraw__vs__fs（drawSource。ドライバが型検査の前に加える）の
 // 呼び出しになる。その関数は、画像が GPU にあれば gpu.rawDraw を呼び、なければ CPU で同じ描画を行う。
 // gpu.rawBeginImage / gpu.rawDraw / gpu.rawEndImage（GPU の画像の番号を使う）は、これらの標準の関数の中でだけ使える。
@@ -43,7 +43,7 @@ const IMAGE: Ty = { k: 'struct', name: 'GpuImage' };
 /** 標準の関数（runtime/render.um）と、コンパイラが作る描画の関数のファイルの名前。gpu.raw* はこの中でだけ使える。 */
 export const RENDER_FILES = ['render.um', 'render-draw.um'];
 
-export const RENDER_NAMES = ['beginImage', 'draw', 'drawIndexed', 'endImage', 'beginFrame', 'endFrame', 'rawBeginImage', 'rawDraw', 'rawDrawIndexed', 'rawEndImage', 'rawBeginFrame', 'rawEndFrame'];
+export const RENDER_NAMES = ['beginImage', 'draw', 'drawIndexed', 'endImage', 'beginFrame', 'endFrame', 'rawBeginImage', 'rawDraw', 'rawDrawIndexed', 'rawEndImage', 'rawBeginFrame', 'rawEndFrame', 'rawDrawState'];
 
 /** `gpu.beginImage` / `gpu.draw` / `gpu.endImage`（と gpu.raw*）の呼び出しか（同じ名前の変数があれば違う）。 */
 export function isRenderCall(e: Expr & { kind: 'mcall' }, lookup: (name: string) => unknown): boolean {
@@ -110,7 +110,7 @@ export function inferRender(c: RenderChecker, e: Expr & { kind: 'mcall' }): Ty {
   if (e.name === 'beginImage' || e.name === 'endImage' || e.name === 'beginFrame' || e.name === 'endFrame') {
     // 標準の関数（runtime/render.um と render_window.um）の呼び出しにする。引数の検査はその関数の型で行う。
     node.kind = 'call';
-    node.callee = `gpu${e.name[0].toUpperCase()}${e.name.slice(1)}`;
+    node.callee = `__std_gpu${e.name[0].toUpperCase()}${e.name.slice(1)}`;
     return c.checkExpr(e as unknown as Expr);
   }
   // gpu.draw(mut image, vertexCount, [instances,] vs(...), fs(...)) / gpu.drawIndexed(mut image, indices, [instances,] vs(...), fs(...))
@@ -164,6 +164,13 @@ function inferRaw(c: RenderChecker, e: Expr & { kind: 'mcall' }, node: { kind: s
     builtin(c, 'gpu.rawEndFrame', [{ name: 'frame', mode: 'none', ty: I32 }], VOID, e.args, e.pos);
     node.kind = 'call';
     node.callee = '__gpu_frame_end';
+    return VOID;
+  }
+  if (e.name === 'rawDrawState') {
+    // 描き方（cull・blend・depthWrite のビット。runtime/render.um の __std_renderState）を GPU の画像に覚えさせる。
+    builtin(c, 'gpu.rawDrawState', [{ name: 'image', mode: 'none', ty: I32 }, { name: 'state', mode: 'none', ty: I32 }], VOID, e.args, e.pos);
+    node.kind = 'call';
+    node.callee = '__gpu_draw_state';
     return VOID;
   }
   if (e.name === 'rawEndImage') {
@@ -323,7 +330,7 @@ function umRenderClip__${tag}(poly: ${out}[], far: bool, prov: ${out}): ${out}[]
   return res;
 }
 
-function umRenderTri__${tag}(img: mut GpuImage, a: ${out}, b: ${out}, c: ${out}, prov: ${out}${params(fArgs, fTypes)}): void {
+function umRenderTri__${tag}(img: mut GpuImage, a: ${out}, b: ${out}, c: ${out}, prov: ${out}, cull: i32, blend: i32${params(fArgs, fTypes)}): void {
   if (!(a.position.w > 0) || !(b.position.w > 0) || !(c.position.w > 0)) {
     return;
   }
@@ -345,9 +352,12 @@ function umRenderTri__${tag}(img: mut GpuImage, a: ${out}, b: ${out}, c: ${out},
   if (!(area > 0 || area < 0)) {
     return;
   }
+  if (__std_renderCulled(cull, area)) {
+    return;
+  }
   if (area < 0) {
-    // 内側の辺の関数が正になる向きにする（b と c を入れ替える）。
-    umRenderTri__${tag}(mut img, a, c, b, prov${pass(fArgs)});
+    // 内側の辺の関数が正になる向きにする（b と c を入れ替える。向きで捨てるかはもう決めた）。
+    umRenderTri__${tag}(mut img, a, c, b, prov, 0, blend${pass(fArgs)});
     return;
   }
   let x0 = Math.floor(Math.min(ax, Math.min(bx, cx)));
@@ -377,7 +387,7 @@ function umRenderTri__${tag}(img: mut GpuImage, a: ${out}, b: ${out}, c: ${out},
       const e0 = (cx - bx) * (sy - by) - (cy - by) * (sx - bx);
       const e1 = (ax - cx) * (sy - cy) - (ay - cy) * (sx - cx);
       const e2 = (bx - ax) * (sy - ay) - (by - ay) * (sx - ax);
-      if (renderInside(e0, cx - bx, cy - by) && renderInside(e1, ax - cx, ay - cy) && renderInside(e2, bx - ax, by - ay)) {
+      if (__std_renderInside(e0, cx - bx, cy - by) && __std_renderInside(e1, ax - cx, ay - cy) && __std_renderInside(e2, bx - ax, by - ay)) {
         const l0 = e0 / area;
         const l1 = e1 / area;
         const l2 = e2 / area;
@@ -389,8 +399,10 @@ function umRenderTri__${tag}(img: mut GpuImage, a: ${out}, b: ${out}, c: ${out},
           const p2 = l2 * cw;
           const s = p0 + p1 + p2;
           const v = umRenderMix__${tag}(a, b, c, p0 / s, p1 / s, p2 / s, prov, vec4(sx, sy, z, s));
-          img.depth[idx] = z;
-          img.color[idx] = renderPack(${fs.name}(v${pass(fArgs)}));
+          if (img.depthWrite) {
+            img.depth[idx] = z;
+          }
+          img.color[idx] = __std_renderBlend(blend, ${fs.name}(v${pass(fArgs)}), img.color[idx]);
         }
       }
     }
@@ -417,10 +429,13 @@ function drawSource(vs: FnDecl, fs: FnDecl, st: StructDecl, kind: DrawKind): str
   return `
 function ${drawName(vs.name, fs.name, kind)}(img: mut GpuImage, ${first}${kind.instanced ? ', instances: u32' : ''}${params(vArgs, vTypes)}${params(fArgs, fTypes)}): void {
   if (img.handle != 0) {
+    gpu.rawDrawState(img.handle, __std_renderState(img));
     gpu.${raw}(img.handle, ${kind.indexed ? 'indices' : 'count'}, ${kind.instanced ? 'instances' : '1'}, ${vs.name}(${vArgs.join(', ')}), ${fs.name}(${fArgs.join(', ')}));
     return;
   }
   const n: u32 = ${kind.indexed ? 'indices.length as u32' : 'count'};
+  const cull = __std_renderCullCode(img.cull);
+  const blend = __std_renderBlendCode(img.blend);
   for (let inst: u32 = 0; inst < ${kind.instanced ? 'instances' : '1'}; inst++) {
     for (let i: u32 = 0; i + 3 <= n; i += 3) {
       const a = ${vsCall('i')};
@@ -430,7 +445,7 @@ function ${drawName(vs.name, fs.name, kind)}(img: mut GpuImage, ${first}${kind.i
       poly = umRenderClip__${tag}(poly, false, a);
       poly = umRenderClip__${tag}(poly, true, a);
       for (let k: usize = 1; k + 1 < poly.length; k++) {
-        umRenderTri__${tag}(mut img, poly[0], poly[k], poly[k + 1], a${pass(fArgs)});
+        umRenderTri__${tag}(mut img, poly[0], poly[k], poly[k + 1], a, cull, blend${pass(fArgs)});
       }
     }
   }

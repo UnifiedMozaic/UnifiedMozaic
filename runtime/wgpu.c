@@ -1329,6 +1329,7 @@ typedef struct {
   int drawn;        // 色と深度を埋めるパスをもう積んだか
   int32_t window;   // ウィンドウに描くフレーム（gpu.beginFrame）なら、そのウィンドウの番号。画像なら 0
   int skip;         // ウィンドウの面を得られなかったフレーム（描かずに捨てる）
+  int32_t state;    // 描き方（um_gpu_draw_state。0 は裏表とも描き、混ぜず、深度を書く）
   WGPUTextureFormat format;
   WGPUTexture color, depth;
   WGPUTextureView color_view, depth_view;
@@ -1398,10 +1399,19 @@ int32_t um_gpu_image_begin(int32_t width, int32_t height, int32_t clear) {
   return (int32_t)slot + 1;
 }
 
-// 描画のパイプライン（シェーダの組の番号、Buffer の数、色の形式ごと）。
+// 描き方（runtime/render.um の renderState と揃える）: ビット 0〜1 は面の向きで捨てる（1 裏、2 表）、
+// ビット 2〜3 は色の混ぜ方（1 不透明度で重ねる、2 足す）、ビット 4 は深度を書かない。表は、画面で反時計回りの三角形。
+void um_gpu_draw_state(int32_t image, int32_t state) {
+  um_lock();
+  um_image_at(image, "gpu.draw")->state = state;
+  um_unlock();
+}
+
+// 描画のパイプライン（シェーダの組の番号、Buffer の数、色の形式、描き方ごと）。
 typedef struct {
   int32_t key;
   int32_t nbufs;
+  int32_t state;
   WGPUTextureFormat format;
   WGPURenderPipeline pipeline;
   WGPUBindGroupLayout layout;
@@ -1409,9 +1419,9 @@ typedef struct {
 static um_rpipe *um_rpipes;
 static size_t um_nrpipes, um_caprpipes;
 
-static um_rpipe *um_rpipeline_locked(int32_t key, const char *src, int32_t src_len, int32_t nbufs, WGPUTextureFormat format) {
+static um_rpipe *um_rpipeline_locked(int32_t key, const char *src, int32_t src_len, int32_t nbufs, WGPUTextureFormat format, int32_t state) {
   for (size_t i = 0; i < um_nrpipes; i++) {
-    if (um_rpipes[i].key == key && um_rpipes[i].nbufs == nbufs && um_rpipes[i].format == format) return &um_rpipes[i];
+    if (um_rpipes[i].key == key && um_rpipes[i].nbufs == nbufs && um_rpipes[i].format == format && um_rpipes[i].state == state) return &um_rpipes[i];
   }
   if (um_nrpipes == um_caprpipes) {
     um_caprpipes = um_caprpipes ? um_caprpipes * 2 : 8;
@@ -1423,6 +1433,7 @@ static um_rpipe *um_rpipeline_locked(int32_t key, const char *src, int32_t src_l
   p->key = key;
   p->nbufs = nbufs;
   p->format = format;
+  p->state = state;
   WGPUShaderModule module = um_module(src, (size_t)src_len);
   // 束縛はどれも読むだけ。vertex と fragment のどちらからも見える。
   WGPUBindGroupLayoutEntry entries[65];
@@ -1445,6 +1456,18 @@ static um_rpipe *um_rpipeline_locked(int32_t key, const char *src, int32_t src_l
   WGPUColorTargetState target = WGPU_COLOR_TARGET_STATE_INIT;
   target.format = format;
   target.writeMask = WGPUColorWriteMask_All;
+  // 色: 不透明度で重ねる（src × a + dst × (1 − a)）か、足す（src × a + dst）。不透明度はどちらも src.a + dst.a × (1 − src.a)。
+  WGPUBlendState blend = {0};
+  int mode = (state >> 2) & 3;
+  if (mode == 1 || mode == 2) {
+    blend.color.operation = WGPUBlendOperation_Add;
+    blend.color.srcFactor = WGPUBlendFactor_SrcAlpha;
+    blend.color.dstFactor = mode == 1 ? WGPUBlendFactor_OneMinusSrcAlpha : WGPUBlendFactor_One;
+    blend.alpha.operation = WGPUBlendOperation_Add;
+    blend.alpha.srcFactor = WGPUBlendFactor_One;
+    blend.alpha.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
+    target.blend = &blend;
+  }
   WGPUFragmentState fragment = WGPU_FRAGMENT_STATE_INIT;
   fragment.module = module;
   fragment.entryPoint = um_sv("um_fs");
@@ -1452,7 +1475,7 @@ static um_rpipe *um_rpipeline_locked(int32_t key, const char *src, int32_t src_l
   fragment.targets = &target;
   WGPUDepthStencilState depth = WGPU_DEPTH_STENCIL_STATE_INIT;
   depth.format = WGPUTextureFormat_Depth32Float;
-  depth.depthWriteEnabled = WGPUOptionalBool_True;
+  depth.depthWriteEnabled = (state & 16) ? WGPUOptionalBool_False : WGPUOptionalBool_True;
   depth.depthCompare = WGPUCompareFunction_Less;
 
   WGPURenderPipelineDescriptor rd = WGPU_RENDER_PIPELINE_DESCRIPTOR_INIT;
@@ -1460,7 +1483,8 @@ static um_rpipe *um_rpipeline_locked(int32_t key, const char *src, int32_t src_l
   rd.vertex.module = module;
   rd.vertex.entryPoint = um_sv("um_vs");
   rd.primitive.topology = WGPUPrimitiveTopology_TriangleList;
-  rd.primitive.cullMode = WGPUCullMode_None;
+  rd.primitive.frontFace = WGPUFrontFace_CCW;
+  rd.primitive.cullMode = (state & 3) == 1 ? WGPUCullMode_Back : (state & 3) == 2 ? WGPUCullMode_Front : WGPUCullMode_None;
   rd.depthStencil = &depth;
   rd.multisample.count = 1;
   rd.multisample.mask = 0xFFFFFFFFu;
@@ -1511,7 +1535,7 @@ void um_gpu_draw(int32_t image, int32_t key, const char *src, int32_t src_len, i
     um_unlock();
     return;
   }
-  um_rpipe *pipe = um_rpipeline_locked(key, src, src_len, nbufs, im->format);
+  um_rpipe *pipe = um_rpipeline_locked(key, src, src_len, nbufs, im->format, im->state);
 
   // Buffer は dispatch と同じく、CPU だけが新しければ GPU へ送る（描画は読むだけなので、GPU の写しは新しいまま）。
   WGPUBindGroupEntry entries[65];

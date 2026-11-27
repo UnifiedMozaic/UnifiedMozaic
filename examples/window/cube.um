@@ -5,6 +5,9 @@
 //   node src/cli.ts build examples/window/cube.um --target host -o cube && ./cube             （CPU で描く）
 // 引数に数を渡すと、そのフレーム数だけ描いて終わる（テスト用）。
 
+import * from "um:window";
+import { mat4RotateX, mat4RotateY, mat4Perspective, mat4LookAt } from "um:transform";
+
 struct Vertex {
   pos: vec3<f32>;
   normal: vec3<f32>;
@@ -115,7 +118,7 @@ export function main(): i32 {
       // 1 秒に 1 ラジアンほど回す。角度は 2π の中に保つ（三角関数の誤差が小さい範囲）。
       angle = ((ticksNs() - start) as f64 / 1.0e9 % (2 * Math.PI)) as f32;
     }
-    let frame = gpu.beginFrame(win, 0xFF202028);
+    let frame = gpu.beginFrame(windowSurface(win), 0xFF202028);
     // 縦横比はフレーム（ウィンドウの画素）の大きさから。大きさを変えても歪まない。
     const aspect = (frame.width as f32) / Math.max(frame.height as f32, 1);
     const model = mat4Mul(mat4RotateY(angle), mat4RotateX(angle * 0.6));

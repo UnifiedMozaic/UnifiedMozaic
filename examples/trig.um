@@ -22,6 +22,8 @@
 // expect: 1
 // expect: 6.2831854820251465
 
+import { mat4RotateZ } from "um:transform";
+
 // Math.PI は最上位の定数にも書ける。
 const TAU: f32 = Math.PI * 2;
 

@@ -7,6 +7,9 @@
 // expect: error: argument 1 of 'add' must be i32, but i64 was given
 // expect: error: the module has no export named 'sub'
 
+import { WasmValue, WasmType, WasmExportKind, WasmLimits, wasmLoad, wasmFromWat, wasmNew, wasmCall, wasmExports, wasmFreeModule, wasmFreeInstance } from "um:wasm";
+
+
 const WAT: string =
   "(module" +
   "  (func (export \"add\") (param i32 i32) (result i32) local.get 0 local.get 1 i32.add)" +

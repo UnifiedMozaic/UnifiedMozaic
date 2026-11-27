@@ -4,6 +4,9 @@
 // 1280x720 の RGBA を、(1) 1つのインスタンスで、(2) 帯に分けてスレッドごとのインスタンスで処理する。
 // 時間には、画素を wasm のメモリへ写して戻す時間も含む。
 
+import { WasmValue, WasmLimits, wasmLoadFile, wasmNew, wasmCall, wasmFreeModule, wasmFreeInstance, wasmRead, wasmWrite } from "um:wasm";
+
+
 const W: i32 = 1280;
 const H: i32 = 720;
 const FRAMES: i32 = 200;

@@ -4,6 +4,9 @@
 // expect: trap in 'replace': unreachable executed
 // expect: 15
 
+import { WasmValue, WasmLimits, wasmLoadFile, wasmNew, wasmCall, wasmFreeModule, wasmFreeInstance, wasmRead } from "um:wasm";
+
+
 function one(inst: i64, name: string, args: WasmValue[]): i32 {
   match (wasmCall(inst, name, args)) {
     Result.Err(why) => {

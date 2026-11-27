@@ -7,6 +7,8 @@
 // expect: corner 4280295464
 // expect: 5
 
+import * from "um:window";
+
 struct VOut {
   position: vec4<f32>;
 }
@@ -36,7 +38,7 @@ export function main(): i32 {
   let frames: i32 = 0;
   while (frames < limit) {
     while (pollWindowEvent(0) != null) {}
-    let frame = gpu.beginFrame(win, 0xFF202028);
+    let frame = gpu.beginFrame(windowSurface(win), 0xFF202028);
     gpu.draw(mut frame, 3, vs(), fs());
     if (frames == 0) {
       const w = frame.width as u32;

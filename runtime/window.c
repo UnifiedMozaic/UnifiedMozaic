@@ -54,6 +54,7 @@ enum {
   EV_STATE = 23,          // 最大化・最小化・元に戻す・全画面の出入り。a = 状態のビット（WF_*）
   EV_EXPOSED = 24,        // 描き直しが要る（隠れていた部分が見えた、描画の装置が作り直されたなど）
   EV_DISPLAYS = 25,       // ディスプレイの増減・配置・倍率の変化（ウィンドウは 0）
+  EV_MOUSE_RELATIVE = 27, // 相対モードのマウスの動き。a = dx, b = dy（1/1000 単位）
   EV_MENU = 26,           // メニューバーの項目が選ばれた（文字列 0 = 項目の ID）
 };
 #define EV_FIELDS 6
@@ -498,6 +499,8 @@ enum {
   WC_IME_COMPOSITION = 24, // io[0] = 1 で IME の編集中の文字列をプログラムが描く（SDL を初期化する前だけ。できなければ 0）
   WC_CLIPBOARD_HAS = 25,   // → クリップボードに文字があれば 1
   WC_SET_RESIZABLE = 26,   // io[0] = 1 で大きさを変えられる
+  WC_SET_RELATIVE = 27,    // io[0] = 1 でマウスの相対モード（カーソルを隠して閉じ込め、動きの量だけを届ける）
+  WC_RELATIVE = 28,        // → 相対モードなら 1
   WC_TICKS_NS = 30,        // → 逆戻りしない時計（ナノ秒）。どのスレッドからも呼べる
   WC_SLEEP_NS = 31,        // io[0] ナノ秒だけ眠る（短い時間も正確に）。どのスレッドからも呼べる
   WC_DIALOG_OPEN = 40,     // io[0] = 1 で複数選べる → 要求の番号（0 は開けなかった）
@@ -652,6 +655,10 @@ int64_t um_window_ctl(int32_t op, int32_t window, int64_t *io, size_t len, int32
     case WC_SET_RESIZABLE:
       need(len, 1, line);
       return SDL_SetWindowResizable(win, io[0] != 0);
+    case WC_SET_RELATIVE:
+      need(len, 1, line);
+      return SDL_SetWindowRelativeMouseMode(win, io[0] != 0);
+    case WC_RELATIVE: return SDL_GetWindowRelativeMouseMode(win);
     case WC_DIALOG_OPEN:
     case WC_DIALOG_SAVE:
     case WC_DIALOG_FOLDER:
@@ -973,12 +980,22 @@ static int translate(const SDL_Event *e, int32_t *out) {
       out[2] = e->window.data1;
       out[3] = e->window.data2;
       return out[1] != 0;
-    case SDL_EVENT_MOUSE_MOTION:
+    case SDL_EVENT_MOUSE_MOTION: {
+      // 相対モードのウィンドウには、位置ではなく動きの量を届ける（端で止まらない）。
+      SDL_Window *mw = SDL_GetWindowFromID(e->motion.windowID);
+      if (mw && SDL_GetWindowRelativeMouseMode(mw)) {
+        out[0] = EV_MOUSE_RELATIVE;
+        out[1] = number_of(e->motion.windowID);
+        out[2] = (int32_t)SDL_lroundf(e->motion.xrel * 1000.0f);
+        out[3] = (int32_t)SDL_lroundf(e->motion.yrel * 1000.0f);
+        return out[1] != 0 && (out[2] != 0 || out[3] != 0);
+      }
       out[0] = EV_MOUSE_MOVE;
       out[1] = number_of(e->motion.windowID);
       out[2] = (int32_t)e->motion.x;
       out[3] = (int32_t)e->motion.y;
       return out[1] != 0;
+    }
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
     case SDL_EVENT_MOUSE_BUTTON_UP:
       out[0] = e->type == SDL_EVENT_MOUSE_BUTTON_DOWN ? EV_MOUSE_DOWN : EV_MOUSE_UP;

@@ -12,13 +12,18 @@
 //   - 1 つの canvas は 2D か webgpu のどちらかしか使えないので、GPU で描き始めたウィンドウに windowPresent は使えない。
 
 // イベントの種類（runtime/window.c と揃える）。
-const EV = { CLOSE: 1, RESIZE: 2, MOUSE_MOVE: 3, MOUSE_DOWN: 4, MOUSE_UP: 5, WHEEL: 6, KEY_DOWN: 7, KEY_UP: 8, TEXT: 9, PIXEL_SIZE: 18, SCALE: 19, FOCUS: 20, MOUSE_ENTER: 21 };
+const EV = { CLOSE: 1, RESIZE: 2, MOUSE_MOVE: 3, MOUSE_DOWN: 4, MOUSE_UP: 5, WHEEL: 6, KEY_DOWN: 7, KEY_UP: 8, TEXT: 9, PIXEL_SIZE: 18, SCALE: 19, FOCUS: 20, MOUSE_ENTER: 21, MOUSE_RELATIVE: 27 };
 // windowCtl の操作番号（runtime/window.c と揃える）。
 const WC = {
   SET_SIZE: 1, GET_SIZE: 2, GET_POS: 4, STATE: 10, PIXEL_SIZE: 11, DISPLAY: 12, DISPLAY_COUNT: 13, DISPLAY_BOUNDS: 14, DISPLAY_USABLE: 15,
   START_TEXT: 16, STOP_TEXT: 17, TEXT_ACTIVE: 18, CURSOR: 20, SHOW_CURSOR: 21, SET_FULLSCREEN: 9, TICKS_NS: 30, SLEEP_NS: 31,
+  SET_RELATIVE: 27, RELATIVE: 28,
 };
 const PANIC_WINDOW_ARGS = 12;
+// 音の出力の操作番号（runtime/audio.c と揃える）。windowCtl の 100 番台。
+const AC = { OPEN: 100, CLOSE: 101, QUEUED: 102, PAUSE: 103, RESUME: 104, CLEAR: 105, PLAYED: 106, PAUSED: 107, LATENCY: 108, WRITTEN: 109, GAIN: 110 };
+// 音の出力の 1 回の処理のフレームの数（ScriptProcessorNode の大きさ。2 のべき乗）。
+const AUDIO_BLOCK = 2048;
 
 // SDL のキーコード（runtime/window.um の keyOf と揃える）。
 const KEYS = {
@@ -108,15 +113,27 @@ export function windowHost(options, mem, prepare, Panic) {
       canvas.style.outline = 'none';
       if (wins.length === 0 && title) doc.title = title;
       const id = wins.length + 1;
-      const w = { id, canvas, title, width: 0, height: 0, ctx2d: null, gpu: null, image: null, scratch: null };
+      const w = { id, canvas, title, width: 0, height: 0, ctx2d: null, gpu: null, image: null, scratch: null, relative: false };
       wins.push(w);
       fit(w);
       // 開いた直後の大きさの知らせは要らない（ネイティブと同じく、変わったときだけ）。
       queue.length = 0;
       const on = (target, type, f, opt) => target.addEventListener(type, f, opt);
-      on(canvas, 'mousemove', (e) => push(EV.MOUSE_MOVE, id, ...pos(w, e)));
+      // 相対モード（windowSetRelativeMouse）は Pointer Lock。ロックしているあいだは動きの量（CSS の画素）を届ける。
+      const locked = () => doc.pointerLockElement === canvas;
+      on(canvas, 'mousemove', (e) => {
+        if (locked()) {
+          const dx = Math.round(e.movementX * 1000);
+          const dy = Math.round(e.movementY * 1000);
+          if (dx !== 0 || dy !== 0) push(EV.MOUSE_RELATIVE, id, dx, dy);
+        } else {
+          push(EV.MOUSE_MOVE, id, ...pos(w, e));
+        }
+      });
       on(canvas, 'mousedown', (e) => {
         canvas.focus();
+        // ブラウザはクリックの中からしかロックさせないので、相対モードを頼まれていたらここで入る。
+        if (w.relative && !locked()) lockPointer(canvas);
         push(EV.MOUSE_DOWN, id, ...pos(w, e), [1, 2, 3][e.button] ?? e.button + 1);
       });
       on(canvas, 'mouseup', (e) => push(EV.MOUSE_UP, id, ...pos(w, e), [1, 2, 3][e.button] ?? e.button + 1));
@@ -283,14 +300,40 @@ export function windowHost(options, mem, prepare, Panic) {
         case WC.SHOW_CURSOR:
           for (const w of wins) if (w) w.canvas.style.cursor = io[0] !== 0n ? '' : 'none';
           return 1n;
+        case WC.SET_RELATIVE: {
+          const w = win();
+          w.relative = io[0] !== 0n;
+          if (w.relative) lockPointer(w.canvas);
+          else if (doc.pointerLockElement === w.canvas) doc.exitPointerLock?.();
+          return 1n;
+        }
+        case WC.RELATIVE:
+          return doc.pointerLockElement === win().canvas ? 1n : 0n;
         case WC.TICKS_NS:
           return BigInt(Math.round(globalThis.performance.now() * 1e6));
         case WC.SLEEP_NS:
           return new Promise((resolve) => setTimeout(() => resolve(1n), Number(io[0]) / 1e6));
         default:
-          // ブラウザにないもの（OS のダイアログ・メニューバー・音・ウィンドウの位置など）は失敗（0）。
+          if (op >= AC.OPEN && op <= AC.GAIN) return audioCtl(op, id, io, line);
+          // ブラウザにないもの（OS のダイアログ・メニューバー・ウィンドウの位置など）は失敗（0）。
           return 0n;
       }
+    },
+
+    // audioWrite: samples[start .. start + count) を待ち行列に足す（count が負なら終わりまで。チャンネルの数の倍数）。
+    um_host_audio_write(id, ptr, len, start, count, line) {
+      const a = audio(id, line);
+      len >>>= 0;
+      const st = Number(start);
+      let n = Number(count);
+      if (st < 0 || st > len) throw new Panic(PANIC_WINDOW_ARGS, line);
+      if (n < 0) n = len - st;
+      if (n > len - st || n % a.channels !== 0) throw new Panic(PANIC_WINDOW_ARGS, line);
+      if (n === 0) return 1;
+      a.queue.push(new Float32Array(mem(), (ptr >>> 0) + st * 4, n).slice());
+      a.queued += n / a.channels;
+      a.written += n / a.channels;
+      return 1;
     },
 
     um_host_window_ctl_f(op, id, _a, _line) {
@@ -338,10 +381,133 @@ export function windowHost(options, mem, prepare, Panic) {
       }
     },
   };
+  // Pointer Lock を頼む（クリックやキーの処理の外では断られるが、そのときは次のクリックで入る）。
+  const lockPointer = (canvas) => {
+    try {
+      const r = canvas.requestPointerLock?.({ unadjustedMovement: true });
+      r?.catch?.(() => canvas.requestPointerLock?.()?.catch?.(() => {}));
+    } catch {}
+  };
+
+  // ---- 音の出力（audioOpen など。ネイティブは runtime/audio.c）----
+  // 出力ごとに AudioContext（標本化周波数はプログラムが決めた値）と、待ち行列から標本を取り出して鳴らすノードを持つ。
+  // 数（書き込んだ・待ち行列にある・再生した）の意味はネイティブと同じ。開いた直後は一時停止。
+  // ブラウザは、ページの上のクリックかキーの前には音を鳴らさないので、最初のクリックかキーで AudioContext を動かす。
+  const streams = [];  // 番号 n は streams[n - 1]
+  const audio = (id, line) => {
+    const a = streams[id - 1];
+    if (!a) throw new Panic(PANIC_WINDOW_ARGS, line);
+    return a;
+  };
+  let unlockHooked = false;
+  const unlock = () => {
+    for (const a of streams) if (a && a.ctx.state === 'suspended') a.ctx.resume().catch(() => {});
+  };
+  const audioCtl = (op, id, io, line) => {
+    if (op === AC.OPEN) {
+      const rate = Number(io[0]);
+      const channels = Number(io[1]);
+      if (rate <= 0 || rate > 768000 || channels < 1 || channels > 8) throw new Panic(PANIC_WINDOW_ARGS, line);
+      const Ctx = globalThis.AudioContext ?? globalThis.webkitAudioContext;
+      if (!Ctx) {
+        lastError = 'audio needs a browser with Web Audio';
+        return 0n;
+      }
+      let ctx;
+      try {
+        ctx = new Ctx({ sampleRate: rate });
+      } catch (e) {
+        lastError = String(e?.message ?? e);
+        return 0n;
+      }
+      const node = ctx.createScriptProcessor(AUDIO_BLOCK, 0, channels);
+      const a = { ctx, node, channels, rate, queue: [], offset: 0, queued: 0, written: 0, played: 0, paused: true, gain: 1 };
+      node.onaudioprocess = (ev) => {
+        const out = ev.outputBuffer;
+        const frames = out.length;
+        const chans = [];
+        for (let c = 0; c < channels; c++) chans.push(out.getChannelData(c));
+        let f = 0;
+        // 待ち行列の頭から、チャンネルを交互に並べた標本を取り出す。
+        while (!a.paused && f < frames && a.queue.length > 0) {
+          const chunk = a.queue[0];
+          while (f < frames && a.offset < chunk.length) {
+            for (let c = 0; c < channels; c++) chans[c][f] = chunk[a.offset + c] * a.gain;
+            a.offset += channels;
+            f++;
+          }
+          if (a.offset >= chunk.length) {
+            a.queue.shift();
+            a.offset = 0;
+          }
+        }
+        a.queued -= f;
+        a.played += f;
+        for (; f < frames; f++) for (let c = 0; c < channels; c++) chans[c][f] = 0;
+      };
+      node.connect(ctx.destination);
+      let slot = streams.indexOf(null);
+      if (slot < 0) slot = streams.push(null) - 1;
+      streams[slot] = a;
+      if (!unlockHooked && doc) {
+        unlockHooked = true;
+        for (const t of ['pointerdown', 'keydown', 'touchend']) doc.addEventListener(t, unlock, { capture: true });
+      }
+      return BigInt(slot + 1);
+    }
+    const a = audio(id, line);
+    switch (op) {
+      case AC.CLOSE:
+        a.node.disconnect();
+        a.ctx.close().catch(() => {});
+        streams[id - 1] = null;
+        return 1n;
+      case AC.QUEUED:
+        return BigInt(a.queued);
+      case AC.PAUSE:
+        a.paused = true;
+        return 1n;
+      case AC.RESUME:
+        a.paused = false;
+        if (a.ctx.state === 'suspended') a.ctx.resume().catch(() => {});
+        return 1n;
+      case AC.CLEAR:
+        // 捨てた分は、書き込んだ数から引く（再生した位置は動かない）。
+        a.written -= a.queued;
+        a.queue = [];
+        a.offset = 0;
+        a.queued = 0;
+        return 1n;
+      case AC.PLAYED:
+        return BigInt(a.played);
+      case AC.PAUSED:
+        return a.paused ? 1n : 0n;
+      case AC.LATENCY:
+        // 1 回の処理の分と、ブラウザが知らせる出力の遅れ（秒）を、フレームの数にする。
+        return BigInt(AUDIO_BLOCK + Math.round(((a.ctx.baseLatency ?? 0) + (a.ctx.outputLatency ?? 0)) * a.rate));
+      case AC.WRITTEN:
+        return BigInt(a.written);
+      case AC.GAIN:
+        if (io[0] < 0n) throw new Panic(PANIC_WINDOW_ARGS, line);
+        a.gain = Number(io[0]) / 1000;
+        return 1n;
+    }
+    throw new Panic(PANIC_WINDOW_ARGS, line);
+  };
+
   return { env, windows: wins, nextFrame };
 }
 
 // ---- WebGPU での描画（gpu.beginImage / gpu.draw / gpu.beginFrame など。runtime/wgpu.c と同じ口）----
+
+// 色の混ぜ方（描き方のビット 2〜3）。1 は不透明度で重ねる、2 は足す。不透明度はどちらも src.a + dst.a × (1 − src.a)。
+const BLEND_ALPHA = { operation: 'add', srcFactor: 'one', dstFactor: 'one-minus-src-alpha' };
+const BLENDS = [
+  undefined,
+  { color: { operation: 'add', srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha' }, alpha: BLEND_ALPHA },
+  { color: { operation: 'add', srcFactor: 'src-alpha', dstFactor: 'one' }, alpha: BLEND_ALPHA },
+  undefined,
+];
 
 export class RenderRunner {
   constructor(device, memory, windows) {
@@ -408,8 +574,13 @@ export class RenderRunner {
     return this.slot({ width, height, clear: clear >>> 0, format: g.format, color, view: color.createView(), depth: g.depth, drawn: false, window });
   }
 
-  pipeline(key, srcPtr, srcLen, nbufs, format) {
-    const id = `${key}:${nbufs}:${format}`;
+  // 描き方（runtime/wgpu.c の um_gpu_draw_state と同じビット）を画像に覚えさせる。
+  drawState(handle, state) {
+    this.image(handle, 'gpu.draw').state = state;
+  }
+
+  pipeline(key, srcPtr, srcLen, nbufs, format, state = 0) {
+    const id = `${key}:${nbufs}:${format}:${state}`;
     let p = this.pipelines.get(id);
     if (p) return p;
     const code = new TextDecoder().decode(this.bytes().slice(srcPtr, srcPtr + srcLen));
@@ -420,9 +591,9 @@ export class RenderRunner {
     const pipeline = this.device.createRenderPipeline({
       layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout] }),
       vertex: { module, entryPoint: 'um_vs' },
-      fragment: { module, entryPoint: 'um_fs', targets: [{ format }] },
-      primitive: { topology: 'triangle-list', cullMode: 'none' },
-      depthStencil: { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'less' },
+      fragment: { module, entryPoint: 'um_fs', targets: [{ format, blend: BLENDS[(state >> 2) & 3] }] },
+      primitive: { topology: 'triangle-list', frontFace: 'ccw', cullMode: ['none', 'back', 'front', 'none'][state & 3] },
+      depthStencil: { format: 'depth32float', depthWriteEnabled: (state & 16) === 0, depthCompare: 'less' },
     });
     p = { pipeline, layout };
     this.pipelines.set(id, p);
@@ -447,7 +618,7 @@ export class RenderRunner {
   draw(handle, key, srcPtr, srcLen, count, instances, paramsPtr, paramBytes, descPtr, nbufs) {
     const im = this.image(handle, 'gpu.draw');
     const device = this.device;
-    const { pipeline, layout } = this.pipeline(key, srcPtr, srcLen, nbufs, im.format);
+    const { pipeline, layout } = this.pipeline(key, srcPtr, srcLen, nbufs, im.format, im.state ?? 0);
     const table = new Uint32Array(this.memory.buffer, descPtr, nbufs * 4);
     // 引数の塊: 頂点の数、0、各 Buffer の長さ、値の引数（dispatch と同じ並び）。
     const header = 2 + nbufs;

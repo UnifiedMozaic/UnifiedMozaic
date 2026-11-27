@@ -1033,6 +1033,7 @@ if (selected('tests/process/process.um')) {
   if (hasWasm) {
     const wname = 'HTTP requests fail with a reason [wasm32]';
     const src = [
+      'import { httpStart, httpState, httpStatus, httpWait, httpError, httpReadLine, httpRead, httpHeaders, httpCancel, httpClose } from "um:http";',
       'export function main(): i32 {',
       '  const id = httpStart("GET", "http://127.0.0.1:1/", "", "", 0);',
       '  print(`${httpState(id)} ${httpStatus(id)} ${httpWait(id, 0)}`);',
@@ -1100,6 +1101,24 @@ if (selected('tests/process/process.um')) {
     else fail(name, problems.join('\n'));
   } catch (e) {
     fail(name, String(e));
+  }
+}
+
+// 画像の読み込み（lib/png.um）。ネイティブと wasm32 で同じ結果になることを確かめる。
+for (const f of files('tests/image')) {
+  const src = readFileSync(join(root, f), 'utf8');
+  const want = directives(src, 'expect');
+  const tag = f.replace(/[^a-z0-9]/gi, '_');
+  for (const target of ['host', 'wasm32'] as const) {
+    const name = `${f} [${target}]`;
+    try {
+      const r = target === 'host' ? runNative(src, tag) : await runWasm(src, tag);
+      if (r.panic) fail(name, r.panic);
+      else if (same(r.out, want)) ok(name);
+      else fail(name, `expected: ${want.join(' ')}\nactual:   ${r.out.join(' ')}`);
+    } catch (e) {
+      fail(name, String(e));
+    }
   }
 }
 
@@ -1504,7 +1523,7 @@ if (!ffmpegAvailable()) {
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const port = (server.address() as { port: number }).port;
-    const browser = await pw.chromium.launch({ args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-vulkan=swiftshader', '--use-webgpu-adapter=swiftshader'] });
+    const browser = await pw.chromium.launch({ args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-vulkan=swiftshader', '--use-webgpu-adapter=swiftshader', '--autoplay-policy=no-user-gesture-required'] });
     const cases: [string, string][] = [];
     for (const f of files('tests/web')) cases.push([f, directives(readFileSync(join(root, f), 'utf8'), 'web-query')[0] ?? '']);
     for (const f of files('tests/wgpu').filter((x) => /\/draw/.test(x))) cases.push([f, ''], [f, '?gpu=0']);

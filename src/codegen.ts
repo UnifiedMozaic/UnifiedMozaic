@@ -1699,7 +1699,7 @@ class ModuleGen {
       imports.push('void um_gpu_group(i32)');
       // 描画（runtime/web.mjs の RenderRunner）。
       imports.push('i32 um_gpu_image_begin(i32, i32, i32)', 'void um_gpu_draw(i32, i32, ptr, i32, i32, i32, ptr, i32, ptr, i32)', `void um_gpu_image_end(i32, ptr, ${this.usz})`);
-      imports.push('i32 um_gpu_frame_begin(i32, ptr, i32, i32, i32, i32)', 'void um_gpu_frame_end(i32)');
+      imports.push('i32 um_gpu_frame_begin(i32, ptr, i32, i32, i32, i32)', 'void um_gpu_frame_end(i32)', 'void um_gpu_draw_state(i32, i32)');
     }
     if (this.gpu === 'wgpu') {
       // wgpu-native での実行。実装は runtime/wgpu.c。GPU を使う呼び出しがなければ宣言せず（ドライバは wgpu をリンクしない）、
@@ -1713,7 +1713,7 @@ class ModuleGen {
         out.push('declare i32 @um_gpu_set_flags(i32) #0', 'declare i32 @um_gpu_pick_bufs(i32, i32, ptr, i32) #0');
         out.push('declare i32 @um_gpu_image_begin(i32, i32, i32) #0', 'declare void @um_gpu_draw(i32, i32, ptr, i32, i32, i32, ptr, i32, ptr, i32) #0');
         out.push(`declare void @um_gpu_image_end(i32, ptr, ${this.usz}) #0`);
-        out.push('declare i32 @um_gpu_frame_begin(i32, ptr, i32, i32, i32, i32) #0', 'declare void @um_gpu_frame_end(i32) #0');
+        out.push('declare i32 @um_gpu_frame_begin(i32, ptr, i32, i32, i32, i32) #0', 'declare void @um_gpu_frame_end(i32) #0', 'declare void @um_gpu_draw_state(i32, i32) #0');
       } else {
         out.push(`define internal ptr @um_wgpu_alloc(${this.usz} %n, ${this.usz} %s) #0 {`, `  %p = call ptr @um_alloc_zeroed(${this.usz} %n, ${this.usz} %s)`, '  ret ptr %p', '}');
       }
@@ -4303,7 +4303,7 @@ class FnGen {
     }
     if (e.callee === '__gpu_load' || e.callee === '__gpu_run') return this.gpuLoadCall(e);
     if (e.callee === '__gpu_image_begin' || e.callee === '__gpu_draw' || e.callee === '__gpu_image_end'
-      || e.callee === '__gpu_frame_begin' || e.callee === '__gpu_frame_end') return this.renderCall(e);
+      || e.callee === '__gpu_frame_begin' || e.callee === '__gpu_frame_end' || e.callee === '__gpu_draw_state') return this.renderCall(e);
     if (e.callee === '__gpu_commit') {
       if (this.m.gpu === 'metal') this.emit('call void @um_gpu_commit()');
       return '';
@@ -4808,6 +4808,11 @@ class FnGen {
       const r = this.tmp();
       this.emit(`${r} = call i32 @um_gpu_frame_begin(i32 ${win}, ptr ${native}, i32 ${w}, i32 ${h}, i32 ${c}, i32 ${e.pos.line})`);
       return r;
+    }
+    if (e.callee === '__gpu_draw_state') {
+      const [img, st] = e.args.map((a) => this.expr(a.expr));
+      this.emit(`call void @um_gpu_draw_state(i32 ${img}, i32 ${st})`);
+      return '';
     }
     if (e.callee === '__gpu_frame_end') {
       const f = this.expr(e.args[0].expr);

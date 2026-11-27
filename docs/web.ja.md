@@ -44,12 +44,14 @@ URL で、プログラムに引数を渡せます。
 | `ticksNs` / `sleepMs` | `performance.now()` / `setTimeout`（眠っているあいだは一時停止） |
 | 全画面 | `windowSetFullscreen` は canvas を全画面にする（ブラウザの決まりで、クリックやキーの処理の中からしか効かないことがある） |
 | カーソル | `windowSetCursor` / `windowShowCursor` は canvas の CSS の cursor |
+| マウスの相対モード | `windowSetRelativeMouse` は Pointer Lock。クリックの中からしか入れないので、入れたあとの最初のクリックで入る。Esc で抜けたら、次のクリックで入り直す |
 | クリップボード | 書くのは `navigator.clipboard`。読むのはまだない（空） |
+| 音（`audioOpen` など） | Web Audio。出力ごとに、決めた標本化周波数の `AudioContext` を作る。数（書き込んだ・待ち行列にある・再生した）の意味はネイティブと同じ。ブラウザは、ページの上のクリックかキーの前には音を鳴らさないので、それまでは `audioResume` しても再生した数が進まない（最初のクリックかキーで鳴り始める） |
 
-**まだないもの:** 音の出力（`audioOpen` は null）、OS のダイアログ・メニューバー、ファイルのドロップ、IME の編集中の文字列、ウィンドウの位置。
+**まだないもの:** OS のダイアログ・メニューバー、ファイルのドロップ、IME の編集中の文字列、ウィンドウの位置。
 
 ## 確かめた環境
 
-- Chromium 158（Playwright。ヘッドレス）。`tests/run.ts` の「ブラウザ」の節が、Playwright があれば `tests/web/*.um` と描画のテスト（`tests/wgpu/draw*.um`）を、WebGPU（SwiftShader）ありとなしで開いて出力を照合する。
+- Chromium 158（Playwright。ヘッドレス）。`tests/run.ts` の「ブラウザ」の節が、Playwright があれば `tests/web/*.um`（音は自動再生を許して開く）と描画のテスト（`tests/wgpu/draw*.um`）を、WebGPU（SwiftShader）ありとなしで開いて出力を照合する。
 - WebGPU の画像に描いて読み戻す描画は、SwiftShader で CPU と同じ結果になった（辺のすぐ近くの数画素を除く）。
 - WebGPU で canvas に描くフレーム（`gpu.beginFrame`）は、エラーなく動くことまでを確かめた。このヘッドレスの環境では、WebGPU の canvas を画面に出すと WebGPU が使えなくなる（UM を使わない最小のページでも同じ）ため、表示された絵は確かめていない。実際のブラウザでの確認が要る。

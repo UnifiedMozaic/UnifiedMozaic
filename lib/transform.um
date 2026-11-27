@@ -1,0 +1,61 @@
+// 3D の変換の行列を作る関数。`import { mat4Perspective, mat4LookAt } from "um:transform";` で使う（docs/libraries.ja.md）。
+
+// ---- 3D の変換の行列（mat4<f32>） ----
+// 列ベクトルに左から掛ける形（mat4MulVec(m, v) は m × v）。いくつかを続けて掛けるときは
+// mat4Mul(proj, mat4Mul(view, model)) のように、先に掛けたいものを右に置く。
+// 座標は右手系。角度はラジアン。kernel なので GPU でも使える。
+
+// 平行移動。
+export kernel function mat4Translate(x: f32, y: f32, z: f32): mat4<f32> {
+  return { m: [1, 0, 0, x, 0, 1, 0, y, 0, 0, 1, z, 0, 0, 0, 1] };
+}
+
+// 拡大・縮小（軸ごとの倍率）。
+export kernel function mat4Scale(x: f32, y: f32, z: f32): mat4<f32> {
+  return { m: [x, 0, 0, 0, 0, y, 0, 0, 0, 0, z, 0, 0, 0, 0, 1] };
+}
+
+// x 軸のまわりの回転（y から z へ回る向きが正）。
+export kernel function mat4RotateX(angle: f32): mat4<f32> {
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  return { m: [1, 0, 0, 0, 0, c, -s, 0, 0, s, c, 0, 0, 0, 0, 1] };
+}
+
+// y 軸のまわりの回転（z から x へ回る向きが正）。
+export kernel function mat4RotateY(angle: f32): mat4<f32> {
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  return { m: [c, 0, s, 0, 0, 1, 0, 0, -s, 0, c, 0, 0, 0, 0, 1] };
+}
+
+// z 軸のまわりの回転（x から y へ回る向きが正）。
+export kernel function mat4RotateZ(angle: f32): mat4<f32> {
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  return { m: [c, -s, 0, 0, s, c, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] };
+}
+
+// 透視投影。fovY は縦の画角（ラジアン）、aspect は幅 / 高さ、near と far は見える奥行きの範囲（どちらも正）。
+// カメラは -z の向きを見る。結果の w で割ると、z は near で 0、far で 1 になる（WebGPU・Metal・Direct3D の深度の範囲）。
+export kernel function mat4Perspective(fovY: f32, aspect: f32, near: f32, far: f32): mat4<f32> {
+  const f: f32 = 1 / Math.tan(fovY * 0.5);
+  const nf: f32 = 1 / (near - far);
+  return { m: [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, far * nf, near * far * nf, 0, 0, -1, 0] };
+}
+
+// 正射影。left〜right、bottom〜top、near〜far の箱を、x と y は -1〜1、z は 0〜1 に写す（カメラは -z の向きを見る）。
+export kernel function mat4Ortho(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32): mat4<f32> {
+  const w: f32 = 1 / (right - left);
+  const h: f32 = 1 / (top - bottom);
+  const d: f32 = 1 / (near - far);
+  return { m: [2 * w, 0, 0, -(right + left) * w, 0, 2 * h, 0, -(top + bottom) * h, 0, 0, d, near * d, 0, 0, 0, 1] };
+}
+
+// カメラの行列（ワールドの座標をカメラの座標にする）。eye から target を見て、up が画面の上になる。
+export kernel function mat4LookAt(eye: vec3<f32>, target: vec3<f32>, up: vec3<f32>): mat4<f32> {
+  const z = vec3Normalize(eye - target);
+  const x = vec3Normalize(vec3Cross(up, z));
+  const y = vec3Cross(z, x);
+  return { m: [x.x, x.y, x.z, -vec3Dot(x, eye), y.x, y.y, y.z, -vec3Dot(y, eye), z.x, z.y, z.z, -vec3Dot(z, eye), 0, 0, 0, 1] };
+}

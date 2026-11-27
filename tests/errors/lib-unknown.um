@@ -1,0 +1,7 @@
+// ない名前のライブラリと、ライブラリにない名前。
+// error: import-path
+import { nothing } from "um:nothing";
+
+export function main(): i32 {
+  return 0;
+}

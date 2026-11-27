@@ -10,6 +10,9 @@
 // expect: true
 // expect: true
 
+import { WasmValue, WasmLimits, wasmLoadFile, wasmNew, wasmCall, wasmRead, wasmWrite } from "um:wasm";
+
+
 kernel function glow(i: u32, dst: mut Buffer<u8>, src: Buffer<u8>, amount: i32): void {
   if ((i & 3) == 3) {
     dst[i] = src[i];

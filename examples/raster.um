@@ -23,6 +23,8 @@
 // expect: ................................................
 // expect: ................................................
 
+import { mat4RotateX, mat4RotateY, mat4Perspective, mat4LookAt } from "um:transform";
+
 const WIDTH: u32 = 48;
 const HEIGHT: u32 = 20;
 

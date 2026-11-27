@@ -1,0 +1,5 @@
+// 標準の中だけで使う名前（__std_ で始まる）は、プログラムからは書けない。
+// error: reserved-name
+export function main(): i32 {
+  return __std_renderPack(vec4(1.0 as f32, 0, 0, 1)) as i32;
+}

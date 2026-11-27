@@ -64,7 +64,7 @@ node src/cli.ts build tri.um --target host -o tri && ./tri             # CPU で
 | `fragment function` | vertex function の戻り値と同じ struct（三角形の中で補間された値） | Buffer（読むだけ）と値 | 色の `vec4<f32>`（赤・緑・青・不透明度。0〜1） |
 
 - **頂点は vertex function が自分で読みます。** 頂点の形式を宣言する代わりに、`verts[i]` のように Buffer から読みます。kernel が書いた Buffer（パーティクルなど）も、CPU に戻さずにそのまま描けます。
-- **position はクリップ空間の位置です。** `x / w` と `y / w` が -1〜1 の範囲が画像に入り（y は上が正）、`z / w` が 0〜1 の範囲が深度です（0 が近い）。`mat4Perspective` と `mat4LookAt`（[言語ガイド](guide.ja.md)の「三角関数」）の結果をそのまま使えます。
+- **position はクリップ空間の位置です。** `x / w` と `y / w` が -1〜1 の範囲が画像に入り（y は上が正）、`z / w` が 0〜1 の範囲が深度です（0 が近い）。`mat4Perspective` と `mat4LookAt`（ライブラリ `um:transform`。[ライブラリ](libraries.ja.md)）の結果をそのまま使えます。
 - **受け渡す struct のフィールド**は `f32` / `i32` / `u32` か、それらの `vec2`〜`vec4` です。浮動小数点は三角形の中で補間し、整数は補間しません（最初の頂点の値）。fragment function の `position` は、画素の座標（左上が (0, 0)、画素の中心は 0.5）と深度です。
 - 本体の決まりは kernel と同じです（GPU で使える型だけ、`kernel function` を呼べる）。Buffer の要素と値は 32 ビットの型（`i32` / `u32` / `f32` と、その struct・固定長配列）だけで、Buffer には書けません。
 - シェーダの関数は `gpu.draw` の中でだけ使えます（普通の関数として呼ぶことも、`dispatch` することもできません）。共通の計算は `kernel function` にして、両方から呼びます。
@@ -83,13 +83,37 @@ node src/cli.ts build tri.um --target host -o tri && ./tri             # CPU で
 - **番号で描く**: `gpu.drawIndexed(mut image, indices: Buffer<u32>, vs(...), fs(...))` は、`indices` の値を頂点の番号として vertex function に渡し、3 つずつを三角形にする。四角なら 4 つの頂点と 6 つの番号で描ける。
 - **インスタンス**: `gpu.draw` と `gpu.drawIndexed` に、図形の前にインスタンスの数を足すと（`gpu.draw(mut image, vertexCount, instances, vs(...), fs(...))`）、同じ形をその数だけ描く。vertex function は 2 番目の引数でインスタンスの番号を受け取る（`vertex function vs(i: u32, inst: u32, ...)`）ので、位置や色はインスタンスごとの Buffer から `places[inst]` のように読む。
 - **深度テスト**があります。深度の小さい（近い）ものが残り、同じか遠いものは塗りません。同じ画像への `gpu.draw` は、前の結果に重ねて描きます。
-- いまは、裏面も描きます（カリングなし）。色はそのまま書きます（半透明の合成なし）。
+- 描き方（裏面を描くか・色の混ぜ方・深度を書くか）は、画像のフィールドで決めます（下の「描き方」）。既定は、裏表とも描き、色を上書きし、深度を書きます。
 - `gpu.draw` は dispatch と同じ順に GPU に積まれます。前に dispatch した kernel が書いた Buffer を、続けて描けます。
 - GPU の画像の大きさが GPU の上限を超えると停止します。
 
+## 描き方（カリング・半透明）
+
+`gpu.draw` の前に、画像のフィールドを変えます。`gpu.draw` のたびに、そのときの値で描きます（変えた値は、戻すまで続きます）。
+
+| フィールド | 値 | 内容 |
+| --- | --- | --- |
+| `cull: CullMode` | `None`（既定）・`Back`・`Front` | 面の向きで捨てる。表は、**画面で反時計回り**に頂点が並ぶ三角形（WebGPU の既定と同じ）。閉じた立体は `Back` にすると、見えない裏の面を塗らないぶん速くなる |
+| `blend: BlendMode` | `Opaque`（既定）・`Alpha`・`Add` | 色の混ぜ方。`Alpha` は 色 = src × a + dst × (1 − a)、`Add` は 色 = src × a + dst（光・炎など）。不透明度はどちらも src.a + dst.a × (1 − src.a)。src は fragment function の色を 0〜1 に収めたもの |
+| `depthWrite: bool` | `true`（既定）・`false` | 深度を書くか。`false` でも深度は比べる（奥にあるものは塗らない） |
+
+```ts
+// 不透明なものを先に描き、半透明のものを奥から順に、深度を書かずに重ねる。
+let img = gpu.beginFrame(windowSurface(window), 0xFF000000);
+img.cull = CullMode.Back;
+gpu.drawIndexed(mut img, solidIndices, vs(scene), fs(light));
+img.blend = BlendMode.Alpha;
+img.depthWrite = false;
+gpu.drawIndexed(mut img, glassIndices, vs(scene), glassFs(light));
+gpu.endFrame(mut img);
+```
+
+- 半透明のものどうしは、描いた順に重なります（奥から順に描くのはプログラムの役目）。
+- GPU と CPU のラスタライザは同じ式で混ぜます（`tests/wgpu/draw_state.um`）。ただし GPU によっては混ぜる計算の丸めが違い、色が 1 ずれることがあります。
+
 ## テクスチャ
 
-画像の色を読む標準の `kernel function` です。画像は `Buffer<u32>` の画素（0xAARRGGBB、上の行から）と幅・高さで渡します。UM で書いた関数なので、シェーダでも kernel でも CPU の描画でも使え、どこでも同じ値になります。
+画像の色を読む `kernel function` です。ライブラリ `um:texture` にあります（`import { textureSample } from "um:texture";`。[ライブラリ](libraries.ja.md)）。画像は `Buffer<u32>` の画素（0xAARRGGBB、上の行から）と幅・高さで渡します。UM で書いた関数なので、シェーダでも kernel でも CPU の描画でも使え、どこでも同じ値になります。
 
 | 関数 | 内容 |
 | --- | --- |
@@ -98,16 +122,19 @@ node src/cli.ts build tri.um --target host -o tri && ./tri             # CPU で
 | `colorFromArgb(c: u32): vec4<f32>` | 0xAARRGGBB を 0〜1 の色（x = 赤、y = 緑、z = 青、w = 不透明度）にする |
 
 ```ts
+import { textureSample } from "um:texture";
 fragment function fs(v: VOut, bricks: Buffer<u32>): vec4<f32> {
   return textureSample(bricks, 32, 32, v.uv);
 }
 ```
 
+画像ファイル（PNG）は `imageLoad(path)` で読めます（[画像ファイルの読み込み](image.ja.md)）。読んだ `Bitmap` の `pixels` / `width` / `height` をそのまま渡します。
+
 GPU の専用のテクスチャ（ハードウェアの補間、ミップマップ）ではなく、Buffer を読んで計算します。そのぶん遅くなりますが、CPU と GPU で同じ絵になります。例は [examples/window/demo.um](../examples/window/demo.um)（壁と柱のレンガ）と [tests/wgpu/draw_instanced.um](../tests/wgpu/draw_instanced.um)。
 
 ## 文字
 
-画像やフレームに ASCII の文字を描く標準の関数です（`runtime/text.um`。使うときだけ加わります）。
+画像やフレームに ASCII の文字を描く関数です。ライブラリ `um:text` にあります（`import { drawText, textWidth } from "um:text";`。[ライブラリ](libraries.ja.md)）。
 
 | 関数 | 内容 |
 | --- | --- |
@@ -115,6 +142,7 @@ GPU の専用のテクスチャ（ハードウェアの補間、ミップマッ�
 | `textWidth(text: string, scale: f32): f32` | 描いたときの幅（画素）。1 文字は `6 × scale`（5 つの点と 1 つの隙間）。高さは `7 × scale` |
 
 ```ts
+import { drawText, textWidth } from "um:text";
 drawText(mut frame, `GEMS ${score} / 8`, 10, 10, 3, 0xFFFFFFFF);
 const w = textWidth("CLEAR!", 8);
 drawText(mut frame, "CLEAR!", (frame.width as f32 - w) / 2, 200, 8, 0xFFFFD54A);
@@ -131,7 +159,7 @@ drawText(mut frame, "CLEAR!", (frame.width as f32 - w) / 2, 200, 8, 0xFFFFD54A);
 const win = windowOpen("game", 1280, 720) ?? 0;
 while (running) {
   // ...入力（pollWindowEvent）...
-  let frame = gpu.beginFrame(win, 0xFF202028);
+  let frame = gpu.beginFrame(windowSurface(win), 0xFF202028);
   gpu.draw(mut frame, 36, vs(verts, camera), fs(light));
   gpu.endFrame(mut frame);   // 表示する（画面の更新に合わせて待つ）
 }
@@ -139,7 +167,7 @@ while (running) {
 
 | 関数 | 内容 |
 | --- | --- |
-| `gpu.beginFrame(window: i32, clear: u32): GpuImage` | ウィンドウに描くフレームを始める。大きさはウィンドウの画素の大きさ（`windowPixelSize`）で、`frame.width` / `frame.height` で分かる。色を `clear` で、深度を 1 で埋める |
+| `gpu.beginFrame(surface: GpuSurface, clear: u32): GpuImage` | 表示の面に描くフレームを始める。面は表示する側のライブラリが作る（ウィンドウなら `um:window` の `windowSurface(window)`）。大きさは面の画素の大きさ（ウィンドウなら `windowPixelSize`）で、`frame.width` / `frame.height` で分かる。色を `clear` で、深度を 1 で埋める |
 | `gpu.endFrame(mut frame: GpuImage)` | 描いたフレームをウィンドウに表示する |
 
 - **GPU が使えれば**（`UM_WGPU=1` のビルドで GPU があれば）、ウィンドウの GPU の面（surface）に直接描きます。初めてのフレームで、ウィンドウは SDL の描画の装置を手放すので、**以後そのウィンドウに `windowPresent` は使えません**（使うと停止）。表示は画面の更新（vsync）に合わせて待ちます。

@@ -1,10 +1,12 @@
-// 文字の描画（docs/render.ja.md の「文字」）。プログラムが drawText / textWidth を使うときだけ、ドライバが加える。
+// 文字の描画（docs/render.ja.md の「文字」）。`import { drawText, textWidth } from "um:text";` で使う（docs/libraries.ja.md）。
 //
 // 5 × 7 の点の ASCII のフォント（UnifiedMozaic のために描いたもの）を、scale 倍の正方形の点で描く。
 // 点の 1 つずつを小さな四角として gpu.draw で描くので、GPU でも CPU でも、ネイティブでもブラウザでも動く。
 // 深度は 0（いちばん手前）なので、3D の場面の上に重なる。ASCII 以外の文字は ? になる（日本語はまだ描けない）。
 
 // 文字 32〜126 の 7 行ずつ。各行の下位 5 ビットが左から右の点（1 が点）。
+import { colorFromArgb } from "um:texture";
+
 const TEXT_FONT_5X7: u32[665] = [
   0, 0, 0, 0, 0, 0, 0, 4, 4, 4, 4, 4, 0, 4, 10, 10, 10, 0, 0, 0, 0,
   10, 10, 31, 10, 31, 10, 10, 4, 15, 20, 14, 5, 30, 4, 24, 25, 2, 4, 8, 19, 3,
@@ -77,7 +79,7 @@ function textGlyph(c: u32): u32 {
 
 // 1 文字の幅は、5 つの点と 1 つの隙間で 6 × scale 画素。高さは 7 × scale 画素。
 // UTF-8 の 2 バイト目以降は数えない（ASCII 以外の文字は 1 文字の ? になる）。
-function textWidth(text: string, scale: f32): f32 {
+export function textWidth(text: string, scale: f32): f32 {
   let n: u32 = 0;
   for (let i: usize = 0; i < text.length; i++) {
     const b = text[i] as u32;
@@ -89,7 +91,7 @@ function textWidth(text: string, scale: f32): f32 {
 }
 
 // フレームか画像の (x, y)（左上。画素）から、scale 倍の大きさで text を描く。color は 0xAARRGGBB。
-function drawText(frame: mut GpuImage, text: string, x: f32, y: f32, scale: f32, color: u32): void {
+export function drawText(frame: mut GpuImage, text: string, x: f32, y: f32, scale: f32, color: u32): void {
   // 点の数を数えてから、点の位置を並べる。
   let count: u32 = 0;
   for (let i: usize = 0; i < text.length; i++) {

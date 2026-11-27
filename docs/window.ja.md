@@ -3,7 +3,9 @@
 ネイティブのプログラムは、ウィンドウを開いて画素を表示し、マウスとキーボードの入力を受け取り、音を鳴らせます。
 ファイルのダイアログ、ファイルのドロップ、クリップボード、カーソルの形、IME の入力中の文字、ウィンドウの操作、
 複数のディスプレイと高密度の画面（HiDPI）、高精度の時計も使えます。
-中身は [SDL3](https://www.libsdl.org/) で、macOS・Windows・Linux で同じコードが動きます。ブラウザ（wasm32）では、ウィンドウは canvas になります（音・ダイアログ・メニューバーなどはまだない。[ブラウザで動かす](web.ja.md)）。
+中身は [SDL3](https://www.libsdl.org/) で、macOS・Windows・Linux で同じコードが動きます。ブラウザ（wasm32）では、ウィンドウは canvas に、音は Web Audio になります（ダイアログ・メニューバーなどはまだない。[ブラウザで動かす](web.ja.md)）。
+
+ライブラリ `um:window` です。`import * from "um:window";` で読み込みます（[ライブラリ](libraries.ja.md)）。
 
 UI はすべて UM で書く、という前提の入口です。OS の標準の部品（ボタンなど）は使いません。ボタンや文字の描画などは、
 `Buffer<u32>` に kernel で描きます。OS に任せるのは、ウィンドウ・入力・音・ファイルのダイアログ・クリップボードだけです。
@@ -165,6 +167,7 @@ enum WindowEvent {
   MouseMove(window: i32, x: i32, y: i32),
   MouseDown(window: i32, x: i32, y: i32, button: i32),    // button: 1 左、2 中、3 右
   MouseUp(window: i32, x: i32, y: i32, button: i32),
+  MouseRelative(window: i32, dx: f64, dy: f64),           // 相対モードのマウスの動き（右・下が正。ウィンドウの座標の単位）
   Wheel(window: i32, dx: i32, dy: i32, fx: f64, fy: f64), // 上・右が正。dx, dy はノッチ（整数）、fx, fy は細かい量（ノッチ単位の小数。トラックパッドの滑らかなスクロール）
   KeyDown(window: i32, key: Key, mods: Mods, repeat: bool),
   KeyUp(window: i32, key: Key, mods: Mods),
@@ -289,6 +292,27 @@ Windows・Linux・`offscreen` では何もしません（`false` を返します
 `CursorShape` は `Default`（矢印）・`Text`（文字の入力）・`Wait`（待ち）・`Crosshair`（十字）・`Progress`（処理中だが操作できる）・
 `ResizeNWSE`・`ResizeNESW`・`ResizeEW`（左右の矢印）・`ResizeNS`（上下の矢印）・`Move`・`NotAllowed`（禁止）・`Pointer`（手）です。
 
+### マウスの相対モード
+
+一人称の視点のように、マウスの動きの量で向きを変えるときに使います。カーソルを隠してウィンドウに閉じ込め、画面の端でも
+止まらずに動きの量を届けます。
+
+| 関数 | 説明 |
+| --- | --- |
+| `windowSetRelativeMouse(window, on: bool): bool` | 入れる・切る。入れているあいだは `MouseMove` の代わりに `MouseRelative(window, dx, dy)` が届く |
+| `windowRelativeMouse(window): bool` | 入っているか |
+
+```ts
+WindowEvent.MouseRelative(w, dx, dy) => {
+  yaw -= (dx as f32) * 0.003;
+  pitch -= (dy as f32) * 0.003;
+}
+```
+
+ブラウザでは Pointer Lock を使います。ブラウザの決まりで、クリックの中からしか入れないので、`windowSetRelativeMouse(w, true)`
+のあとの最初のクリックで入ります。Esc を押すとブラウザが抜けさせますが、もう一度クリックすれば入り直します
+（`windowRelativeMouse` は、いま入っているかを返します）。
+
 ## 文字の入力と IME
 
 | 関数 | 説明 |
@@ -310,6 +334,7 @@ Windows・Linux・`offscreen` では何もしません（`false` を返します
 
 既定の出力のデバイスに、f32 の標本を書き込んで鳴らします。標本はチャンネルを交互に並べます（ステレオなら L R L R …）。
 1 フレーム = チャンネルの数の標本です。SDL が出力のデバイスの形式（標本化周波数など）への変換をします。
+ブラウザでは Web Audio で鳴らします（[ブラウザで動かす](web.ja.md)。最初のクリックかキーまでは鳴りません）。
 
 | 関数 | 説明 |
 | --- | --- |
@@ -352,9 +377,9 @@ const t = ((audioPlayed(s) - audioLatency(s)) as f64) / (rate as f64) + startOff
 ## しくみ
 
 - 組み込みの部分は `runtime/window.c`（ウィンドウ・入力・ダイアログ・クリップボードなど）と `runtime/audio.c`（音）で、C と SDL3 です。
-  名前のある関数と `WindowEvent` などの型は `runtime/window.um`（UM）にあり、プログラムがこれらの名前を使うときだけ標準の関数として加わります。
+  名前のある関数と `WindowEvent` などの型は `lib/window.um`（UM のライブラリ `um:window`）にあり、`import * from "um:window";` で読み込みます。
   ウィンドウも音も使わないプログラムは SDL3 をリンクしません。
-- `runtime/window.um` は、次の低い層の組み込みを操作番号で呼び分けています（番号は `runtime/window.c` と `runtime/audio.c` の enum）。
+- `lib/window.um` は、次の低い層の組み込みを操作番号で呼び分けています（番号は `runtime/window.c` と `runtime/audio.c` の enum）。これらは `lib/window.um` の中だけで使え、プログラムからは呼べません。
   - `windowPoll(event: mut Buffer<i32>, timeoutMs: i32): bool` — `event` の先頭 6 要素に `[種類, ウィンドウ, a, b, c, d]` を書く
   - `windowCtl(op: i32, window: i32, io: mut Buffer<i64>): i64` — 引数を `io` から読み、結果を `io` と戻り値で返す
   - `windowCtlF(op: i32, window: i32, a: i64): f64` / `windowSetText(op, window, a, text: string): i64` / `windowGetText(op, window, a): string`
@@ -365,5 +390,5 @@ const t = ((audioPlayed(s) - audioLatency(s)) as f64) / (rate as f64) + startOff
 - 表示は SDL のレンダラ（macOS は Metal、Windows は Direct3D）のテクスチャに写して描きます。高密度の画面では、描画の面を画素の大きさで作ります
   （`SDL_WINDOW_HIGH_PIXEL_DENSITY`）。
 - 試験（`node tests/run.ts`）は、`SDL_VIDEO_DRIVER=offscreen` と `SDL_AUDIO_DRIVER=dummy` で画面と音のデバイスなしに実行します。
-  ドロップと IME は人の操作がないと起きないので、試験用の操作 `windowSetText(90, window, 種類, 文字列)` で SDL のイベントを積み、
+  ドロップと IME は人の操作がないと起きないので、試験用の関数 `windowTestEvent(window, 種類, 文字列)` で SDL のイベントを積み、
   変換の経路を確かめます（種類は `runtime/window.c` の `WS_TEST_EVENT`）。ダイアログは自動の試験がありません。

@@ -386,7 +386,7 @@ kernel function mat4Transpose<T>(a: mat4<T>): mat4<T> {
 
 // sin と cos の f32 の範囲の縮小。|x| を π/4 の偶数倍と残り r（|r| ≤ π/4 ほど）に分け、
 // 返す vec2 の x に r、y に π/4 の何倍かを 8 で割った余り（0, 2, 4, 6）を入れる。
-kernel function mathReduceF32(x: f32): vec2<f32> {
+kernel function __std_mathReduceF32(x: f32): vec2<f32> {
   let j: f32 = Math.floor(x * 1.27323954473516);
   if (j - Math.floor(j * 0.5) * 2 == 1) {
     j += 1;
@@ -396,62 +396,62 @@ kernel function mathReduceF32(x: f32): vec2<f32> {
 }
 
 // |r| ≤ π/4 での sin。
-kernel function mathSinPolyF32(r: f32): f32 {
+kernel function __std_mathSinPolyF32(r: f32): f32 {
   const z: f32 = r * r;
   return ((-1.9515295891e-4 * z + 8.3321608736e-3) * z - 1.6666654611e-1) * z * r + r;
 }
 
 // |r| ≤ π/4 での cos。
-kernel function mathCosPolyF32(r: f32): f32 {
+kernel function __std_mathCosPolyF32(r: f32): f32 {
   const z: f32 = r * r;
   return ((2.443315711809948e-5 * z - 1.388731625493765e-3) * z + 4.166664568298827e-2) * z * z - 0.5 * z + 1;
 }
 
-kernel function mathSinF32(x: f32): f32 {
+kernel function __std_mathSinF32(x: f32): f32 {
   let sign: f32 = 1;
   let a: f32 = x;
   if (x < 0) {
     sign = -1;
     a = -x;
   }
-  const red = mathReduceF32(a);
+  const red = __std_mathReduceF32(a);
   let j: f32 = red.y;
   if (j > 3) {
     sign = -sign;
     j -= 4;
   }
   if (j == 2) {
-    return sign * mathCosPolyF32(red.x);
+    return sign * __std_mathCosPolyF32(red.x);
   }
-  return sign * mathSinPolyF32(red.x);
+  return sign * __std_mathSinPolyF32(red.x);
 }
 
-kernel function mathCosF32(x: f32): f32 {
+kernel function __std_mathCosF32(x: f32): f32 {
   let sign: f32 = 1;
   let a: f32 = x;
   if (x < 0) {
     a = -x;
   }
-  const red = mathReduceF32(a);
+  const red = __std_mathReduceF32(a);
   let j: f32 = red.y;
   if (j > 3) {
     sign = -sign;
     j -= 4;
   }
   if (j == 2) {
-    return -sign * mathSinPolyF32(red.x);
+    return -sign * __std_mathSinPolyF32(red.x);
   }
-  return sign * mathCosPolyF32(red.x);
+  return sign * __std_mathCosPolyF32(red.x);
 }
 
-kernel function mathTanF32(x: f32): f32 {
+kernel function __std_mathTanF32(x: f32): f32 {
   let sign: f32 = 1;
   let a: f32 = x;
   if (x < 0) {
     sign = -1;
     a = -x;
   }
-  const red = mathReduceF32(a);
+  const red = __std_mathReduceF32(a);
   const r: f32 = red.x;
   const z: f32 = r * r;
   let y: f32 = r;
@@ -465,7 +465,7 @@ kernel function mathTanF32(x: f32): f32 {
 }
 
 // |x| ≤ 1 での asin。1 より大きいと NaN。
-kernel function mathAsinF32(x: f32): f32 {
+kernel function __std_mathAsinF32(x: f32): f32 {
   let sign: f32 = 1;
   let a: f32 = x;
   if (x < 0) {
@@ -490,17 +490,17 @@ kernel function mathAsinF32(x: f32): f32 {
 }
 
 // |x| ≤ 1 での acos（0 〜 π）。1 より大きいと NaN。
-kernel function mathAcosF32(x: f32): f32 {
+kernel function __std_mathAcosF32(x: f32): f32 {
   if (x < -0.5) {
-    return 3.141592653589793 - 2 * mathAsinF32(Math.sqrt(0.5 * (1 + x)));
+    return 3.141592653589793 - 2 * __std_mathAsinF32(Math.sqrt(0.5 * (1 + x)));
   }
   if (x > 0.5) {
-    return 2 * mathAsinF32(Math.sqrt(0.5 * (1 - x)));
+    return 2 * __std_mathAsinF32(Math.sqrt(0.5 * (1 - x)));
   }
-  return 1.5707963267948966 - mathAsinF32(x);
+  return 1.5707963267948966 - __std_mathAsinF32(x);
 }
 
-kernel function mathAtanF32(x: f32): f32 {
+kernel function __std_mathAtanF32(x: f32): f32 {
   let sign: f32 = 1;
   let a: f32 = x;
   if (x < 0) {
@@ -520,7 +520,7 @@ kernel function mathAtanF32(x: f32): f32 {
 }
 
 // 点 (x, y) の偏角（-π 〜 π）。C の atan2 と同じく、0 の符号と無限大も扱う。
-kernel function mathAtan2F32(y: f32, x: f32): f32 {
+kernel function __std_mathAtan2F32(y: f32, x: f32): f32 {
   if (x != x || y != y) {
     return x + y;
   }
@@ -558,15 +558,15 @@ kernel function mathAtan2F32(y: f32, x: f32): f32 {
     }
     return ys * 0;
   }
-  const t: f32 = mathAtanF32(y / x);
+  const t: f32 = __std_mathAtanF32(y / x);
   if (xneg) {
     return t + ys * pi;
   }
   return t;
 }
 
-// sin と cos の f64 の範囲の縮小（mathReduceF32 と同じ形）。
-function mathReduceF64(x: f64): vec2<f64> {
+// sin と cos の f64 の範囲の縮小（__std_mathReduceF32 と同じ形）。
+function __std_mathReduceF64(x: f64): vec2<f64> {
   let j: f64 = Math.floor(x * 1.27323954473516268615);
   if (j - Math.floor(j * 0.5) * 2 == 1) {
     j += 1;
@@ -575,61 +575,61 @@ function mathReduceF64(x: f64): vec2<f64> {
   return { x: r, y: j - Math.floor(j * 0.125) * 8 };
 }
 
-function mathSinPolyF64(r: f64): f64 {
+function __std_mathSinPolyF64(r: f64): f64 {
   const z: f64 = r * r;
   return r + r * z * (((((1.58962301576546568060e-10 * z - 2.50507477628578072866e-8) * z + 2.75573136213857245213e-6) * z - 1.98412698295895385996e-4) * z + 8.33333333332211858878e-3) * z - 1.66666666666666307295e-1);
 }
 
-function mathCosPolyF64(r: f64): f64 {
+function __std_mathCosPolyF64(r: f64): f64 {
   const z: f64 = r * r;
   return 1 - 0.5 * z + z * z * (((((-1.13585365213876817300e-11 * z + 2.08757008419747316778e-9) * z - 2.75573141792967388112e-7) * z + 2.48015872888517045348e-5) * z - 1.38888888888730564116e-3) * z + 4.16666666666665929218e-2);
 }
 
-function mathSinF64(x: f64): f64 {
+function __std_mathSinF64(x: f64): f64 {
   let sign: f64 = 1;
   let a: f64 = x;
   if (x < 0) {
     sign = -1;
     a = -x;
   }
-  const red = mathReduceF64(a);
+  const red = __std_mathReduceF64(a);
   let j: f64 = red.y;
   if (j > 3) {
     sign = -sign;
     j -= 4;
   }
   if (j == 2) {
-    return sign * mathCosPolyF64(red.x);
+    return sign * __std_mathCosPolyF64(red.x);
   }
-  return sign * mathSinPolyF64(red.x);
+  return sign * __std_mathSinPolyF64(red.x);
 }
 
-function mathCosF64(x: f64): f64 {
+function __std_mathCosF64(x: f64): f64 {
   let sign: f64 = 1;
   let a: f64 = x;
   if (x < 0) {
     a = -x;
   }
-  const red = mathReduceF64(a);
+  const red = __std_mathReduceF64(a);
   let j: f64 = red.y;
   if (j > 3) {
     sign = -sign;
     j -= 4;
   }
   if (j == 2) {
-    return -sign * mathSinPolyF64(red.x);
+    return -sign * __std_mathSinPolyF64(red.x);
   }
-  return sign * mathCosPolyF64(red.x);
+  return sign * __std_mathCosPolyF64(red.x);
 }
 
-function mathTanF64(x: f64): f64 {
+function __std_mathTanF64(x: f64): f64 {
   let sign: f64 = 1;
   let a: f64 = x;
   if (x < 0) {
     sign = -1;
     a = -x;
   }
-  const red = mathReduceF64(a);
+  const red = __std_mathReduceF64(a);
   const r: f64 = red.x;
   const z: f64 = r * r;
   let y: f64 = r;
@@ -644,7 +644,7 @@ function mathTanF64(x: f64): f64 {
   return sign * y;
 }
 
-function mathAsinF64(x: f64): f64 {
+function __std_mathAsinF64(x: f64): f64 {
   let sign: f64 = 1;
   let a: f64 = x;
   if (x < 0) {
@@ -676,20 +676,20 @@ function mathAsinF64(x: f64): f64 {
   return sign * (a * z + a);
 }
 
-function mathAcosF64(x: f64): f64 {
+function __std_mathAcosF64(x: f64): f64 {
   if (x < -0.5) {
-    return 3.14159265358979323846 - 2 * mathAsinF64(Math.sqrt(0.5 * (1 + x)));
+    return 3.14159265358979323846 - 2 * __std_mathAsinF64(Math.sqrt(0.5 * (1 + x)));
   }
   if (x > 0.5) {
-    return 2 * mathAsinF64(Math.sqrt(0.5 * (1 - x)));
+    return 2 * __std_mathAsinF64(Math.sqrt(0.5 * (1 - x)));
   }
   const pio4: f64 = 7.85398163397448309616e-1;
-  let z: f64 = pio4 - mathAsinF64(x);
+  let z: f64 = pio4 - __std_mathAsinF64(x);
   z = z + 6.123233995736765886130e-17;
   return z + pio4;
 }
 
-function mathAtanF64(x: f64): f64 {
+function __std_mathAtanF64(x: f64): f64 {
   let sign: f64 = 1;
   let a: f64 = x;
   if (x < 0) {
@@ -715,7 +715,7 @@ function mathAtanF64(x: f64): f64 {
   return sign * (base + (w + extra));
 }
 
-function mathAtan2F64(y: f64, x: f64): f64 {
+function __std_mathAtan2F64(y: f64, x: f64): f64 {
   if (x != x || y != y) {
     return x + y;
   }
@@ -752,113 +752,17 @@ function mathAtan2F64(y: f64, x: f64): f64 {
     }
     return ys * 0;
   }
-  const t: f64 = mathAtanF64(y / x);
+  const t: f64 = __std_mathAtanF64(y / x);
   if (xneg) {
     return t + ys * pi;
   }
   return t;
 }
 
-// ---- 3D の変換の行列（mat4<f32>） ----
-// 列ベクトルに左から掛ける形（mat4MulVec(m, v) は m × v）。いくつかを続けて掛けるときは
-// mat4Mul(proj, mat4Mul(view, model)) のように、先に掛けたいものを右に置く。
-// 座標は右手系。角度はラジアン。kernel なので GPU でも使える。
+// ---- 表示の面 ----
 
-// 平行移動。
-kernel function mat4Translate(x: f32, y: f32, z: f32): mat4<f32> {
-  return { m: [1, 0, 0, x, 0, 1, 0, y, 0, 0, 1, z, 0, 0, 0, 1] };
-}
-
-// 拡大・縮小（軸ごとの倍率）。
-kernel function mat4Scale(x: f32, y: f32, z: f32): mat4<f32> {
-  return { m: [x, 0, 0, 0, 0, y, 0, 0, 0, 0, z, 0, 0, 0, 0, 1] };
-}
-
-// x 軸のまわりの回転（y から z へ回る向きが正）。
-kernel function mat4RotateX(angle: f32): mat4<f32> {
-  const c = Math.cos(angle);
-  const s = Math.sin(angle);
-  return { m: [1, 0, 0, 0, 0, c, -s, 0, 0, s, c, 0, 0, 0, 0, 1] };
-}
-
-// y 軸のまわりの回転（z から x へ回る向きが正）。
-kernel function mat4RotateY(angle: f32): mat4<f32> {
-  const c = Math.cos(angle);
-  const s = Math.sin(angle);
-  return { m: [c, 0, s, 0, 0, 1, 0, 0, -s, 0, c, 0, 0, 0, 0, 1] };
-}
-
-// z 軸のまわりの回転（x から y へ回る向きが正）。
-kernel function mat4RotateZ(angle: f32): mat4<f32> {
-  const c = Math.cos(angle);
-  const s = Math.sin(angle);
-  return { m: [c, -s, 0, 0, s, c, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] };
-}
-
-// 透視投影。fovY は縦の画角（ラジアン）、aspect は幅 / 高さ、near と far は見える奥行きの範囲（どちらも正）。
-// カメラは -z の向きを見る。結果の w で割ると、z は near で 0、far で 1 になる（WebGPU・Metal・Direct3D の深度の範囲）。
-kernel function mat4Perspective(fovY: f32, aspect: f32, near: f32, far: f32): mat4<f32> {
-  const f: f32 = 1 / Math.tan(fovY * 0.5);
-  const nf: f32 = 1 / (near - far);
-  return { m: [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, far * nf, near * far * nf, 0, 0, -1, 0] };
-}
-
-// 正射影。left〜right、bottom〜top、near〜far の箱を、x と y は -1〜1、z は 0〜1 に写す（カメラは -z の向きを見る）。
-kernel function mat4Ortho(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32): mat4<f32> {
-  const w: f32 = 1 / (right - left);
-  const h: f32 = 1 / (top - bottom);
-  const d: f32 = 1 / (near - far);
-  return { m: [2 * w, 0, 0, -(right + left) * w, 0, 2 * h, 0, -(top + bottom) * h, 0, 0, d, near * d, 0, 0, 0, 1] };
-}
-
-// カメラの行列（ワールドの座標をカメラの座標にする）。eye から target を見て、up が画面の上になる。
-kernel function mat4LookAt(eye: vec3<f32>, target: vec3<f32>, up: vec3<f32>): mat4<f32> {
-  const z = vec3Normalize(eye - target);
-  const x = vec3Normalize(vec3Cross(up, z));
-  const y = vec3Cross(z, x);
-  return { m: [x.x, x.y, x.z, -vec3Dot(x, eye), y.x, y.y, y.z, -vec3Dot(y, eye), z.x, z.y, z.z, -vec3Dot(z, eye), 0, 0, 0, 1] };
-}
-
-// ---- テクスチャ（画像の色を読む）----
-// 画像は Buffer<u32> の画素（0xAARRGGBB、上の行から）と幅・高さ。シェーダでも kernel でも CPU でも使え、
-// UM の四則演算で計算するので、どこでも同じ値になる。座標 uv は画像の左上が (0, 0)、右下が (1, 1)。
-// 範囲の外は画像を繰り返したとみなす（タイルのように並ぶ）。
-
-// 0xAARRGGBB の色を、0〜1 の vec4<f32>（x = 赤、y = 緑、z = 青、w = 不透明度）にする。
-kernel function colorFromArgb(c: u32): vec4<f32> {
-  return vec4(((c >> 16) & 255) as f32 / 255, ((c >> 8) & 255) as f32 / 255, (c & 255) as f32 / 255, ((c >> 24) & 255) as f32 / 255);
-}
-
-// 画素 (x, y) の色（補間しない）。範囲の外は繰り返す。
-kernel function textureFetch(pixels: Buffer<u32>, width: u32, height: u32, x: i32, y: i32): vec4<f32> {
-  const w = width as i32;
-  const h = height as i32;
-  let xi = x % w;
-  if (xi < 0) {
-    xi += w;
-  }
-  let yi = y % h;
-  if (yi < 0) {
-    yi += h;
-  }
-  return colorFromArgb(pixels[(yi as u32) * width + (xi as u32)]);
-}
-
-// 座標 uv の色。隣り合う 4 つの画素の色を、近さで混ぜる（バイリニア）。範囲の外は繰り返す。
-kernel function textureSample(pixels: Buffer<u32>, width: u32, height: u32, uv: vec2<f32>): vec4<f32> {
-  const fx = uv.x * (width as f32) - 0.5;
-  const fy = uv.y * (height as f32) - 0.5;
-  const x0 = Math.floor(fx);
-  const y0 = Math.floor(fy);
-  const tx = fx - x0;
-  const ty = fy - y0;
-  const ix = x0 as i32;
-  const iy = y0 as i32;
-  const a = textureFetch(pixels, width, height, ix, iy);
-  const b = textureFetch(pixels, width, height, ix + 1, iy);
-  const c = textureFetch(pixels, width, height, ix, iy + 1);
-  const d = textureFetch(pixels, width, height, ix + 1, iy + 1);
-  const top = a * (1 - tx) + b * tx;
-  const bottom = c * (1 - tx) + d * tx;
-  return top * (1 - ty) + bottom * ty;
+// GPU で描いた絵を表示する先（gpu.beginFrame に渡す。docs/render.ja.md）。表示する側のライブラリが作る
+// （um:window の windowSurface）。id はその面の番号（いまはウィンドウの番号）。
+struct GpuSurface {
+  id: i32;
 }

@@ -1,0 +1,6 @@
+// ライブラリの関数は、import しないと使えない（標準ではない）。ヒントで import の行を示す。
+// error: unknown-name
+export function main(): i32 {
+  const m = mat4Perspective(1.0, 1.0, 0.1, 10.0);
+  return 0;
+}

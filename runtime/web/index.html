@@ -32,6 +32,11 @@
       canvas: document.getElementById('screen'),
       args: params.get('args') ? params.get('args').split(',') : [],
       gpu: params.get('gpu') !== '0',
+      // readFile("tex.png") は、このページと同じ場所のファイルを読む。
+      readFileAsync: async (path) => {
+        const r = await fetch(path);
+        return r.ok ? new Uint8Array(await r.arrayBuffer()) : null;
+      },
     });
     const code = await exports.main();
     document.body.dataset.exit = String(code);

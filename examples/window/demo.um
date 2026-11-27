@@ -11,6 +11,11 @@
 //   node src/cli.ts build examples/window/demo.um --web -o demo-web   （HTTP で開く）
 // 引数に数を渡すと、そのフレーム数だけ動かして終わる（テスト用。宝石は自動で集める）。
 
+import * from "um:window";
+import { drawText, textWidth } from "um:text";
+import { textureSample } from "um:texture";
+import { mat4Translate, mat4RotateY, mat4Perspective, mat4LookAt } from "um:transform";
+
 // ---- 形 ----
 
 struct Vertex {
@@ -641,7 +646,7 @@ export function main(): i32 {
       }
     }
 
-    let frame = gpu.beginFrame(win, clear);
+    let frame = gpu.beginFrame(windowSurface(win), clear);
     if (frames == 0 && frame.handle == 0) {
       // CPU で描くときは、画素ごとの光線がとても重いので、レイトレーシングは切った状態で始める（T で入れられる）。
       game.raytrace = false;

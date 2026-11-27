@@ -1,0 +1,92 @@
+// 描き方（image.cull・image.blend・image.depthWrite）。GPU と CPU のラスタライザで同じ結果になることを確かめる。
+//   1. 表（画面で反時計回り）の三角形を左に、裏（時計回り）の三角形を右に描く。cull で片方が消える。
+//   2. 不透明度で重ねる（Alpha）・足す（Add）。色は丸めの境目（ちょうど .5）を避けた値にする。
+//   3. 深度を書かない描画のあとに奥のものを描くと、奥のものが上に残る。
+// cpu-build
+// expect: none 2 2
+// expect: back 2 0
+// expect: front 0 2
+// expect: alpha 255 64 0 191
+// expect: add 255 96 32 32
+// expect: depth 255 0 255 0
+
+struct VOut {
+  position: vec4<f32>;
+}
+
+// 2 つの三角形: 左は反時計回り（表）、右は時計回り（裏）。z は少し手前。
+vertex function tris(i: u32): VOut {
+  const xs: f32[6] = [-0.9, -0.1, -0.5, 0.1, 0.5, 0.9];
+  const ys: f32[6] = [-0.8, -0.8, 0.8, -0.8, 0.8, -0.8];
+  return { position: vec4(xs[i], ys[i], 0.5, 1) };
+}
+
+// 画面いっぱいの四角（深さ z）。
+vertex function quad(i: u32, z: f32): VOut {
+  const xs: f32[6] = [-1, 1, -1, -1, 1, 1];
+  const ys: f32[6] = [-1, -1, 1, 1, -1, 1];
+  return { position: vec4(xs[i], ys[i], z, 1) };
+}
+
+fragment function paint(v: VOut, c: vec4<f32>): vec4<f32> {
+  return c;
+}
+
+// 色を「a r g b」（10 進）にする。
+function rgba(p: u32): string {
+  return `${(p >> 24) & 255} ${(p >> 16) & 255} ${(p >> 8) & 255} ${p & 255}`;
+}
+
+function sides(cull: CullMode, label: string): void {
+  let img = gpu.beginImage(8, 4, 0xFF000000);
+  img.cull = cull;
+  gpu.draw(mut img, 6, tris(), paint(vec4(1.0 as f32, 0, 0, 1)));
+  let px = new Buffer<u32>(32);
+  gpu.endImage(mut img, mut px);
+  // 左と右の三角形の、真ん中の行の画素で塗られたものを数える。
+  let left = 0;
+  let right = 0;
+  for (let x: u32 = 0; x < 8; x++) {
+    if (px[16 + x] == 0xFFFF0000) {
+      if (x < 4) {
+        left++;
+      } else {
+        right++;
+      }
+    }
+  }
+  print(`${label} ${left} ${right}`);
+}
+
+export function main(): i32 {
+  sides(CullMode.None, "none");
+  sides(CullMode.Back, "back");
+  sides(CullMode.Front, "front");
+
+  // 青の地に、不透明度 0.25 の赤を重ねる: 赤 = 0.25 × 255 = 63.75 → 64、青 = 0.75 × 255 = 191.25 → 191。
+  let a = gpu.beginImage(2, 2, 0xFF0000FF);
+  a.blend = BlendMode.Alpha;
+  gpu.draw(mut a, 6, quad(0.5 as f32), paint(vec4(1.0 as f32, 0, 0, 0.25)));
+  let pa = new Buffer<u32>(4);
+  gpu.endImage(mut a, mut pa);
+  print(`alpha ${rgba(pa[0])}`);
+
+  // 灰色（32）の地に、不透明度 0.5 の赤を足す: 赤 = 0.25 + 32 / 255 → 95.75 → 96、緑と青は 32 のまま。
+  let b = gpu.beginImage(2, 2, 0xFF202020);
+  b.blend = BlendMode.Add;
+  gpu.draw(mut b, 6, quad(0.5 as f32), paint(vec4(0.5 as f32, 0, 0, 0.5)));
+  let pb = new Buffer<u32>(4);
+  gpu.endImage(mut b, mut pb);
+  print(`add ${rgba(pb[0])}`);
+
+  // 手前の赤を深度を書かずに描き、奥の緑を描く。緑が残る。
+  let d = gpu.beginImage(2, 2, 0xFF000000);
+  d.depthWrite = false;
+  gpu.draw(mut d, 6, quad(0.2 as f32), paint(vec4(1.0 as f32, 0, 0, 1)));
+  d.depthWrite = true;
+  gpu.draw(mut d, 6, quad(0.8 as f32), paint(vec4(0.0 as f32, 1, 0, 1)));
+  let pd = new Buffer<u32>(4);
+  gpu.endImage(mut d, mut pd);
+  print(`depth ${rgba(pd[0])}`);
+  return 0;
+}

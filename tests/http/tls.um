@@ -2,6 +2,9 @@
 // （TLS の検証が有効であることを確かめる）。UM_TEST_HTTPS は "https://127.0.0.1:番号"。openssl がなければ飛ばす。
 // expect: state 3 status 0 reason true body 0
 
+import { httpStart, httpState, httpStatus, httpRead, httpError, httpWait, httpClose } from "um:http";
+
+
 export function main(): i32 {
   const id = httpStart("GET", envVar("UM_TEST_HTTPS") + "/hello", "", "", 5000);
   let st = 0;

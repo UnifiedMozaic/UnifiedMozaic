@@ -1,6 +1,8 @@
 // 標本の数がチャンネルの数の倍数でなければ停止する（フレームの途中で切れた標本は、左右がずれて鳴るため）。
 // expect: open
-// panic: invalid window call (unknown window, a size that is not positive, or a Buffer that is too short) (line 14)
+// panic: invalid window call (unknown window, a size that is not positive, or a Buffer that is too short) (line 16)
+
+import * from "um:window";
 
 export function main(): i32 {
   const opened = audioOpen(48000, 2);

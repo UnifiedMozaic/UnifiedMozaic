@@ -4,6 +4,8 @@
 //   node src/cli.ts build examples/window/present_bench.um --target host -o bench && ./bench
 // 引数に数を渡すと、そのフレーム数ずつ測る（既定は 300）。
 
+import * from "um:window";
+
 const W: i32 = 1920;
 const H: i32 = 1080;
 

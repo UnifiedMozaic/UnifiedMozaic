@@ -197,6 +197,22 @@ const IO_BUILTINS = new Set(['readLine', 'inputReady', 'clock', 'stringFromBytes
   'mediaEncoderList', 'mediaError', 'mediaVersion',
   'httpStart', 'httpState', 'httpStatus', 'httpRead', 'httpReadLine', 'httpHeaders', 'httpError', 'httpWait', 'httpCancel', 'httpClose']);
 
+/**
+ * ライブラリ（lib/名前.um。docs/libraries.ja.md）の組み込みの関数: そのライブラリから import したときだけ使える
+ * （ライブラリのファイルの中からは import なしで使える）。名前の頭で決まる。
+ */
+export function libOfBuiltin(name: string): string | null {
+  if (!IO_BUILTINS.has(name)) return null;
+  for (const lib of ['wasm', 'media', 'http', 'window']) if (name.startsWith(lib)) return lib;
+  if (name === 'audioWrite') return 'window';
+  return null;
+}
+
+/** ライブラリの組み込みの関数の一覧（`import * from "um:…";` で読む）。 */
+export function libBuiltins(lib: string): string[] {
+  return [...IO_BUILTINS].filter((n) => libOfBuiltin(n) === lib);
+}
+
 /** 最上位の定数。値は最初に使われたとき（遅くとも宣言の収集の終わり）に求める。 */
 interface ConstInfo {
   decl: ConstDecl;
@@ -238,7 +254,7 @@ const MAX_CONST_SCALARS = 1 << 22;
 
 /** prelude.um の関数で計算する Math の関数。名前の後ろに F32 / F64 を付けた関数を呼ぶ。 */
 const MATH_PRELUDE: Record<string, string> = {
-  sin: 'mathSin', cos: 'mathCos', tan: 'mathTan', asin: 'mathAsin', acos: 'mathAcos', atan: 'mathAtan', atan2: 'mathAtan2',
+  sin: '__std_mathSin', cos: '__std_mathCos', tan: '__std_mathTan', asin: '__std_mathAsin', acos: '__std_mathAcos', atan: '__std_mathAtan', atan2: '__std_mathAtan2',
 };
 
 /** Math.xxx として読める定数。 */
@@ -252,7 +268,7 @@ const MATH: Record<string, { argc: number; kind: 'float' | 'num' | 'int' }> = {
   abs: { argc: 1, kind: 'num' },
   min: { argc: 2, kind: 'num' },
   max: { argc: 2, kind: 'num' },
-  // 三角関数（f32 と f64）。標準の関数 mathSinF32 / mathSinF64 など（runtime/prelude.um）の呼び出しに置き換える。
+  // 三角関数（f32 と f64）。標準の関数 __std_mathSinF32 / __std_mathSinF64 など（runtime/prelude.um）の呼び出しに置き換える。
   sin: { argc: 1, kind: 'float' },
   cos: { argc: 1, kind: 'float' },
   tan: { argc: 1, kind: 'float' },
@@ -566,13 +582,14 @@ class Checker {
     }
     const h = TYPE_HINTS[n.name];
     if (h) this.err(h[0], `type '${n.name}' is not available`, n.pos, h[1]);
-    this.err('unknown-type', `unknown type '${n.name}'`, n.pos);
+    this.err('unknown-type', `unknown type '${n.name}'`, n.pos, this.libHint(n.name));
   }
 
   // ---- 宣言の収集 ----
 
   collect(mod: Module): FnDecl[] {
     this.importedNames = mod.importedNames ?? new Map();
+    this.libNames = mod.libNames ?? new Map();
     for (const d of mod.decls) if (!this.fileOf.has(d.name)) this.fileOf.set(d.name, d.file ?? 0);
     const typeDecls: (StructDecl | ClassDecl)[] = [];
     const fnDecls: FnDecl[] = [];
@@ -1108,6 +1125,13 @@ class Checker {
   /** 名前 → それを宣言したファイルの番号。 */
   fileOf = new Map<string, number>();
   importedNames = new Map<number, Set<string>>();
+  libNames = new Map<string, string>();
+
+  /** ライブラリにある名前なら、足すべき import の行。 */
+  libHint(name: string): string | undefined {
+    const lib = this.libNames.get(name);
+    return lib ? `'${name}' is in the library "um:${lib}": add \`import { ${name} } from "um:${lib}";\` at the top (docs/libraries.ja.md)` : undefined;
+  }
   /** いま検査している宣言のファイル。 */
   curFile = 0;
 
@@ -1130,7 +1154,8 @@ class Checker {
   /** 他のファイルの名前は、import していなければ使えない。標準の関数（ファイル -1）はどこからでも使える。 */
   visible(name: string, pos: Pos): void {
     const owner = this.fileOf.get(name);
-    if (owner === undefined || owner === -1 || owner === this.curFile) return;
+    // 標準の関数（ファイル -1）は、読み込まれたライブラリの名前も使える（gpu.beginFrame が um:window の関数を使う）。
+    if (owner === undefined || owner === -1 || owner === this.curFile || this.curFile === -1) return;
     if (this.importedNames.get(this.curFile)?.has(name)) return;
     // コンパイラが作る描画の関数（src/render.ts の drawSource）は、プログラムのシェーダと struct を使う。
     if (this.curFile === -1 && pos.file === 'render-draw.um') return;
@@ -2789,7 +2814,7 @@ class Checker {
     // gpu.loadKernel / gpu.runKernel（src/gpuload.ts）と gpu.available / gpu.prefer の検査済みの式をもう一度検査するときは、前の結果の型。
     if ((e.callee === '__gpu_load' || e.callee === '__gpu_run' || e.callee === '__gpu_available' || e.callee === '__gpu_prefer'
       || e.callee === '__gpu_image_begin' || e.callee === '__gpu_draw' || e.callee === '__gpu_image_end'
-      || e.callee === '__gpu_frame_begin' || e.callee === '__gpu_frame_end') && e.ty) return e.ty;
+      || e.callee === '__gpu_frame_begin' || e.callee === '__gpu_frame_end' || e.callee === '__gpu_draw_state') && e.ty) return e.ty;
     // 入出力の組み込み。検査済みの式（名前が `__io_...` になっている）をもう一度検査することもある。
     const io = e.callee.startsWith('__io_') ? e.callee.slice(5) : e.callee;
     if (IO_BUILTINS.has(io) && (io !== e.callee || (!this.fns.has(io) && !this.generics.has(io)))) return this.inferIo(e, io);
@@ -2798,7 +2823,7 @@ class Checker {
     if (this.generics.has(e.callee) && !this.fns.has(e.callee)) this.instantiate(e, want);
     const sig = this.fns.get(e.callee);
     if (!sig) {
-      const hint = this.structs.get(e.callee)?.isClass ? `write \`new ${e.callee}(...)\`` : undefined;
+      const hint = this.structs.get(e.callee)?.isClass ? `write \`new ${e.callee}(...)\`` : this.libHint(e.callee);
       this.err('unknown-name', `unknown function '${e.callee}'`, e.pos, hint);
     }
     // 描画の関数（src/render.ts の drawSource。ファイル render-draw.um）は、CPU で描くときにシェーダの関数を呼ぶ。
@@ -2818,12 +2843,12 @@ class Checker {
       this.kernelCalls.push({ caller: this.curFn, callee: sig.decl, pos: e.pos });
     }
     if (sig.decl.isKernel) this.kernelUses.push({ callee: sig.decl, pos: e.pos });
-    // runtime/wasm.um の関数（wasmLoad など）。wasmCustomSection はバイト列を読むだけなので wasm32 でも使える。
-    if (this.ptrBits === 32 && sig.decl.pos.file === 'wasm.um' && e.pos.file !== 'wasm.um' && sig.name !== 'wasmCustomSection') {
+    // lib/wasm.um の関数（wasmLoad など）。wasmCustomSection はバイト列を読むだけなので wasm32 でも使える。
+    if (this.ptrBits === 32 && sig.decl.pos.file === 'um:wasm' && e.pos.file !== 'um:wasm' && sig.name !== 'wasmCustomSection') {
       this.wasmOnly(sig.name, e.pos);
     }
-    // runtime/media.um の関数（mediaOpenVideo など）。
-    if (this.ptrBits === 32 && sig.decl.pos.file === 'media.um' && e.pos.file !== 'media.um') this.mediaOnly(sig.name, e.pos);
+    // lib/media.um の関数（mediaOpenVideo など）。
+    if (this.ptrBits === 32 && sig.decl.pos.file === 'um:media' && e.pos.file !== 'um:media') this.mediaOnly(sig.name, e.pos);
     this.checkArgs(sig, e.args, e.pos);
     return sig.ret;
   }
@@ -2880,10 +2905,10 @@ class Checker {
    *   windowCtlF(op: i32, window: i32, a: i64): f64                     小数を返す操作。
    *   windowSetText(op: i32, window: i32, a: i64, text: string): i64   文字列を渡す操作。
    *   windowGetText(op: i32, window: i32, a: i64): string               文字列を返す操作。
-   *       操作番号は runtime/window.c と runtime/audio.c。ふつうは runtime/window.um の名前のある関数を使う。
+   *       操作番号は runtime/window.c と runtime/audio.c。ふつうは um:window（lib/window.um）の名前のある関数を使う。
    *   audioWrite(stream: i32, samples: Buffer<f32>, start: i64, count: i64): bool  音の標本を書き込む（runtime/audio.c）。
    * WebAssembly（ネイティブだけ。どのスレッドからも呼べる。runtime/wasm.c が wasmtime で実装する。
-   * ふつうは runtime/wasm.um の wasmLoad / wasmNew / wasmCall を使う。モジュールとインスタンスは i64 の番号）:
+   * ふつうは lib/wasm.um の wasmLoad / wasmNew / wasmCall を使う。モジュールとインスタンスは i64 の番号）:
    *   wasmCompile(bytes: u8[]): i64 | null           wasm のバイナリをコンパイルする。失敗なら null（理由は wasmError）。
    *   wasmFreeModule(module: i64): void
    *   wasmExportList(module: i64): string[]          export の一覧（形は runtime/wasm.c の um_wasm_exports）。
@@ -2898,7 +2923,7 @@ class Checker {
    *   wasmWat(text: string): u8[]                    テキスト形式（.wat）をバイナリにする。失敗なら空。
    *   wasmError(): string                            このスレッドで最後に失敗した理由。
    * 動画・音声（ネイティブだけ。どのスレッドからも呼べる。runtime/media.c が FFmpeg で実装する。
-   * ふつうは runtime/media.um の mediaOpenVideo / mediaFrame / mediaCreate などを使う。読み手と書き手は i64 の番号）:
+   * ふつうは lib/media.um の mediaOpenVideo / mediaFrame / mediaCreate などを使う。読み手と書き手は i64 の番号）:
    *   mediaOpen(path: string, kind: i32, hwaccel: string): i64 | null   kind は 0 情報だけ、1 映像、2 音。失敗なら null（理由は mediaError）。
    *   mediaClose(reader: i64): void
    *   mediaInfoNumbers(reader: i64): f64[] / mediaInfoText(reader: i64): string[]   情報（並びは runtime/media.c）。
@@ -3048,9 +3073,17 @@ class Checker {
       httpCancel: { params: [['req', I64]], ret: VOID },
       httpClose: { params: [['req', I64]], ret: VOID },
     };
-    // wasm.um の中の呼び出しは報告しない（wasm.um の関数を呼んだ所で報告する。下の wasmOnly）。
-    if (name.startsWith('wasm') && this.ptrBits === 32 && e.pos.file !== 'wasm.um') this.wasmOnly(name, e.pos);
-    if (name.startsWith('media') && this.ptrBits === 32 && e.pos.file !== 'media.um') this.mediaOnly(name, e.pos);
+    // ウィンドウの低い層の組み込み（イベントと操作の番号の受け渡し）は、ライブラリ um:window の中だけで使う。
+    if (['windowPoll', 'windowCtl', 'windowCtlF', 'windowSetText', 'windowGetText'].includes(name) && e.pos.file !== 'um:window') {
+      this.err('unknown-name', `unknown function '${name}'`, e.pos, 'use the window functions such as `pollWindowEvent` (docs/window.ja.md)');
+    }
+    const lib = libOfBuiltin(name);
+    if (lib && this.curFile !== -1 && e.pos.file !== `um:${lib}` && !this.importedNames.get(this.curFile)?.has(name)) {
+      this.err('not-imported', `'${name}' is in the library "um:${lib}" and is not imported here`, e.pos, `add \`import { ${name} } from "um:${lib}";\` at the top`);
+    }
+    // um:wasm の中の呼び出しは報告しない（um:wasm の関数を呼んだ所で報告する。下の wasmOnly）。
+    if (name.startsWith('wasm') && this.ptrBits === 32 && e.pos.file !== 'um:wasm') this.wasmOnly(name, e.pos);
+    if (name.startsWith('media') && this.ptrBits === 32 && e.pos.file !== 'um:media') this.mediaOnly(name, e.pos);
     // ウィンドウは wasm32 でも使える（ブラウザの canvas。runtime/host.mjs）。音の出力はまだない（audioOpen は null）。
     const shape = shapes[name];
     const decl: FnDecl = { kind: 'fn', name, exported: false, params: [], body: [], pos: e.pos };

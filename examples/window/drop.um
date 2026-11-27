@@ -9,6 +9,8 @@
 // expect: bin: C:\素材\音楽 (10, 20)
 // expect: dropped 2 item(s)
 
+import * from "um:window";
+
 const WIDTH: i32 = 640;
 const HEIGHT: i32 = 360;
 
@@ -46,10 +48,10 @@ export function main(): i32 {
   const test = a.length > 0 && a[0] == "test";
   if (test) {
     // 人の操作の代わりに、試験用の操作（windowSetText の 90 番）で SDL のイベントを積む。
-    windowSetText(90, win, 11, "");
-    windowSetText(90, win, 12, "C:\\素材\\clip 01.mp4");
-    windowSetText(90, win, 12, "C:\\素材\\音楽");
-    windowSetText(90, win, 15, "");
+    windowTestEvent(win, 11, "");
+    windowTestEvent(win, 12, "C:\\素材\\clip 01.mp4");
+    windowTestEvent(win, 12, "C:\\素材\\音楽");
+    windowTestEvent(win, 15, "");
   }
 
   let px = new Buffer<u32>((WIDTH * HEIGHT) as usize);

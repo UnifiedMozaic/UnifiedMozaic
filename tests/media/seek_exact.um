@@ -26,6 +26,9 @@
 // expect: bframes.mp4 next after 0.4: 11 12 13
 // expect: scaled 64x48 frame 30, 1x1 frame 31
 
+import { MediaPixels, MediaScale, MediaRead, mediaOpenVideo, mediaFrame, mediaNextFrame, mediaFrameScaled, mediaClose, mediaInfoOf } from "um:media";
+
+
 function numberOf(px: Buffer<u8>, w: i32, h: i32): i32 {
   const at = ((h / 2) * w + w / 2) * 4;
   return (px[at] as i32) / 16 + (px[at + 1] as i32) / 16 * 16;

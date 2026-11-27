@@ -4,6 +4,9 @@
 // expect: trap in 'spin': timeout (the call ran longer than timeoutMs)
 // expect: 7
 
+import { WasmValue, WasmLimits, wasmLoad, wasmFromWat, wasmNew, wasmCall, wasmFreeModule, wasmFreeInstance } from "um:wasm";
+
+
 function spin(inst: i64): string {
   match (wasmCall(inst, "spin", [])) {
     Result.Err(why) => return why + "",  // match の値は借りているので、写して返す

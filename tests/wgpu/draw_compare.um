@@ -11,6 +11,8 @@
 // expect: true
 // expect: true
 
+import { mat4RotateX, mat4RotateY, mat4Perspective, mat4LookAt } from "um:transform";
+
 struct Vertex {
   pos: vec3<f32>;
   color: vec3<f32>;

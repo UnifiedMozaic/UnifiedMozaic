@@ -1,7 +1,6 @@
-// ウィンドウと音の標準の型と関数。組み込みの windowPoll / windowCtl / windowSetText / windowGetText / audioWrite
-// （runtime/window.c、runtime/audio.c）を、名前のある関数と UM の enum にして使えるようにする。
-// プログラムがこのファイルの名前（WindowEvent、pollWindowEvent、audioOpen など）を使うときだけ、
-// ドライバが標準の関数として加える。
+// ウィンドウ・入力・音のライブラリ（um:window。docs/window.ja.md）。`import * from "um:window";` で使う。
+// 組み込みの windowPoll / windowCtl / windowSetText / windowGetText / audioWrite（runtime/window.c、runtime/audio.c。
+// ブラウザでは runtime/web.mjs）を、名前のある関数と UM の enum にして使えるようにする。
 //
 // 使い方:
 //   const win = windowOpen("editor", 1280, 720);
@@ -22,7 +21,7 @@
 // 操作番号（windowCtl などの第1引数）は runtime/window.c と runtime/audio.c の enum と揃えること。
 
 // 修飾キー。
-struct Mods {
+export struct Mods {
   shift: bool;
   ctrl: bool;
   alt: bool;
@@ -30,7 +29,7 @@ struct Mods {
 }
 
 // キー。名前のあるキーのほかは、Char（文字のキー。英字は小文字）か Other（SDL のキーコード）。
-enum Key {
+export enum Key {
   Enter,
   Escape,
   Backspace,
@@ -51,7 +50,7 @@ enum Key {
 }
 
 // ウィンドウの状態。
-struct WindowState {
+export struct WindowState {
   fullscreen: bool;
   maximized: bool;
   minimized: bool;
@@ -60,17 +59,17 @@ struct WindowState {
 }
 
 // 大きさ・位置・矩形。
-struct WindowSize {
+export struct WindowSize {
   width: i32;
   height: i32;
 }
 
-struct WindowPos {
+export struct WindowPos {
   x: i32;
   y: i32;
 }
 
-struct DisplayRect {
+export struct DisplayRect {
   x: i32;
   y: i32;
   width: i32;
@@ -78,13 +77,13 @@ struct DisplayRect {
 }
 
 // ファイルのダイアログの絞り込み。pattern は拡張子を ; で区切ったもの（"mp4;mov;mkv"）。"*" はすべて。
-struct DialogFilter {
+export struct DialogFilter {
   name: string;
   pattern: string;
 }
 
 // マウスのカーソルの形（OS の標準のもの）。
-enum CursorShape {
+export enum CursorShape {
   Default,      // 矢印
   Text,         // 文字の入力（I の形）
   Wait,         // 待ち
@@ -100,7 +99,7 @@ enum CursorShape {
 }
 
 // OS のメニューバー（macOS）の標準の動作。イベントは届かず、OS がそのまま処理する。
-enum MenuRole {
+export enum MenuRole {
   Services,       // サービス（サブメニュー）
   Hide,           // このアプリを隠す（Cmd+H）
   HideOthers,     // ほかを隠す（Opt+Cmd+H）
@@ -112,12 +111,13 @@ enum MenuRole {
 }
 
 // ウィンドウのイベント。window は windowOpen が返した番号。座標はウィンドウの左上が (0, 0) のウィンドウの座標。
-enum WindowEvent {
+export enum WindowEvent {
   Close(window: i32),                                     // 閉じるボタン（閉じるかどうかはプログラムが決める）
   Resize(window: i32, width: i32, height: i32),
   MouseMove(window: i32, x: i32, y: i32),
   MouseDown(window: i32, x: i32, y: i32, button: i32),    // button: 1 左、2 中、3 右
   MouseUp(window: i32, x: i32, y: i32, button: i32),
+  MouseRelative(window: i32, dx: f64, dy: f64),           // 相対モード（windowSetRelativeMouse）のマウスの動き。右・下が正（ウィンドウの座標の単位）
   Wheel(window: i32, dx: i32, dy: i32, fx: f64, fy: f64), // 上・右が正。dx, dy はノッチ（整数）、fx, fy は細かい量（ノッチ単位の小数。トラックパッドの滑らかなスクロール）
   KeyDown(window: i32, key: Key, mods: Mods, repeat: bool),
   KeyUp(window: i32, key: Key, mods: Mods),
@@ -147,7 +147,7 @@ enum WindowEvent {
 }
 
 // SDL のキーコードを Key にする。
-function keyOf(code: i32): Key {
+function __std_keyOf(code: i32): Key {
   switch (code) {
     case 13: return Key.Enter;
     case 27: return Key.Escape;
@@ -173,11 +173,11 @@ function keyOf(code: i32): Key {
   return Key.Other(code);
 }
 
-function modsOf(bits: i32): Mods {
+function __std_modsOf(bits: i32): Mods {
   return { shift: (bits & 1) != 0, ctrl: (bits & 2) != 0, alt: (bits & 4) != 0, meta: (bits & 8) != 0 };
 }
 
-function windowStateOf(bits: i32): WindowState {
+function __std_windowStateOf(bits: i32): WindowState {
   return {
     fullscreen: (bits & 1) != 0, maximized: (bits & 2) != 0, minimized: (bits & 4) != 0,
     focused: (bits & 8) != 0, hidden: (bits & 16) != 0,
@@ -185,7 +185,7 @@ function windowStateOf(bits: i32): WindowState {
 }
 
 // 最後に取り出したイベントの文字列を count 個。
-function windowEventStrings(count: i32): string[] {
+function __std_windowEventStrings(count: i32): string[] {
   let out: string[] = [];
   for (let i = 0; i < count; i++) {
     out.push(windowGetText(2, 0, i as i64));
@@ -195,7 +195,7 @@ function windowEventStrings(count: i32): string[] {
 
 // イベントを1つ取り出す。なければ timeoutMs ミリ秒まで待ち（0 は待たない、負は来るまで待つ）、来なければ null。
 // 毎フレーム描き直すなら 0、入力があるまで寝ていてよいなら -1 か待ち時間を渡す。
-function pollWindowEvent(timeoutMs: i32): WindowEvent | null {
+export function pollWindowEvent(timeoutMs: i32): WindowEvent | null {
   let ev = new Buffer<i32>(6);
   if (!windowPoll(mut ev, timeoutMs)) {
     return null;
@@ -208,8 +208,8 @@ function pollWindowEvent(timeoutMs: i32): WindowEvent | null {
     case 4: return WindowEvent.MouseDown(w, ev[2], ev[3], ev[4]);
     case 5: return WindowEvent.MouseUp(w, ev[2], ev[3], ev[4]);
     case 6: return WindowEvent.Wheel(w, ev[2], ev[3], (ev[4] as f64) / 1000.0, (ev[5] as f64) / 1000.0);
-    case 7: return WindowEvent.KeyDown(w, keyOf(ev[2]), modsOf(ev[3]), ev[4] != 0);
-    case 8: return WindowEvent.KeyUp(w, keyOf(ev[2]), modsOf(ev[3]));
+    case 7: return WindowEvent.KeyDown(w, __std_keyOf(ev[2]), __std_modsOf(ev[3]), ev[4] != 0);
+    case 8: return WindowEvent.KeyUp(w, __std_keyOf(ev[2]), __std_modsOf(ev[3]));
     case 9: return WindowEvent.Text(w, ev[2] as u32);
     case 11: return WindowEvent.DropBegin(w);
     case 12: return WindowEvent.DropFile(w, windowGetText(2, 0, 0), ev[2], ev[3]);
@@ -221,7 +221,7 @@ function pollWindowEvent(timeoutMs: i32): WindowEvent | null {
       if (ev[2] < 0) {
         return WindowEvent.DialogFailed(w);
       }
-      return WindowEvent.Dialog(w, windowEventStrings(ev[2]), ev[3]);
+      return WindowEvent.Dialog(w, __std_windowEventStrings(ev[2]), ev[3]);
     }
     case 18: return WindowEvent.PixelSizeChanged(w, ev[2], ev[3]);
     case 19: return WindowEvent.ScaleChanged(w, windowCtlF(1, w, 0));
@@ -233,41 +233,42 @@ function pollWindowEvent(timeoutMs: i32): WindowEvent | null {
       return WindowEvent.MouseLeave(w);
     }
     case 22: return WindowEvent.Moved(w, ev[2], ev[3]);
-    case 23: return WindowEvent.StateChanged(w, windowStateOf(ev[2]));
+    case 23: return WindowEvent.StateChanged(w, __std_windowStateOf(ev[2]));
     case 24: return WindowEvent.Exposed(w);
     case 25: return WindowEvent.DisplaysChanged;
     case 26: return WindowEvent.Menu(windowGetText(2, 0, 0));
+    case 27: return WindowEvent.MouseRelative(w, (ev[2] as f64) / 1000.0, (ev[3] as f64) / 1000.0);
   }
   return WindowEvent.Quit;
 }
 
 // windowCtl に渡す引数と結果の置き場。
-function windowIo(): Buffer<i64> {
+function __std_windowIo(): Buffer<i64> {
   return new Buffer<i64>(6);
 }
 
 // 引数をとらない・1つ・2つとる windowCtl。
-function windowCtl0(op: i32, window: i32): i64 {
-  let io = windowIo();
+function __std_windowCtl0(op: i32, window: i32): i64 {
+  let io = __std_windowIo();
   return windowCtl(op, window, mut io);
 }
 
-function windowCtl1(op: i32, window: i32, a: i64): i64 {
-  let io = windowIo();
+function __std_windowCtl1(op: i32, window: i32, a: i64): i64 {
+  let io = __std_windowIo();
   io[0] = a;
   return windowCtl(op, window, mut io);
 }
 
-function windowCtl2(op: i32, window: i32, a: i64, b: i64): i64 {
-  let io = windowIo();
+function __std_windowCtl2(op: i32, window: i32, a: i64, b: i64): i64 {
+  let io = __std_windowIo();
   io[0] = a;
   io[1] = b;
   return windowCtl(op, window, mut io);
 }
 
 // 結果を io[0], io[1] に書く windowCtl を Size にする。
-function windowCtlSize(op: i32, window: i32): WindowSize {
-  let io = windowIo();
+function __std_windowCtlSize(op: i32, window: i32): WindowSize {
+  let io = __std_windowIo();
   windowCtl(op, window, mut io);
   return { width: io[0] as i32, height: io[1] as i32 };
 }
@@ -275,77 +276,88 @@ function windowCtlSize(op: i32, window: i32): WindowSize {
 // ---- ウィンドウの操作 ----
 
 // SDL の最後の失敗の理由（windowOpen・audioOpen が null を返したときなど）。
-function windowError(): string {
+export function windowError(): string {
   return windowGetText(5, 0, 0);
 }
 
-function windowSetTitle(window: i32, title: string): bool {
+export function windowSetTitle(window: i32, title: string): bool {
   return windowSetText(1, window, 0, title) != 0;
 }
 
-function windowTitle(window: i32): string {
+export function windowTitle(window: i32): string {
   return windowGetText(4, window, 0);
 }
 
 // 大きさ（ウィンドウの座標。windowOpen に渡した単位）。
-function windowSetSize(window: i32, width: i32, height: i32): bool {
-  return windowCtl2(1, window, width as i64, height as i64) != 0;
+export function windowSetSize(window: i32, width: i32, height: i32): bool {
+  return __std_windowCtl2(1, window, width as i64, height as i64) != 0;
 }
 
-function windowSize(window: i32): WindowSize {
-  return windowCtlSize(2, window);
+export function windowSize(window: i32): WindowSize {
+  return __std_windowCtlSize(2, window);
 }
 
 // 位置（画面の座標。ディスプレイをまたぐと負にもなる）。
-function windowSetPosition(window: i32, x: i32, y: i32): bool {
-  return windowCtl2(3, window, x as i64, y as i64) != 0;
+export function windowSetPosition(window: i32, x: i32, y: i32): bool {
+  return __std_windowCtl2(3, window, x as i64, y as i64) != 0;
 }
 
-function windowPosition(window: i32): WindowPos {
-  let io = windowIo();
+export function windowPosition(window: i32): WindowPos {
+  let io = __std_windowIo();
   windowCtl(4, window, mut io);
   return { x: io[0] as i32, y: io[1] as i32 };
 }
 
 // 利用者がこれより小さくできないようにする（0, 0 で制限なし）。
-function windowSetMinimumSize(window: i32, width: i32, height: i32): bool {
-  return windowCtl2(5, window, width as i64, height as i64) != 0;
+export function windowSetMinimumSize(window: i32, width: i32, height: i32): bool {
+  return __std_windowCtl2(5, window, width as i64, height as i64) != 0;
 }
 
-function windowMaximize(window: i32): bool {
-  return windowCtl0(6, window) != 0;
+export function windowMaximize(window: i32): bool {
+  return __std_windowCtl0(6, window) != 0;
 }
 
-function windowMinimize(window: i32): bool {
-  return windowCtl0(7, window) != 0;
+export function windowMinimize(window: i32): bool {
+  return __std_windowCtl0(7, window) != 0;
 }
 
 // 最大化・最小化から戻す。
-function windowRestore(window: i32): bool {
-  return windowCtl0(8, window) != 0;
+export function windowRestore(window: i32): bool {
+  return __std_windowCtl0(8, window) != 0;
 }
 
 // 全画面（デスクトップの解像度のまま、ウィンドウの枠をなくして画面を覆う）。
-function windowSetFullscreen(window: i32, on: bool): bool {
-  return windowCtl1(9, window, on ? 1 : 0) != 0;
+export function windowSetFullscreen(window: i32, on: bool): bool {
+  return __std_windowCtl1(9, window, on ? 1 : 0) != 0;
 }
 
-function windowState(window: i32): WindowState {
-  return windowStateOf(windowCtl0(10, window) as i32);
+export function windowState(window: i32): WindowState {
+  return __std_windowStateOf(__std_windowCtl0(10, window) as i32);
 }
 
-function windowSetResizable(window: i32, on: bool): bool {
-  return windowCtl1(26, window, on ? 1 : 0) != 0;
+export function windowSetResizable(window: i32, on: bool): bool {
+  return __std_windowCtl1(26, window, on ? 1 : 0) != 0;
+}
+
+// マウスの相対モード。カーソルを隠してウィンドウに閉じ込め、MouseMove の代わりに動きの量（MouseRelative）を届ける
+// （一人称の視点を回すときなど）。ブラウザでは、次にウィンドウをクリックしたときに入る（ブラウザの決まり）。
+export function windowSetRelativeMouse(window: i32, on: bool): bool {
+  return __std_windowCtl1(27, window, on ? 1 : 0) != 0;
+}
+
+// 相対モードに入っているか。
+export function windowRelativeMouse(window: i32): bool {
+  return __std_windowCtl0(28, window) != 0;
 }
 
 // 前に出して焦点を移す。
-function windowRaise(window: i32): bool {
-  return windowCtl0(23, window) != 0;
+export function windowRaise(window: i32): bool {
+  return __std_windowCtl0(23, window) != 0;
 }
 
 // 表示（windowPresent）を画面の更新に合わせるか（windowOpen の直後は合わせる）。
-function windowSetVSync(window: i32, on: bool): bool {
-  return windowCtl1(22, window, on ? 1 : 0) != 0;
+export function windowSetVSync(window: i32, on: bool): bool {
+  return __std_windowCtl1(22, window, on ? 1 : 0) != 0;
 }
 
 // ---- 高密度の画面（HiDPI）とディスプレイ ----
@@ -354,32 +366,32 @@ function windowSetVSync(window: i32, on: bool): bool {
 // マウスの座標はウィンドウの座標なので、画素の位置は windowPixelDensity 倍する。
 
 // 描画の面の画素の大きさ。
-function windowPixelSize(window: i32): WindowSize {
-  return windowCtlSize(11, window);
+export function windowPixelSize(window: i32): WindowSize {
+  return __std_windowCtlSize(11, window);
 }
 
 // ウィンドウの座標 1 あたりの画素の数（macOS の Retina なら 2。Windows ではふつう 1）。
-function windowPixelDensity(window: i32): f64 {
+export function windowPixelDensity(window: i32): f64 {
   return windowCtlF(2, window, 0);
 }
 
 // UI を大きく描く倍率（ディスプレイの拡大の設定と画素の密度をあわせたもの）。
-function windowDisplayScale(window: i32): f64 {
+export function windowDisplayScale(window: i32): f64 {
   return windowCtlF(1, window, 0);
 }
 
 // ウィンドウのあるディスプレイの番号（0 から。分からなければ -1）。
-function windowDisplay(window: i32): i32 {
-  return windowCtl0(12, window) as i32;
+export function windowDisplay(window: i32): i32 {
+  return __std_windowCtl0(12, window) as i32;
 }
 
-function displayCount(): i32 {
-  return windowCtl0(13, 0) as i32;
+export function displayCount(): i32 {
+  return __std_windowCtl0(13, 0) as i32;
 }
 
 // ディスプレイの範囲（画面の座標）。番号が正しくなければ null。
-function displayBounds(index: i32): DisplayRect | null {
-  let io = windowIo();
+export function displayBounds(index: i32): DisplayRect | null {
+  let io = __std_windowIo();
   io[0] = index as i64;
   if (windowCtl(14, 0, mut io) == 0) {
     return null;
@@ -388,8 +400,8 @@ function displayBounds(index: i32): DisplayRect | null {
 }
 
 // タスクバーやメニューバーを除いた範囲。
-function displayUsableBounds(index: i32): DisplayRect | null {
-  let io = windowIo();
+export function displayUsableBounds(index: i32): DisplayRect | null {
+  let io = __std_windowIo();
   io[0] = index as i64;
   if (windowCtl(15, 0, mut io) == 0) {
     return null;
@@ -397,17 +409,17 @@ function displayUsableBounds(index: i32): DisplayRect | null {
   return { x: io[0] as i32, y: io[1] as i32, width: io[2] as i32, height: io[3] as i32 };
 }
 
-function displayName(index: i32): string {
+export function displayName(index: i32): string {
   return windowGetText(3, 0, index as i64);
 }
 
 // ディスプレイの拡大の設定（125% なら 1.25。番号が正しくなければ 0）。
-function displayContentScale(index: i32): f64 {
+export function displayContentScale(index: i32): f64 {
   return windowCtlF(3, 0, index as i64);
 }
 
 // 画面の更新の頻度（Hz。分からなければ 0）。
-function displayRefreshRate(index: i32): f64 {
+export function displayRefreshRate(index: i32): f64 {
   return windowCtlF(4, 0, index as i64);
 }
 
@@ -415,27 +427,27 @@ function displayRefreshRate(index: i32): f64 {
 
 // IME で変換中の文字列をプログラムが描くか（true なら TextEditing が届き、OS は変換中の文字列を描かない。
 // 変換の候補の一覧は OS が windowSetTextInputArea の近くに出す）。最初の windowOpen より前に呼ぶ。後では false を返す。
-function windowImeComposition(on: bool): bool {
-  return windowCtl1(24, 0, on ? 1 : 0) != 0;
+export function windowImeComposition(on: bool): bool {
+  return __std_windowCtl1(24, 0, on ? 1 : 0) != 0;
 }
 
 // 文字の入力を始める・止める（windowOpen の直後は入力中）。止めると Text と TextEditing が届かなくなり、
 // 文字のキーがすべて KeyDown で届く（ショートカットだけの画面向け）。
-function windowStartTextInput(window: i32): bool {
-  return windowCtl0(16, window) != 0;
+export function windowStartTextInput(window: i32): bool {
+  return __std_windowCtl0(16, window) != 0;
 }
 
-function windowStopTextInput(window: i32): bool {
-  return windowCtl0(17, window) != 0;
+export function windowStopTextInput(window: i32): bool {
+  return __std_windowCtl0(17, window) != 0;
 }
 
-function windowTextInputActive(window: i32): bool {
-  return windowCtl0(18, window) != 0;
+export function windowTextInputActive(window: i32): bool {
+  return __std_windowCtl0(18, window) != 0;
 }
 
 // 入力欄の場所（ウィンドウの座標）と、欄の中のカーソルの x（欄の左端から）。IME の候補の一覧がこの近くに出る。
-function windowSetTextInputArea(window: i32, x: i32, y: i32, width: i32, height: i32, cursor: i32): bool {
-  let io = windowIo();
+export function windowSetTextInputArea(window: i32, x: i32, y: i32, width: i32, height: i32, cursor: i32): bool {
+  let io = __std_windowIo();
   io[0] = x as i64;
   io[1] = y as i64;
   io[2] = width as i64;
@@ -447,7 +459,7 @@ function windowSetTextInputArea(window: i32, x: i32, y: i32, width: i32, height:
 // ---- カーソル ----
 
 // SDL_SystemCursor の番号。
-function cursorShapeCode(c: CursorShape): i64 {
+function __std_cursorShapeCode(c: CursorShape): i64 {
   let code: i64 = 0;
   match (c) {
     CursorShape.Default => { code = 0; }
@@ -467,34 +479,34 @@ function cursorShapeCode(c: CursorShape): i64 {
 }
 
 // カーソルの形を変える（すべてのウィンドウで同じ）。
-function windowSetCursor(c: CursorShape): bool {
-  return windowCtl1(20, 0, cursorShapeCode(c)) != 0;
+export function windowSetCursor(c: CursorShape): bool {
+  return __std_windowCtl1(20, 0, __std_cursorShapeCode(c)) != 0;
 }
 
-function windowShowCursor(show: bool): bool {
-  return windowCtl1(21, 0, show ? 1 : 0) != 0;
+export function windowShowCursor(show: bool): bool {
+  return __std_windowCtl1(21, 0, show ? 1 : 0) != 0;
 }
 
 // ---- クリップボード ----
 
-function clipboardText(): string {
+export function clipboardText(): string {
   return windowGetText(1, 0, 0);
 }
 
-function clipboardSetText(text: string): bool {
+export function clipboardSetText(text: string): bool {
   return windowSetText(2, 0, 0, text) != 0;
 }
 
-function clipboardHasText(): bool {
-  return windowCtl0(25, 0) != 0;
+export function clipboardHasText(): bool {
+  return __std_windowCtl0(25, 0) != 0;
 }
 
 // ---- ファイルのダイアログ ----
 // どれもすぐに戻り、要求の番号を返す（出せなければ null）。結果は後で WindowEvent.Dialog(request, paths, filter) で届く。
 // window は親にするウィンドウ（0 なら親なし）、title と location は空なら OS に任せる。
 
-function windowDialogPrepare(title: string, location: string, filters: DialogFilter[]): void {
-  windowCtl0(43, 0);
+function __std_windowDialogPrepare(title: string, location: string, filters: DialogFilter[]): void {
+  __std_windowCtl0(43, 0);
   if (title.length > 0) {
     windowSetText(3, 0, 0, title);
   }
@@ -506,7 +518,7 @@ function windowDialogPrepare(title: string, location: string, filters: DialogFil
   }
 }
 
-function windowDialogRequest(r: i64): i32 | null {
+function __std_windowDialogRequest(r: i64): i32 | null {
   if (r == 0) {
     return null;
   }
@@ -514,21 +526,21 @@ function windowDialogRequest(r: i64): i32 | null {
 }
 
 // 開く。many が true なら複数を選べる。
-function windowOpenFileDialog(window: i32, title: string, location: string, filters: DialogFilter[], many: bool): i32 | null {
-  windowDialogPrepare(title, location, filters);
-  return windowDialogRequest(windowCtl1(40, window, many ? 1 : 0));
+export function windowOpenFileDialog(window: i32, title: string, location: string, filters: DialogFilter[], many: bool): i32 | null {
+  __std_windowDialogPrepare(title, location, filters);
+  return __std_windowDialogRequest(__std_windowCtl1(40, window, many ? 1 : 0));
 }
 
 // 保存。location にファイルの名前まで入れると、それが最初に入る。
-function windowSaveFileDialog(window: i32, title: string, location: string, filters: DialogFilter[]): i32 | null {
-  windowDialogPrepare(title, location, filters);
-  return windowDialogRequest(windowCtl1(41, window, 0));
+export function windowSaveFileDialog(window: i32, title: string, location: string, filters: DialogFilter[]): i32 | null {
+  __std_windowDialogPrepare(title, location, filters);
+  return __std_windowDialogRequest(__std_windowCtl1(41, window, 0));
 }
 
 // フォルダを選ぶ。
-function windowOpenFolderDialog(window: i32, title: string, location: string, many: bool): i32 | null {
-  windowDialogPrepare(title, location, []);
-  return windowDialogRequest(windowCtl1(42, window, many ? 1 : 0));
+export function windowOpenFolderDialog(window: i32, title: string, location: string, many: bool): i32 | null {
+  __std_windowDialogPrepare(title, location, []);
+  return __std_windowDialogRequest(__std_windowCtl1(42, window, many ? 1 : 0));
 }
 
 // ---- OS の名前とメニューバー（macOS） ----
@@ -536,54 +548,54 @@ function windowOpenFolderDialog(window: i32, title: string, location: string, ma
 // 働き、Windows・Linux・offscreen では何もしない（false を返す）。選ばれた項目は WindowEvent.Menu(id) で届く。
 
 // 動いている OS の名前（"macos"・"windows"・"linux"）。
-function windowPlatform(): string {
+export function windowPlatform(): string {
   return windowGetText(6, 0, 0);
 }
 
 // OS のメニューバーが使えるか（macOS で、offscreen / dummy でないとき true）。
-function windowHasNativeMenuBar(): bool {
-  return windowCtl0(50, 0) != 0;
+export function windowHasNativeMenuBar(): bool {
+  return __std_windowCtl0(50, 0) != 0;
 }
 
 // メニューバーの組み立てを始める（前に貯めていた途中のものは捨てる）。
-function windowMenuBegin(): void {
-  windowCtl0(51, 0);
+export function windowMenuBegin(): void {
+  __std_windowCtl0(51, 0);
 }
 
 // トップレベルのメニューを始める（"ファイル"・"編集" など）。終えたら windowMenuEndMenu を呼ぶ。
-function windowMenuBeginMenu(title: string): void {
+export function windowMenuBeginMenu(title: string): void {
   windowSetText(50, 0, 0, title);
 }
 
 // macOS のアプリのメニュー（メニューバーの左端、太字のアプリ名のメニュー）を始める。終えたら windowMenuEndMenu を呼ぶ。
-function windowMenuBeginAppMenu(title: string): void {
+export function windowMenuBeginAppMenu(title: string): void {
   windowSetText(50, 0, 1, title);
 }
 
 // macOS の標準の「ウィンドウ」メニューを始める（開いている窓の一覧などを OS が足す）。終えたら windowMenuEndMenu を呼ぶ。
-function windowMenuBeginWindowMenu(title: string): void {
+export function windowMenuBeginWindowMenu(title: string): void {
   windowSetText(50, 0, 2, title);
 }
 
 // サブメニューを始める。終えたら windowMenuEndMenu を呼ぶ。
-function windowMenuBeginSubMenu(title: string): void {
+export function windowMenuBeginSubMenu(title: string): void {
   windowSetText(50, 0, 3, title);
 }
 
 // いま組み立てているメニュー（またはサブメニュー）を閉じる。
-function windowMenuEndMenu(): void {
-  windowCtl0(52, 0);
+export function windowMenuEndMenu(): void {
+  __std_windowCtl0(52, 0);
 }
 
 // 区切りの線を足す。
-function windowMenuSep(): void {
-  windowCtl0(53, 0);
+export function windowMenuSep(): void {
+  __std_windowCtl0(53, 0);
 }
 
 // 項目を 1 つ足す。選ばれると WindowEvent.Menu(id) が届く。
 // key はショートカットのキーの名前（"S"・"Z"・"F1"・"Left"・"," など。なければ ""）、
 // mods は修飾キーのビット（1: Shift、2: Ctrl、4: Alt/Option、8: Meta/Command）。
-function windowMenuItem(id: string, label: string, key: string, mods: i32, enabled: bool, checked: bool): void {
+export function windowMenuItem(id: string, label: string, key: string, mods: i32, enabled: bool, checked: bool): void {
   let flags = (mods & 15) << 2;
   if (enabled) {
     flags = flags | 1;
@@ -594,7 +606,7 @@ function windowMenuItem(id: string, label: string, key: string, mods: i32, enabl
   windowSetText(51, 0, flags as i64, `${id}\t${label}\t${key}`);
 }
 
-function menuRoleCode(r: MenuRole): i64 {
+function __std_menuRoleCode(r: MenuRole): i64 {
   let code: i64 = 0;
   match (r) {
     MenuRole.Services => { code = 1; }
@@ -610,17 +622,17 @@ function menuRoleCode(r: MenuRole): i64 {
 }
 
 // OS の標準の動作の項目（MenuRole）を足す。
-function windowMenuRole(role: MenuRole, label: string): void {
-  windowSetText(52, 0, menuRoleCode(role), label);
+export function windowMenuRole(role: MenuRole, label: string): void {
+  windowSetText(52, 0, __std_menuRoleCode(role), label);
 }
 
 // 組み立てたメニューバーを OS に反映する（macOS の本物の画面なら true）。
-function windowMenuCommit(): bool {
-  return windowCtl0(54, 0) != 0;
+export function windowMenuCommit(): bool {
+  return __std_windowCtl0(54, 0) != 0;
 }
 
 // 反映済みのメニューバーの項目の有効／無効とチェックの印だけを変える（id が見つかれば true）。
-function windowMenuSetItemState(id: string, enabled: bool, checked: bool): bool {
+export function windowMenuSetItemState(id: string, enabled: bool, checked: bool): bool {
   let flags = 0;
   if (enabled) {
     flags = flags | 1;
@@ -635,17 +647,17 @@ function windowMenuSetItemState(id: string, enabled: bool, checked: bool): bool 
 // どのスレッドからも呼べる。SDL3 をリンクする（clock() は SDL3 なしで使える秒の時計）。
 
 // 逆戻りしない時計（ナノ秒）。起点は決まっていない（SDL を初期化する前の最初の呼び出しでは 0）ので、差だけを使う。
-function ticksNs(): i64 {
-  return windowCtl0(30, 0);
+export function ticksNs(): i64 {
+  return __std_windowCtl0(30, 0);
 }
 
 // ns ナノ秒だけ眠る。1 ミリ秒より短くても正確（最後は待ち続けて合わせる）。
-function sleepNs(ns: i64): void {
-  windowCtl1(31, 0, ns);
+export function sleepNs(ns: i64): void {
+  __std_windowCtl1(31, 0, ns);
 }
 
-function sleepMs(ms: i64): void {
-  windowCtl1(31, 0, ms * 1000000);
+export function sleepMs(ms: i64): void {
+  __std_windowCtl1(31, 0, ms * 1000000);
 }
 
 // ---- 音の出力 ----
@@ -655,56 +667,67 @@ function sleepMs(ms: i64): void {
 
 // 既定の出力のデバイスを開き、出力の番号を返す。音のデバイスがなければ null（理由は windowError）。
 // 一時停止の状態で開くので、少し書き込んでから audioResume で鳴らし始める。
-function audioOpen(sampleRate: i32, channels: i32): i32 | null {
-  const s = windowCtl2(100, 0, sampleRate as i64, channels as i64);
+export function audioOpen(sampleRate: i32, channels: i32): i32 | null {
+  const s = __std_windowCtl2(100, 0, sampleRate as i64, channels as i64);
   if (s == 0) {
     return null;
   }
   return s as i32;
 }
 
-function audioClose(stream: i32): void {
-  windowCtl0(101, stream);
+export function audioClose(stream: i32): void {
+  __std_windowCtl0(101, stream);
 }
 
 // まだ鳴らしていない（待ち行列にある）フレームの数。これが減ったら書き足す。
-function audioQueued(stream: i32): i64 {
-  return windowCtl0(102, stream);
+export function audioQueued(stream: i32): i64 {
+  return __std_windowCtl0(102, stream);
 }
 
-function audioPause(stream: i32): bool {
-  return windowCtl0(103, stream) != 0;
+export function audioPause(stream: i32): bool {
+  return __std_windowCtl0(103, stream) != 0;
 }
 
-function audioResume(stream: i32): bool {
-  return windowCtl0(104, stream) != 0;
+export function audioResume(stream: i32): bool {
+  return __std_windowCtl0(104, stream) != 0;
 }
 
-function audioPaused(stream: i32): bool {
-  return windowCtl0(107, stream) != 0;
+export function audioPaused(stream: i32): bool {
+  return __std_windowCtl0(107, stream) != 0;
 }
 
 // 待ち行列を捨てる（シークのとき）。捨てた分は audioPlayed に数えない。
-function audioClear(stream: i32): bool {
-  return windowCtl0(105, stream) != 0;
+export function audioClear(stream: i32): bool {
+  return __std_windowCtl0(105, stream) != 0;
 }
 
 // 開いてから再生した（デバイスに渡った）フレームの数。時計に使う。
-function audioPlayed(stream: i32): i64 {
-  return windowCtl0(106, stream);
+export function audioPlayed(stream: i32): i64 {
+  return __std_windowCtl0(106, stream);
 }
 
 // 開いてから書き込んだフレームの数（消去した分を引く）。
-function audioWritten(stream: i32): i64 {
-  return windowCtl0(109, stream);
+export function audioWritten(stream: i32): i64 {
+  return __std_windowCtl0(109, stream);
 }
 
 // デバイスの中にたまる分のフレームの数（デバイスに渡ってから耳に届くまでの遅れ。分からなければ 0）。
-function audioLatency(stream: i32): i64 {
-  return windowCtl0(108, stream);
+export function audioLatency(stream: i32): i64 {
+  return __std_windowCtl0(108, stream);
 }
 
 // 音量（1.0 で元のまま）。
-function audioSetGain(stream: i32, gain: f64): bool {
-  return windowCtl1(110, stream, (gain * 1000.0) as i64) != 0;
+export function audioSetGain(stream: i32, gain: f64): bool {
+  return __std_windowCtl1(110, stream, (gain * 1000.0) as i64) != 0;
+}
+
+// 試験用: SDL のイベントを積む（ドロップと IME は人の操作がないと起きないため）。kind はイベントの種類の番号
+// （11 ドロップの始まり、12 ファイル、13 文字列、15 ドロップの終わり、16 IME の編集中の文字列）。
+export function windowTestEvent(window: i32, kind: i32, text: string): void {
+  windowSetText(90, window, kind as i64, text);
+}
+
+// ウィンドウを、GPU で描いた絵の表示の面にする（gpu.beginFrame に渡す。docs/render.ja.md の「ウィンドウに描く」）。
+export function windowSurface(window: i32): GpuSurface {
+  return { id: window };
 }
