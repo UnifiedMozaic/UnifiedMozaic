@@ -10,6 +10,8 @@
 //     割り算と平方根に数 ULP の誤差を許すので、GPU の命令のままでは CPU と結果が変わる
 //   - 浮動小数点の掛け算の結果は、足し算と1つの命令（FMA）にまとめられないよう、実行時にしか分からない 0 と OR する
 //     （um_fmul）。まとめられると丸めが1回減り、CPU と結果が変わる
+//   - 浮動小数点の足し算・引き算の結果も同じく 0 と OR する（um_fadd / um_fsub）。ドライバのコンパイラは
+//     `(a - b) + 1.0` を `(a + 1.0) - b` のように組み替えることがあり（Mesa の NIR など）、丸めが CPU と変わる
 //
 // レイアウト: WGSL にする kernel で使える型はすべて 4 バイト単位（i32 / u32 / f32 とその struct・固定長配列）なので、
 // LLVM 側の構造体と WGSL の構造体は、同じ並びで隙間なく一致する。
@@ -443,6 +445,13 @@ class Emitter {
           this.uses.add(fn);
           return `${fn}(${l}, ${r})`;
         }
+        // 組み替えさせない足し算・引き算（ファイルの先頭の説明）。um_z は um_fmul のところで宣言し、入口で入れる。
+        if (ty.k === 'float' && (e.op === '+' || e.op === '-')) {
+          const fn = e.op === '+' ? 'um_fadd' : 'um_fsub';
+          this.uses.add('um_fmul');
+          this.uses.add(fn);
+          return `${fn}(${l}, ${r})`;
+        }
         if (ty.k === 'int' && e.op === '%') {
           const fn = ty.signed ? 'um_rem_i' : 'um_rem_u';
           this.uses.add(fn);
@@ -804,6 +813,17 @@ const HELPERS: Record<string, string[]> = {
     'var<private> um_z: u32;',
     'fn um_fmul(a: f32, b: f32) -> f32 {',
     '  return bitcast<f32>(bitcast<u32>(a * b) | um_z);',
+    '}',
+  ],
+  um_fadd: [
+    '// 足し算の結果を um_z（実行時にしか分からない 0）と OR する。ドライバは、前後の足し算・引き算と組み替えられなくなる。',
+    'fn um_fadd(a: f32, b: f32) -> f32 {',
+    '  return bitcast<f32>(bitcast<u32>(a + b) | um_z);',
+    '}',
+  ],
+  um_fsub: [
+    'fn um_fsub(a: f32, b: f32) -> f32 {',
+    '  return bitcast<f32>(bitcast<u32>(a - b) | um_z);',
     '}',
   ],
   um_fdiv: [

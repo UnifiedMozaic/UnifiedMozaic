@@ -10,7 +10,9 @@
 
 この経路は、Metal の経路（`UM_METAL=1`、Mac だけ。[言語ガイド](guide.ja.md)の「Metal（Mac）での GPU 実行」）と並ぶ、ネイティブの主な GPU の経路です。kernel の意味（範囲外の添字の切り詰め、ゼロ除算の決まった結果、浮動小数点の丸めなど）は CPU・Metal と同じで、同じ kernel は CPU と GPU で同じ結果になります（下の「CPU と GPU で同じ結果にするために」）。
 
-**確かめた環境:** Windows 11（NVIDIA GeForce RTX 5060 Ti、Vulkan と Direct3D 12）、wgpu-native v29.0.1.1。`tests/metal` と `tests/wgpu` の全部が CPU と同じ結果になります。**Linux と macOS では未確認です**（コードはありますが、実行していません）。
+**確かめた環境:** Windows 11（NVIDIA GeForce RTX 5060 Ti、Vulkan と Direct3D 12）と、Linux（Ubuntu 24.04、ソフトウェアの Vulkan の lavapipe（Mesa 25.2、llvmpipe）。GPU のない環境で試すとき）、wgpu-native v29.0.1.1。`tests/metal` と `tests/wgpu` の全部が CPU と同じ結果になります。**macOS では未確認です**（コードはありますが、実行していません）。
+
+GPU のない Linux では、`apt-get install mesa-vulkan-drivers` で lavapipe を入れると、wgpu がそれを使います（遅いですが、結果を確かめるには足ります）。
 
 ## 準備: wgpu-native を入れる
 
@@ -74,10 +76,11 @@ WGSL にない機能を使う kernel は、GPU では実行せず CPU で実行�
 
 ## CPU と GPU で同じ結果にするために
 
-WebGPU（Vulkan・Direct3D 12・Metal）は、浮動小数点の割り算と平方根に数 ULP の誤差を許し、掛け算と足し算を 1 つの命令（FMA）にまとめることも許します。どちらも CPU と結果が変わる原因なので、生成する WGSL（`src/wgsl.ts`）で次のようにしています。
+WebGPU（Vulkan・Direct3D 12・Metal）は、浮動小数点の割り算と平方根に数 ULP の誤差を許し、掛け算と足し算を 1 つの命令（FMA）にまとめることも許します。ドライバによっては、足し算・引き算の順を組み替えることもあります。どちらも CPU と結果が変わる原因なので、生成する WGSL（`src/wgsl.ts`）で次のようにしています。
 
 - **割り算と平方根は、整数の演算で正しく丸めます**（`um_fdiv` / `um_fsqrt`。IEEE 754 の最近接偶数への丸め。非正規化数・無限大・NaN も CPU と同じ）。GPU の命令より遅くなりますが、GPU の計算の速さに比べると小さな手間です。
 - **掛け算の結果は、FMA にまとめられないようにします**（`um_fmul`。結果を、実行時にしか分からない 0 と OR する）。
+- **足し算・引き算の結果も、組み替えられないようにします**（`um_fadd` / `um_fsub`。同じく 0 と OR する）。ドライバのコンパイラは `(a - b) + 1.0` を `(a + 1.0) - b` のように並べ替えることがあり（Linux の Mesa の NIR などで確認。`f32` の多項式で 1 ULP ずれた）、丸めが CPU と変わるためです。
 - **整数の余り（`%`）は、割り算から求めます**（`um_rem_i` / `um_rem_u`。NVIDIA の Vulkan のドライバで、WGSL の `%` が負の数で誤った値を返すことがあったため）。
 - **共有配列は、グループの始めに WGSL の中で 0 で埋めます**（WebGPU の仕様でも 0 ですが、NVIDIA の Vulkan で 0 にならないことがあったため）。
 - 範囲外の添字の切り詰め、ゼロ除算（`x / 0 = x`、`x % 0 = 0`）、シフト量の剰余、浮動小数点から整数への飽和する変換は、wasm32 の WebGPU と同じ WGSL です。
