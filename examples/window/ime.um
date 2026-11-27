@@ -11,6 +11,8 @@
 // expect: editing [日本語] select 1+2
 // expect: editing [] select 1+2
 
+import * from "um:window";
+
 const WIDTH: i32 = 640;
 const HEIGHT: i32 = 160;
 const BOX: i32 = 24;     // 1文字の箱の幅
@@ -75,9 +77,9 @@ export function main(): i32 {
   const a = args();
   const test = a.length > 0 && a[0] == "test";
   if (test) {
-    windowSetText(90, win, 16, "にほんご");
-    windowSetText(90, win, 16, "日本語");
-    windowSetText(90, win, 16, "");
+    windowTestEvent(win, 16, "にほんご");
+    windowTestEvent(win, 16, "日本語");
+    windowTestEvent(win, 16, "");
   }
 
   let px = new Buffer<u32>((WIDTH * HEIGHT) as usize);

@@ -1,0 +1,5 @@
+// error: unknown-field
+export function main(): i32 {
+  print(Math.TAU);
+  return 0;
+}

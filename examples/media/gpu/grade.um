@@ -7,6 +7,9 @@
 //   ./grade 入力.mp4 出力.mp4 [hwaccel]
 // UM_WGPU=1 を付けなければ、同じ kernel を CPU（複数のスレッド）で実行する（結果は同じ）。
 
+import { MediaPixels, MediaRead, MediaVideoSettings, mediaOpenVideo, mediaNextFrame, mediaCreate, mediaAddVideoStream, mediaWriteFrame, mediaFinish, mediaClose, mediaInfoOf } from "um:media";
+
+
 // 1 画素の色補正。露出（2 の exposure 乗）、彩度（輝度との混ぜ具合）、周辺減光（中心からの距離で暗くする）。
 kernel function grade(i: u32, src: Buffer<vec4<f32>>, out: mut Buffer<u32>, w: u32, h: u32, exposure: f32, saturation: f32, vignette: f32): void {
   const p = src[i];

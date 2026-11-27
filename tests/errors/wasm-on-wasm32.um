@@ -1,5 +1,8 @@
 // error: not-implemented
 // WebAssembly を実行する関数は wasm32 では使えない（wasmtime をリンクするネイティブだけ）。
+
+import { wasmLoad } from "um:wasm";
+
 export function main(): i32 {
   let bytes: u8[] = [0, 97, 115, 109, 1, 0, 0, 0];
   match (wasmLoad(bytes)) {

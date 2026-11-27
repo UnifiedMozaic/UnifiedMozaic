@@ -6,6 +6,8 @@
 中身は [wasmtime](https://wasmtime.dev/) の C API（JIT でネイティブのコードにしてから実行する）で、
 ネイティブのコードに近い速さで動きます。プラグインを OS に依存しない形で配り、本体から隔離して動かすのに使えます。
 
+`import { wasmLoad, wasmNew, wasmCall } from "um:wasm";` のように、ライブラリ `um:wasm` から読み込んで使います（[ライブラリ](libraries.ja.md)）。
+
 - モジュールはインスタンスの中だけで動きます。既定では、ホストの関数（import）も WASI も渡さないので、
   ファイル・ネットワーク・本体のメモリには触れられません。
 - wasm の中の異常（トラップ）、燃料切れ、時間切れ、読み込みの失敗では、プログラムは止まらず、`Result.Err(理由)` が返ります。
@@ -67,6 +69,7 @@ node src/cli.ts build examples/wasm/add.um --target host -o add
 ## 使い方
 
 ```ts
+import { wasmLoadFile } from "um:wasm";
 export function main(): i32 {
   match (wasmLoadFile("effect.wasm")) {             // Result<i64, string>: モジュールの番号
     Result.Err(why) => {
@@ -103,7 +106,7 @@ export function main(): i32 {
 
 ## 関数
 
-`runtime/wasm.um`（UM で書いた標準の関数）と、組み込みの関数（`runtime/wasm.c`）です。どれもネイティブだけで、どのスレッドからも呼べます。
+`lib/wasm.um`（UM で書いたライブラリ `um:wasm`）と、組み込みの関数（`runtime/wasm.c`）です。どれもネイティブだけで、どのスレッドからも呼べます。
 
 ### 読み込みとインスタンス
 
@@ -165,7 +168,7 @@ enum WasmValue { I32(value: i32), I64(value: i64), F32(value: f32), F64(value: f
 
 ### 低い層の組み込み
 
-`runtime/wasm.um` の関数は、次の組み込みで書いてあります。失敗は `null` / `false` / `-1` で返り、理由は `wasmError()` で読みます
+`lib/wasm.um` の関数は、次の組み込みで書いてあります。失敗は `null` / `false` / `-1` で返り、理由は `wasmError()` で読みます
 （理由はスレッドごとに覚えていて、次に失敗するまで変わりません）。
 
 | 関数 | 説明 |
@@ -315,8 +318,8 @@ JS の `WebAssembly` で実装することもできますが、次の理由で�
 
 ## しくみ
 
-- 組み込みの部分は `runtime/wasm.c`（C と wasmtime の C API）。`WasmValue`・`WasmLimits`・`wasmLoad`・`wasmCall` などは `runtime/wasm.um`（UM）で、
-  プログラムがこれらの名前を使うときだけ標準の関数として加わります。WebAssembly の組み込みを使わないプログラムは wasmtime をリンクしません。
+- 組み込みの部分は `runtime/wasm.c`（C と wasmtime の C API）。`WasmValue`・`WasmLimits`・`wasmLoad`・`wasmCall` などは `lib/wasm.um`（UM）で、
+  ライブラリ `um:wasm` として `import` で読み込みます。WebAssembly の組み込みを使わないプログラムは wasmtime をリンクしません。
 - エンジンは1つで、最初に使ったときに作ります（燃料・epoch による中断・ディスクのキャッシュを有効にする）。
 - 番号の表はモジュールとインスタンスでそれぞれ 4096 個までです（超えると `Result.Err`）。
 - 停止の原因コードは 13（番号か配列の範囲が正しくない）と 14（使っている最中のインスタンスを解放した）です。

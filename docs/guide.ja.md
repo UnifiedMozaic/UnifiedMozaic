@@ -81,13 +81,13 @@ Windows で exe にアイコンを付けるには、`llvm-rc`（LLVM に入っ�
 | 分類 | 内容 |
 | --- | --- |
 | 型 | `i8`〜`i64`、`u8`〜`u64`、`usize`、`f4`、`f8`、`f16`、`f32`、`f64`、`bool`、`string`、`struct`、`enum`（値つき。`match` で分岐）、`class`、固定長配列 `T[N]`、可変長配列 `T[]`（`Array<T>` と同じ）、`Buffer<T>`、`RacyBuffer<T>`、`T \| null`、標準の `Result<T, E>`、ベクトルと行列 `vec2<T>`〜`vec4<T>` / `mat2<T>`〜`mat4<T>`、SIMD の `i8x16` など |
-| 宣言 | `function`、`export function`、`kernel function`、`struct`、`enum`、`class`（フィールド、初期値、`constructor`、メソッド、`private`、`implements`）、`interface`、ジェネリックな関数・struct・class・enum・kernel、最上位の定数 `const NAME: T = 定数式;`（`export const` も可）、`import { a, b } from "./x.um";` |
+| 宣言 | `function`、`export function`、`kernel function`、描画のシェーダの `vertex function` / `fragment function`（[描画](render.ja.md)）、`struct`、`enum`、`class`（フィールド、初期値、`constructor`、メソッド、`private`、`implements`）、`interface`、ジェネリックな関数・struct・class・enum・kernel、最上位の定数 `const NAME: T = 定数式;`（`export const` も可）、`import { a, b } from "./x.um";` |
 | 文 | `let` / `const`（`let x: T;` はゼロで初期化）、代入と複合代入、`++` / `--`、`if` / `else`、`while`、`do ... while`、`for (;;)`、`for...of`、`switch`、`match`、`break`、`continue`、`return` |
 | 式 | 四則演算と剰余、比較、`&&` / `\|\|` / `!`、条件式 `a ? b : c`、`x ?? 既定値`、ビット演算とシフト、`as` による変換、関数とメソッドの呼び出し、`new`、`this`、フィールドと添字、オブジェクトリテラル、配列リテラル、`new Array<T>(n)`、`xs.length`、テンプレート文字列 `` `x = ${x}` ``、`String(x)` |
 | 配列のメソッド | `push`、`pop`、`clear`、`clone`、一括の書き込み `fill(v)` / `fill(v, start, end)`（Buffer / RacyBuffer にも。下の「一括の書き込み」） |
-| 組み込み | `print(x)`（数、`bool`、文字列）、`dispatch` / `cpu.dispatch` / `gpu.dispatch`、グループで実行する `dispatchGroups`（下の「グループ（共有配列・barrier）と kernel の中のアトミック演算」）、`gpu.submit` / `gpu.ready` / `gpu.wait`、`gpu.flags` / `gpu.commit` / `gpu.untracked`（下の「Metal（Mac）での GPU 実行」）、実行時に WGSL の kernel を読み込む `gpu.loadKernel` / `gpu.runKernel`（[wgpu での GPU 実行](wgpu.ja.md)）、`thread.*`（下の「スレッド」）、`Math.sqrt` / `floor` / `ceil` / `abs` / `min` / `max`、ビット演算の `Math.popcount` / `clz` / `ctz`、マスクつきシフト `Math.shl` / `Math.shr`（下の「マスクつきシフトと範囲チェックの除去」）、先読み `Math.prefetch(arr, i)`（下の「先読み」）、SIMD の `Simd.*`（下の「SIMD のベクトル」） |
+| 組み込み | `print(x)`（数、`bool`、文字列）、三角形の描画 `gpu.beginImage` / `gpu.draw` / `gpu.drawIndexed` / `gpu.endImage`（GPU か CPU で描く。インスタンスも。[描画](render.ja.md)）、`dispatch` / `cpu.dispatch` / `gpu.dispatch`、グループで実行する `dispatchGroups`（下の「グループ（共有配列・barrier）と kernel の中のアトミック演算」）、`gpu.submit` / `gpu.ready` / `gpu.wait`、`gpu.flags` / `gpu.commit` / `gpu.untracked`（下の「Metal（Mac）での GPU 実行」）、実行時に WGSL の kernel を読み込む `gpu.loadKernel` / `gpu.runKernel`（[wgpu での GPU 実行](wgpu.ja.md)）、`thread.*`（下の「スレッド」）、`Math.sqrt` / `floor` / `ceil` / `abs` / `min` / `max`、三角関数の `Math.sin` / `cos` / `tan` / `asin` / `acos` / `atan` / `atan2` と定数 `Math.PI`（下の「三角関数」）、ビットの読み替え `Math.toBits` / `Math.fromBits`（下の「ビットの読み替え」）、ビット演算の `Math.popcount` / `clz` / `ctz`、マスクつきシフト `Math.shl` / `Math.shr`（下の「マスクつきシフトと範囲チェックの除去」）、先読み `Math.prefetch(arr, i)`（下の「先読み」）、SIMD の `Simd.*`（下の「SIMD のベクトル」） |
 | 入出力の組み込み | `readLine()`、`inputReady()`、`clock()`、`stringFromBytes(bytes)`、`readFile(path)`、`writeFile(path, bytes)`、`fileSize(path)`、`readFileRange(path, offset, length)`、`appendFile(path, bytes)`、`readFileInto(...)`、開いたままのファイル `fileOpen` / `fileRead` / `fileReadAt` / `fileWrite` / `fileSeek` / `fileLength` / `fileClose`、フォルダ `listDir` / `makeDir` / `isDir`、パス `cwd()` / `exePath()` / `exeDir()` / `absPath(path)`、環境変数 `envVar(name)`、名前の変更と削除 `fileRename` / `fileRemove` / `dirRemove`、プロセス `processRun` / `processStart` / `processId`、`args()`、`eprint(text)`（下の「入出力」） |
-| ネイティブだけの組み込み | ウィンドウ（`windowOpen` など。[window.ja.md](window.ja.md)）、WebAssembly のモジュールの実行（`wasmLoad` / `wasmNew` / `wasmCall` など。[wasm.ja.md](wasm.ja.md)）、動画・音声の読み書き（`mediaOpenVideo` / `mediaFrame` / `mediaSamples` / `mediaCreate` など。FFmpeg を使う。[media.ja.md](media.ja.md)）、HTTP(S) の要求（`httpStart` / `httpReadLine` / `httpPoll` など。裏のスレッドで送受信し、届いた分から読む。[http.ja.md](http.ja.md)） |
+| ライブラリ（`import { … } from "um:名前";` か `import * from "um:名前";`） | ウィンドウ・入力・音 `um:window`（ブラウザでは canvas と Web Audio。[window.ja.md](window.ja.md)、[web.ja.md](web.ja.md)）、3D の変換の行列 `um:transform`、テクスチャ `um:texture`、文字 `um:text`、PNG `um:png`、ネイティブだけの HTTP(S) `um:http`・動画と音声（FFmpeg）`um:media`・WebAssembly の実行（wasmtime）`um:wasm`。[libraries.ja.md](libraries.ja.md) |
 
 それぞれの書き方は、下の各節と「そのほかの機能」の例にあります。
 
@@ -122,7 +122,7 @@ Windows で exe にアイコンを付けるには、`llvm-rc`（LLVM に入っ�
 | `switch` / `do ... while` | `switch` は整数・`bool`・文字列で分岐します。各 `case` は `break` / `return` / `continue` で終えます（次の case へ落ちる書き方はエラー。ラベルを並べて本体を共有するのは可）。 | [switches.um](../examples/switches.um)、[do_while.um](../examples/do_while.um) |
 | 文字列 | UTF-8 のバイト列を持つ、書き換えできない値です。`+` で連結、`==` で比較、`.length` と `s[i]` はバイト単位です。 | [strings.um](../examples/strings.um) |
 | ヒープを持つ要素の配列 | `string[]`、`i32[][]`、配列を持つ struct の配列、自分自身の配列を持つ struct（木）が書けます（下の「所有権」）。 | [nested_arrays.um](../examples/nested_arrays.um) |
-| ベクトルと行列 | `vec2` / `vec3` / `vec4` は演算子で成分ごとに計算できます。`mat2` / `mat3` / `mat4` は関数（`mat3Mul` など）で計算します。`f32` / `i32` / `u32` のベクトルは kernel と `Buffer` で、行列は kernel の中でも使えます。 | [vectors.um](../examples/vectors.um)、[matrices.um](../examples/matrices.um) |
+| ベクトルと行列 | `vec2` / `vec3` / `vec4` は演算子で成分ごとに計算できます（内積 `vec3Dot`、外積 `vec3Cross`、長さ `vec3Length`、長さ 1 にする `vec3Normalize` も）。`mat2` / `mat3` / `mat4` は関数（`mat3Mul` など）で計算します。3D の変換の行列を作る関数もあります（下の「三角関数」）。`f32` / `i32` / `u32` のベクトルは kernel と `Buffer` で、行列は kernel の中でも使えます。 | [vectors.um](../examples/vectors.um)、[matrices.um](../examples/matrices.um)、[trig.um](../examples/trig.um) |
 | 小さい浮動小数点 | `f16`（IEEE 754 半精度）、`f8`（FP8 E4M3）、`f4`（FP4 E2M1）。演算の結果は、正確な値をその型に丸めたものです。kernel と `Buffer` ではまだ使えません。 | [half_floats.um](../examples/half_floats.um)、[small_floats.um](../examples/small_floats.um) |
 | 複数のファイル | `import { a, b } from "./lib/math.um";`。相手のファイルで `export` を付けたものだけ import できます。名前は全ファイルで1つの空間です。 | [tests/modules/basic](../tests/modules/basic/main.um) |
 
@@ -134,6 +134,7 @@ Windows で exe にアイコンを付けるには、`llvm-rc`（LLVM に入っ�
 const FILES: i32 = 9;
 const SQUARES: i32 = FILES * FILES;        // 他の定数を使える
 const BIG: u64 = (1 as u64) << 40;
+const TAU: f64 = Math.PI * 2;              // Math.PI も使える
 export const NAME: string = "um-engine";   // 他のファイルから import できる
 
 function sum(xs: i32[SQUARES]): i32 { ... } // 固定長配列の長さにも使える
@@ -373,7 +374,7 @@ kernel function count(i: u32, out: mut Buffer<u32>, boards: Buffer<Bb>): void {
 
 - **意味は 32 ビットと同じ規則です。** 演算はラップし、シフト量は 64 で割った余り、ゼロ除算は `x / 0 = x`、`x % 0 = 0`、最小値 / -1 = 最小値です。`f32` からの変換は範囲外で飽和し、NaN は 0 です。64 ビットの添字は、範囲外なら最後の要素に切り詰めます。
 - **GPU で実行できるのは Metal だけです。** MSL の `long` / `ulong` をそのまま使います（Apple M4 で `tests/metal/i64.um` が CPU と全要素一致）。WGSL には 64 ビットの整数がないので、64 ビットの整数を使う kernel（呼ぶ補助の kernel を含む）は、wgpu（`UM_WGPU=1`）と wasm32 では `dispatch` / `gpu.submit` が CPU で実行し、`gpu.dispatch` はコンパイルエラー（`kernel-type`）になります。
-- **64 ビットのアトミック演算（`fetchAdd` / `compareExchange` など）は kernel の外だけです**（Apple の GPU にも 64 ビットのアトミックな加算・比較交換はありません）。kernel の中の `RacyBuffer<u64>` の `b[i]` は普通の 8 バイトの読み書きです。CPU ではちぎれませんが、Metal が 8 バイトの読み書きを 1 回で行うことは仕様では保証されていません（別の実行が同じ要素を同時に書くと、上下 32 ビットが別々の値になりうると考えてください）。
+- **64 ビットのアトミック演算（`fetchAdd` / `fetchMin` / `fetchMax` / `compareExchange` など）は kernel の外だけです**（Apple の GPU にも 64 ビットのアトミックな加算・比較交換はありません）。kernel の中の `RacyBuffer<u64>` の `b[i]` は普通の 8 バイトの読み書きです。CPU ではちぎれませんが、Metal が 8 バイトの読み書きを 1 回で行うことは仕様では保証されていません（別の実行が同じ要素を同時に書くと、上下 32 ビットが別々の値になりうると考えてください）。
 - **並び**: `i64` / `u64` は 8 バイトで 8 バイト境界です（struct の中では前に詰め物が入ります。CPU と MSL で同じ並び）。dispatch の値の引数も、GPU 側の引数の struct と同じ境界に揃えて渡します（`src/codegen.ts` の `gpuDispatch`）。
 - 例: [tests/metal/i64.um](../tests/metal/i64.um)（Metal）。
 
@@ -430,7 +431,7 @@ dispatchGroups(groupSum, n / 256, 256, mut sums, xs);
 - **`group.barrier()` はグループの全スレッドが通る場所にだけ置けます**（GPU では、通らないスレッドがあると止まりうるため）。barrier を囲む `if` / `while` / `for` の条件は、グループの全スレッドで同じ値になる式（定数、値の引数、`group.id()` / `size()` / `count()`、Buffer の長さと、それらだけから計算した変数）に限ります。型検査が控えめに確かめ、満たさなければコンパイルエラーです。barrier を含むループの中の `break` / `continue`、barrier を使う kernel の `return`、`for...of` の中の barrier も使えません。
 - **barrier は共有配列の読み書きをそろえます。** barrier なしで、ほかのスレッドが書いた共有配列の要素を読んだときの値は決まりません（メモリは壊れません）。
 - **CPU では、グループを1つずつ実行します**（グループどうしはスレッドプールで並列）。barrier の間の文を、グループの全スレッドについて順に実行し、barrier を含む文の条件はスレッド 0 の値で決めます（上の規則により全スレッドで同じ）。barrier をまたいで生きる変数はスレッドごとの置き場所に置きます。barrier を使わない kernel は、スレッドを1つずつ最後まで実行します。GPU と CPU で、足す順番が同じ計算は同じ結果になります（`tests/metal/groups.um`）。
-- **kernel の中でも `RacyBuffer` のアトミック演算 `load` / `store` / `fetchAdd` / `compareExchange` が使えます**（要素は `i32` / `u32`、`load` / `store` は `f32` も）。書き換える演算は `mut` の RacyBuffer だけです。順序は CPU では seq_cst、GPU では relaxed（Metal の `atomic_*_explicit`、WebGPU の `atomic*`）です。kernel の中でアトミック演算を使う RacyBuffer は、GPU ではアトミックな型の配列として渡し、`b[j]` の読み書きもアトミック（relaxed）になります。
+- **kernel の中でも `RacyBuffer` のアトミック演算 `load` / `store` / `fetchAdd` / `fetchMin` / `fetchMax` / `compareExchange` が使えます**（要素は `i32` / `u32`、`load` / `store` は `f32` も）。書き換える演算は `mut` の RacyBuffer だけです。順序は CPU では seq_cst、GPU では relaxed（Metal の `atomic_*_explicit`、WebGPU の `atomic*`）です。kernel の中でアトミック演算を使う RacyBuffer は、GPU ではアトミックな型の配列として渡し、`b[j]` の読み書きもアトミック（relaxed）になります。
 - **simdgroup の集計**（CPU と Metal だけ。WGSL は対応しません）: simdgroup は、グループの中の連続した 32 スレッドです（グループの大きさが 32 で割り切れなければ、最後のものは短くなります）。
   - `const s = group.simdSum(x);`（和）、`group.simdMin(x)`、`group.simdMax(x)`: 同じ simdgroup の全スレッドの x（`i32` / `u32` / `f32`）を集めた値。
   - `const y = group.simdShuffle(x, lane);`: 同じ simdgroup の lane 番目のスレッドの x（lane が simdgroup の外なら最後のスレッド）。
@@ -690,7 +691,7 @@ const sh: Shared = { tt: new RacyBuffer<u64>(n), stop: new RacyBuffer<u32>(1) };
 - **持ち手（`thread.spawn` の結果）は、`const` の宣言の初期化式としてだけ書けます。** 移動・代入・`return`・引数・フィールド・配列の要素にはできません（型 `Thread<R>` / `Threads<R>` を書けるのは、その `const` の注釈だけ）。`thread.join` は持ち手を消費し、合流しなかった持ち手は、宣言を含むブロックの終わり（`return` / `break` / `continue` で抜けるときも）で自動で合流します（戻り値は捨てる）。
 - **スレッドへの渡し方**: コピーされる型は写し、`own` は移動（スレッドが所有して返すか解放する）、修飾なしのヒープを持つ値は読み取り借用で共有します。`mut` の引数を持つ関数は起動できません。読み取り借用で貸した変数は、`const` の宣言からブロックの終わりまで（`join` のあとも）書き換え・移動・`mut` 渡しができません。合流後に書き換えるなら、起動を内側のブロック `{ ... }` に入れます。一時値は貸せません（`const` に入れてから）。
 - **複数のスレッドが書き換えられるのは `RacyBuffer` の要素だけです。** kernel の外では、`RacyBuffer` の要素は読み取り借用からでも書けます（長さと領域は変わらない）。要素の読み書き `b[i]` は順序の保証がないアトミック命令（kernel の外は relaxed）で、値は実行ごとに変わりえますが、メモリは壊れません。`for...of` と `clone()` も要素を1つずつアトミックに読みます。要素の型は `i8` / `u8` / `i16` / `u16` / `i32` / `u32` / `f32` / `i64` / `u64` です（kernel の中の `i64` / `u64` は CPU と Metal だけ。上の「kernel の中の 64 ビットの整数」）。8 / 16 ビットの要素も、隣の要素を別のスレッドが同時に書いて混ざることはありません。kernel は `mut RacyBuffer` のどの要素にも読み書きできます。
-- **アトミック演算**: `b.load(i)`、`b.store(i, v)`、`b.fetchAdd(i, v)`（前の値を返す）、`b.compareExchange(i, expected, desired)`（前の値を返す）。順序は seq_cst で、`store` より前の書き込み（`b[i]` を含む）は、その値を `load` で見たスレッドから見えます。「データを書いてから印を立てる」受け渡しにはこれを使います（`b[i]` どうしには順序がない）。`fetchAdd` / `compareExchange` は整数だけです。kernel の中でも使えます（32 ビットの要素だけ。GPU では順序は relaxed。上の「グループ（共有配列・barrier）と kernel の中のアトミック演算」）。
+- **アトミック演算**: `b.load(i)`、`b.store(i, v)`、`b.fetchAdd(i, v)`（前の値を返す）、`b.fetchMin(i, v)` / `b.fetchMax(i, v)`（小さい方 / 大きい方を書き、前の値を返す。符号つきの要素は符号つきで、符号なしは符号なしで比べる）、`b.compareExchange(i, expected, desired)`（前の値を返す）。順序は seq_cst で、`store` より前の書き込み（`b[i]` を含む）は、その値を `load` で見たスレッドから見えます。「データを書いてから印を立てる」受け渡しにはこれを使います（`b[i]` どうしには順序がない）。`fetchAdd` / `fetchMin` / `fetchMax` / `compareExchange` は整数だけです。kernel の中でも使えます（32 ビットの要素だけ。GPU では順序は relaxed。上の「グループ（共有配列・barrier）と kernel の中のアトミック演算」）。
 - **kernel の `mut RacyBuffer` には、読み取り借用の `RacyBuffer` もそのまま渡せます**（`gpu.submit(k, n, mut sh.out, sh.inp)`。kernel は領域を差し替えられないため）。`dispatch` / `gpu.submit` / `gpu.ready` / `gpu.wait` / `gpu.flags` / `gpu.commit` はどのスレッドからでも呼べ（`gpu.flags` の印はスレッドごと）、券はどのスレッドで待ってもかまいません。
 - **`print` 1回の出力（1行）はほかのスレッドと混ざりません。** `readLine()` / `inputReady()` はメインスレッドだけで使えます（ほかで呼ぶと停止）。どのスレッドで停止しても、プログラム全体が止まります（メッセージは1回）。
 - 同時に存在できるスレッドは 256 本まで（超えると停止）。スタックは 64 MiB（`UM_THREAD_STACK_MB` で変更）。起動と合流の手間は1本 10〜15 マイクロ秒（Apple M4）。
@@ -748,6 +749,51 @@ bad.um:1:15: error[ts-feature]: type 'number' is not available
 - **wasm32**: スレッド（合流の時点でその場で実行します）、simd128。
 
 次のものは、TypeScript にはありますが、この言語では持たない方針です（書くとエラーで置き換え先を示します）: 継承（`extends`、`protected`、`abstract`）、例外（`try` / `throw`。失敗は `Result<T, E>` で返します）、`var`、`for...in`、`T | null` 以外の union 型、省略できるフィールドや引数、引数の既定値、`number` / `any`。
+
+## 三角関数
+
+`Math.sin` / `cos` / `tan` / `asin` / `acos` / `atan` / `atan2(y, x)` は、`f32` と `f64` の値を受け取り、同じ型の値を返します。`f32` の版は kernel の中でも使えます。`Math.PI` は円周率で、文脈の型（`f32` / `f64`）の小数になります。角度はラジアンです。
+
+```ts
+const a: f32 = Math.PI / 6;
+const s = Math.sin(a);            // f32
+const t = Math.atan2(-1.0, -1.0); // f64。-3π/4
+```
+
+- **どのターゲットでも同じ値（同じビット）になります。** 標準の関数（`runtime/prelude.um` の `mathSinF32` など）が、四則演算と `Math.sqrt` / `Math.floor` だけで計算します。GPU の `sin` などの命令（精度が決まっていない）は使いません。多項式は Cephes Math Library のものです。
+- **誤差。** ふつうの入力では、`sin` / `cos` / `asin` / `acos` / `atan` / `atan2` は正しい値から 1〜2 ulp、`tan` も 2 ulp ほどです。π/4 の倍数のすぐ近く（`sin(π)` のように答えが 0 に近いところと、`tan` の極の近く）では相対誤差が大きくなります（`f64` で `sin(10π)` の絶対誤差は 1e-30 ほど）。
+- **大きな角度。** 誤差が小さいのは、`f32` では |x| がおよそ 8192 まで、`f64` ではおよそ 1e9 までです。それより大きいと、結果は -1〜1 に収まりますが、正しい値から離れます。角度は小さい範囲に保ってください（`angle = angle % (2 * Math.PI)` など）。
+- `asin` / `acos` に絶対値が 1 より大きい値を渡すと NaN です。`atan2` は C と同じく、0 の符号と無限大も扱います（`atan2(0, -0)` は π、`atan2(-0, 0)` は -0）。
+- `f16` / `f8` / `f4` は受け付けません（`x as f32` にしてから渡します）。
+
+3D の変換の行列（`mat4<f32>`。kernel でも使えます）を作る関数は、ライブラリ `um:transform` にあります（`import { mat4Perspective, mat4LookAt } from "um:transform";`。[ライブラリ](libraries.ja.md)）:
+
+| 関数 | 内容 |
+| --- | --- |
+| `mat4Translate(x, y, z)` / `mat4Scale(x, y, z)` | 平行移動 / 軸ごとの拡大・縮小 |
+| `mat4RotateX(angle)` / `mat4RotateY(angle)` / `mat4RotateZ(angle)` | 軸のまわりの回転（右手系） |
+| `mat4Perspective(fovY, aspect, near, far)` | 透視投影。fovY は縦の画角、aspect は幅 / 高さ。カメラは -z の向きを見て、w で割ると z は near で 0、far で 1（WebGPU・Metal・Direct3D の深度の範囲） |
+| `mat4Ortho(left, right, bottom, top, near, far)` | 正射影（z は同じく 0〜1） |
+| `mat4LookAt(eye, target, up)` | カメラの行列。eye から target を見て、up が画面の上 |
+
+行列は列ベクトルに左から掛ける形です（`mat4MulVec(m, v)` は m × v）。続けて掛けるときは `mat4Mul(proj, mat4Mul(view, model))` のように、先に掛けたいものを右に置きます。
+
+これらを使って立方体を描く例が [window/cube.um](../examples/window/cube.um)（シェーダで描き、ウィンドウで回す。[描画](render.ja.md)）と [raster.um](../examples/raster.um)（kernel で書いた小さなソフトウェアのラスタライザで、文字の絵に出す）です。
+
+## ビットの読み替え
+
+`Math.toBits(x)` は、浮動小数点の値のビットをそのまま整数として読みます（`f32` は `u32`、`f64` は `u64`）。`Math.fromBits(b)` はその逆です（32 ビットの整数（`u32` / `i32`）は `f32`、64 ビットの整数は `f64`）。値の変換（`as`）とは違い、ビットは変わりません。型の決まらない整数リテラルは `u32` として読みます。
+
+```ts
+const one: f32 = 1;
+print(Math.toBits(one));               // 1065353216（0x3f800000）
+print(Math.fromBits(0xbf800000));      // -1
+print(Math.fromBits(Math.toBits(one) + 1)); // 1 の次に大きい f32
+```
+
+- **kernel の中でも使えます（32 ビットだけ）。** GPU では WGSL の `bitcast`、MSL の `as_type` になります。
+- **0 以上の `f32` は、ビットを `u32` として比べても大小の順が同じです。** kernel の中のアトミック演算は 32 ビットの整数だけなので、深度（0〜1）のような値は `Math.toBits` で `u32` にしてから `fetchMin` で比べます（`depth.fetchMin(p, Math.toBits(z))`。[float_bits.um](../examples/float_bits.um) の深度テスト）。負の値も含めて比べるときは、符号のビットで分けて並べ替える必要があります。
+- NaN のビットの並び（符号や payload）は、GPU では CPU と揃うとは限りません（[wgpu での GPU 実行](wgpu.ja.md)の「残る違い」）。
 
 ## マスクつきシフトと範囲チェックの除去
 

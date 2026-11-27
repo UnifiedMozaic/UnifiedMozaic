@@ -156,7 +156,9 @@ class Parser {
     if (KEYWORDS.has(t.text)) {
       throw new CompileError('syntax', `'${t.text}' is a keyword and cannot be used as ${what}`, this.pos());
     }
-    if (t.text.startsWith('__')) {
+    // 標準のファイル（runtime の .um とコンパイラが作る描画の関数）とライブラリ（um:）は、中だけで使う名前に __std_ を付ける
+    // （プログラムからは書けないので見えず、プログラムの名前ともぶつからない）。
+    if (t.text.startsWith('__') && !(t.text.startsWith('__std_') && (STD_FILES.has(this.file ?? '') || (this.file ?? '').startsWith('um:')))) {
       // コンパイラが enum と match のために作る名前と重ならないようにする。
       throw new CompileError('reserved-name', `names starting with '__' are reserved`, this.pos(), 'pick a name without the leading underscores');
     }
@@ -211,12 +213,22 @@ class Parser {
     return { kind: 'interface', name, methods, pos };
   }
 
-  /** import { a, b } from "./other.um"; */
+  /** import { a, b } from "./other.um"; / import * from "um:window"; */
   importDecl(): void {
     const pos = this.pos();
     this.i++;
+    if (this.eatP('*')) {
+      if (this.isK('as')) throw new CompileError('not-implemented', '`import * as` is not implemented yet', this.pos(), 'write `import * from "um:window";` (the names come without a prefix)');
+      if (!this.eatK('from')) throw new CompileError('syntax', `expected 'from' but found '${this.tok.text}'`, this.pos());
+      if (this.tok.kind !== 'str') throw new CompileError('syntax', 'expected the path of a file in quotes', this.pos(), 'e.g. `from "um:window"`');
+      const path = this.tok.text;
+      this.i++;
+      this.eatP(';');
+      this.imports.push({ names: [], all: true, path, pos });
+      return;
+    }
     if (!this.isP('{')) {
-      throw new CompileError('ts-feature', 'only named imports are available', pos, 'write `import { name1, name2 } from "./file.um";`');
+      throw new CompileError('ts-feature', 'only named imports are available', pos, 'write `import { name1, name2 } from "./file.um";` or `import * from "um:window";`');
     }
     this.i++;
     const names: Import['names'] = [];
@@ -242,6 +254,13 @@ class Parser {
       this.i += 2;
       // kernel の export は「他のファイルから import できる」という意味だけを持つ。
       return { ...this.fnDecl(pos, false), isKernel: true, importable: exported };
+    }
+    // 描画のシェーダ。vertex / fragment は予約語ではなく、すぐ後ろに function があるときだけの印。
+    for (const stage of ['vertex', 'fragment'] as const) {
+      if (this.tok.kind === 'ident' && this.tok.text === stage && this.toks[this.i + 1]?.text === 'function') {
+        this.i += 2;
+        return { ...this.fnDecl(pos, false), isKernel: true, stage, importable: exported };
+      }
     }
     if (this.eatK('function')) return { ...this.fnDecl(pos, exported), importable: exported };
     if (this.eatK('struct')) return { ...this.structDecl(pos), importable: exported };
@@ -1015,6 +1034,9 @@ class Parser {
     throw new CompileError('syntax', `unexpected '${t.text}'`, pos);
   }
 }
+
+/** 標準のファイルのラベル（src/driver.ts が付ける）。 */
+const STD_FILES = new Set(['prelude.um', 'render.um', 'render-draw.um']);
 
 export function parse(src: string, file?: string): Module {
   return new Parser(src, file).module();

@@ -12,6 +12,9 @@
 // expect: close while running: ok
 // expect: done
 
+import { httpStart, httpState, httpStatus, httpRead, httpReadLine, httpError, httpWait, httpCancel, httpClose } from "um:http";
+
+
 function settle(id: i64): string {
   let body = "";
   let st = 0;

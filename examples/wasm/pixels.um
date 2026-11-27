@@ -8,6 +8,9 @@
 // expect: out of bounds: 16 bytes at offset 65530, but the memory has 65536 bytes
 // expect: 65536
 
+import { WasmValue, WasmLimits, wasmLoad, wasmFromWat, wasmNew, wasmCall, wasmFreeModule, wasmFreeInstance, wasmRead, wasmWrite, wasmMemorySize, wasmError } from "um:wasm";
+
+
 // invert(p, n): p から n バイトの RGBA の、RGB を反転する（A はそのまま）。
 // scale(p, n, k): p から n 個の f32 に k を掛ける。
 const WAT: string =

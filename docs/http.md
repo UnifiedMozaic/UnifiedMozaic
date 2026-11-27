@@ -38,7 +38,7 @@ On **wasm32** the functions exist, but every request fails at once with a reason
 Read the state before the body: when the state is 2 or more, the following `httpRead` / `httpReadLine` calls get everything that is left.
 A 4xx or 5xx response whose body arrived is state 2 (done). A connection that closes early is state 3 (failed).
 
-`runtime/http.um` adds `httpPoll(id): HttpState` (phase, status, the new body, `finished`, error) and
+`lib/http.um` adds `httpPoll(id): HttpState` (phase, status, the new body, `finished`, error) and
 `httpRequest(method, url, headers: string[], body, timeoutMs)`.
 
 ## Tests

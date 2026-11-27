@@ -1,0 +1,544 @@
+// PNG の画像ファイルの読み込み（docs/image.ja.md）。`import { Bitmap, imageLoad } from "um:png";` で使う
+// （docs/libraries.ja.md）。
+//
+// いまは PNG を読む。zlib の展開（inflate）も含めて UM で書いてあるので、ネイティブでも wasm32 でも同じに動く。
+// 読める PNG: 色の形式のすべて（グレー・RGB・パレット・グレーと不透明度・RGBA）、ビットの深さのすべて（1・2・4・8・16）、
+// インターレース（Adam7）、透明の色（tRNS）。16 ビットは上の 8 ビットにする。CRC と Adler-32 は確かめない。
+// 色の補正（gAMA・iCCP など）はしない（画素の値をそのまま使う）。
+
+// 読み込んだ画像。読めなかったときは error に理由が入り（読めたら空）、幅と高さは 0。pixels は 0xAARRGGBB（不透明度は乗じていない）を、上の行から左から右に並べたもの。
+// textureSample(image.pixels, image.width as u32, image.height as u32, uv) のように、そのままテクスチャに使える。
+export struct Bitmap {
+  width: i32;
+  height: i32;
+  pixels: Buffer<u32>;
+  error: string;
+}
+
+// 読めなかったときの値。
+function imageFailed(reason: string): Bitmap {
+  return { width: 0, height: 0, pixels: new Buffer<u32>(0), error: reason.clone() };
+}
+
+// ファイルを読んで画像にする。読めないか、形式が分からないか、壊れていれば error に理由が入る。
+export function imageLoad(path: string): Bitmap {
+  const data = readFile(path);
+  if (data == null) {
+    return imageFailed(`cannot read '${path}'`);
+  }
+  return imageDecodePng(data);
+}
+
+// ---- inflate（RFC 1951）----
+
+// ビットを読む位置。pos は次に読むバイト、buf と cnt はまだ使っていないビット（いつも 8 未満）。
+struct PngBits {
+  pos: usize;
+  end: usize;
+  buf: u32;
+  cnt: u32;
+  bad: bool;
+}
+
+// 長さと距離の符号の基の値と、足すビットの数。
+const PNG_LEN_BASE: i32[29] = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
+const PNG_LEN_EXTRA: i32[29] = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
+const PNG_DIST_BASE: i32[30] = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145,
+  8193, 12289, 16385, 24577];
+const PNG_DIST_EXTRA: i32[30] = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
+// 符号の長さの符号の長さを並べる順。
+const PNG_ORDER: i32[19] = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+
+// n ビット（16 まで）を下の位から読む。足りなければ bad にして 0。
+function pngBits(data: u8[], s: mut PngBits, n: u32): u32 {
+  while (s.cnt < n) {
+    if (s.pos >= s.end) {
+      s.bad = true;
+      return 0;
+    }
+    s.buf = s.buf | ((data[s.pos] as u32) << s.cnt);
+    s.pos++;
+    s.cnt += 8;
+  }
+  const v = s.buf & ((1 << n) - 1);
+  s.buf = s.buf >> n;
+  s.cnt -= n;
+  return v;
+}
+
+// 符号の長さ lengths[start .. start + n) から、ハフマン符号の表（長さごとの数 count と、符号の順の記号 symbol）を作る。
+// 多すぎる（どの符号にもならない）長さなら false。足りない（使わない符号がある）のは許す。
+function pngHuffman(lengths: Buffer<i32>, start: i32, n: i32, count: mut Buffer<i32>, symbol: mut Buffer<i32>): bool {
+  for (let len: usize = 0; len < 16; len++) {
+    count[len] = 0;
+  }
+  for (let k = 0; k < n; k++) {
+    count[lengths[(start + k) as usize] as usize] += 1;
+  }
+  if (count[0] == n) {
+    return true;
+  }
+  let left = 1;
+  for (let len: usize = 1; len < 16; len++) {
+    left = left * 2 - count[len];
+    if (left < 0) {
+      return false;
+    }
+  }
+  let offs = new Buffer<i32>(16);
+  for (let len: usize = 1; len < 15; len++) {
+    offs[len + 1] = offs[len] + count[len];
+  }
+  for (let k = 0; k < n; k++) {
+    const len = lengths[(start + k) as usize];
+    if (len != 0) {
+      symbol[offs[len as usize] as usize] = k;
+      offs[len as usize] += 1;
+    }
+  }
+  return true;
+}
+
+// 記号を 1 つ読む。読めなければ bad にして -1。
+function pngDecode(data: u8[], s: mut PngBits, count: Buffer<i32>, symbol: Buffer<i32>): i32 {
+  let code = 0;
+  let first = 0;
+  let index = 0;
+  for (let len: usize = 1; len < 16; len++) {
+    code = code | (pngBits(data, mut s, 1) as i32);
+    const c = count[len];
+    if (code - c < first) {
+      return symbol[(index + (code - first)) as usize];
+    }
+    index += c;
+    first = (first + c) * 2;
+    code = code * 2;
+  }
+  s.bad = true;
+  return -1;
+}
+
+// data[s.pos .. s.end) の deflate の流れを展開して out をちょうど埋める。埋まらないか、はみ出すか、壊れていれば false。
+function pngInflate(data: u8[], s: mut PngBits, out: mut Buffer<u8>): bool {
+  const cap = out.length as usize;
+  let o: usize = 0;
+  let lcount = new Buffer<i32>(16);
+  let lsym = new Buffer<i32>(288);
+  let dcount = new Buffer<i32>(16);
+  let dsym = new Buffer<i32>(32);
+  let lens = new Buffer<i32>(320);
+  let last: u32 = 0;
+  while (last == 0) {
+    last = pngBits(data, mut s, 1);
+    const kind = pngBits(data, mut s, 2);
+    if (s.bad) {
+      return false;
+    }
+    if (kind == 0) {
+      // 圧縮しないブロック。バイトの境目に揃える（残りのビットは今のバイトのもの）。
+      s.buf = 0;
+      s.cnt = 0;
+      if (s.pos + 4 > s.end) {
+        return false;
+      }
+      const n = (data[s.pos] as usize) | ((data[s.pos + 1] as usize) << 8);
+      const nn = (data[s.pos + 2] as usize) | ((data[s.pos + 3] as usize) << 8);
+      s.pos += 4;
+      if (n != (nn ^ 0xFFFF) || s.pos + n > s.end || o + n > cap) {
+        return false;
+      }
+      for (let k: usize = 0; k < n; k++) {
+        out[o] = data[s.pos + k];
+        o++;
+      }
+      s.pos += n;
+      continue;
+    }
+    if (kind == 1) {
+      // 決まった符号。
+      for (let k: usize = 0; k < 288; k++) {
+        if (k < 144) {
+          lens[k] = 8;
+        } else if (k < 256) {
+          lens[k] = 9;
+        } else if (k < 280) {
+          lens[k] = 7;
+        } else {
+          lens[k] = 8;
+        }
+      }
+      for (let k: usize = 0; k < 30; k++) {
+        lens[288 + k] = 5;
+      }
+      pngHuffman(lens, 0, 288, mut lcount, mut lsym);
+      pngHuffman(lens, 288, 30, mut dcount, mut dsym);
+    } else if (kind == 2) {
+      // 符号をブロックの頭から読む。
+      const nlen = (pngBits(data, mut s, 5) as i32) + 257;
+      const ndist = (pngBits(data, mut s, 5) as i32) + 1;
+      const ncode = (pngBits(data, mut s, 4) as i32) + 4;
+      if (s.bad || nlen > 286 || ndist > 30) {
+        return false;
+      }
+      for (let k: usize = 0; k < 19; k++) {
+        lens[k] = 0;
+      }
+      for (let k = 0; k < ncode; k++) {
+        lens[PNG_ORDER[k as usize] as usize] = pngBits(data, mut s, 3) as i32;
+      }
+      if (s.bad || !pngHuffman(lens, 0, 19, mut lcount, mut lsym)) {
+        return false;
+      }
+      let index = 0;
+      while (index < nlen + ndist) {
+        const sym = pngDecode(data, mut s, lcount, lsym);
+        if (sym < 0) {
+          return false;
+        }
+        if (sym < 16) {
+          lens[index as usize] = sym;
+          index++;
+        } else {
+          let v = 0;
+          let rep = 0;
+          if (sym == 16) {
+            if (index == 0) {
+              return false;
+            }
+            v = lens[(index - 1) as usize];
+            rep = 3 + (pngBits(data, mut s, 2) as i32);
+          } else if (sym == 17) {
+            rep = 3 + (pngBits(data, mut s, 3) as i32);
+          } else {
+            rep = 11 + (pngBits(data, mut s, 7) as i32);
+          }
+          if (s.bad || index + rep > nlen + ndist) {
+            return false;
+          }
+          for (let k = 0; k < rep; k++) {
+            lens[index as usize] = v;
+            index++;
+          }
+        }
+      }
+      if (lens[256] == 0) {
+        return false;
+      }
+      if (!pngHuffman(lens, 0, nlen, mut lcount, mut lsym) || !pngHuffman(lens, nlen, ndist, mut dcount, mut dsym)) {
+        return false;
+      }
+    } else {
+      return false;
+    }
+    // 符号で圧縮したブロックの中身。
+    while (true) {
+      const sym = pngDecode(data, mut s, lcount, lsym);
+      if (sym < 0) {
+        return false;
+      }
+      if (sym < 256) {
+        if (o >= cap) {
+          return false;
+        }
+        out[o] = sym as u8;
+        o++;
+      } else if (sym == 256) {
+        break;
+      } else {
+        const li = sym - 257;
+        if (li >= 29) {
+          return false;
+        }
+        const len = (PNG_LEN_BASE[li as usize] + (pngBits(data, mut s, PNG_LEN_EXTRA[li as usize] as u32) as i32)) as usize;
+        const di = pngDecode(data, mut s, dcount, dsym);
+        if (di < 0 || di >= 30) {
+          return false;
+        }
+        const dist = (PNG_DIST_BASE[di as usize] + (pngBits(data, mut s, PNG_DIST_EXTRA[di as usize] as u32) as i32)) as usize;
+        if (s.bad || dist > o || o + len > cap) {
+          return false;
+        }
+        for (let k: usize = 0; k < len; k++) {
+          out[o] = out[o - dist];
+          o++;
+        }
+      }
+    }
+  }
+  return o == cap;
+}
+
+// ---- PNG ----
+
+function pngBe32(data: u8[], p: usize): u32 {
+  return ((data[p] as u32) << 24) | ((data[p + 1] as u32) << 16) | ((data[p + 2] as u32) << 8) | (data[p + 3] as u32);
+}
+
+function pngBe16(data: u8[], p: usize): u32 {
+  return ((data[p] as u32) << 8) | (data[p + 1] as u32);
+}
+
+// Adam7 の 7 回の並び（インターレースでなければ、1 回目だけを全体として使う）。
+const PNG_X0: u32[7] = [0, 4, 0, 2, 0, 1, 0];
+const PNG_Y0: u32[7] = [0, 0, 4, 0, 2, 0, 1];
+const PNG_DX: u32[7] = [8, 8, 4, 4, 2, 2, 1];
+const PNG_DY: u32[7] = [8, 8, 8, 4, 4, 2, 2];
+
+// 1 回分の画像の幅と高さ（画素の数）。
+function pngPassSize(size: u32, start: u32, step: u32): u32 {
+  if (size <= start) {
+    return 0;
+  }
+  return (size - start + step - 1) / step;
+}
+
+// 行の x 番目の標本（0 から 2^depth − 1）。
+function pngSample(raw: Buffer<u8>, row: usize, x: u32, depth: u32): u32 {
+  if (depth == 8) {
+    return raw[row + (x as usize)] as u32;
+  }
+  if (depth == 16) {
+    const p = row + (x as usize) * 2;
+    return ((raw[p] as u32) << 8) | (raw[p + 1] as u32);
+  }
+  const bit = x * depth;
+  const b = raw[row + ((bit / 8) as usize)] as u32;
+  return (b >> (8 - depth - bit % 8)) & ((1 << depth) - 1);
+}
+
+// 標本を 8 ビットにする。
+function pngTo8(v: u32, depth: u32): u32 {
+  if (depth == 16) {
+    return v >> 8;
+  }
+  if (depth == 8) {
+    return v;
+  }
+  return v * 255 / ((1 << depth) - 1);
+}
+
+// PNG のバイト列を画像にする。PNG でないか、読めない形式か、壊れていれば error に理由が入る。
+export function imageDecodePng(data: u8[]): Bitmap {
+  const sig: u32[8] = [137, 80, 78, 71, 13, 10, 26, 10];
+  const total = data.length;
+  if (total < 8) {
+    return imageFailed("not a PNG file");
+  }
+  for (let k: usize = 0; k < 8; k++) {
+    if ((data[k] as u32) != sig[k]) {
+      return imageFailed("not a PNG file");
+    }
+  }
+  let width: u32 = 0;
+  let height: u32 = 0;
+  let depth: u32 = 0;
+  let ctype: u32 = 0;
+  let interlace: u32 = 0;
+  let seenHeader = false;
+  let palette = new Buffer<u32>(256);
+  palette.fill(0xFF000000);
+  let npal: u32 = 0;
+  // 透明の色（グレーと RGB の tRNS）。元の深さの値で比べる。
+  let hasKey = false;
+  let keyR: u32 = 0;
+  let keyG: u32 = 0;
+  let keyB: u32 = 0;
+  let z: u8[] = [];
+  let p: usize = 8;
+  let ended = false;
+  while (!ended) {
+    if (p + 12 > total) {
+      return imageFailed("broken PNG");
+    }
+    const len = pngBe32(data, p) as usize;
+    if (len > total - p - 12) {
+      return imageFailed("broken PNG");
+    }
+    const t = pngBe32(data, p + 4);
+    const d = p + 8;
+    if (t == 0x49484452) {
+      // IHDR
+      if (len < 13) {
+        return imageFailed("broken PNG");
+      }
+      width = pngBe32(data, d);
+      height = pngBe32(data, d + 4);
+      depth = data[d + 8] as u32;
+      ctype = data[d + 9] as u32;
+      interlace = data[d + 12] as u32;
+      if (data[d + 10] != 0 || data[d + 11] != 0 || interlace > 1) {
+        return imageFailed("broken PNG");
+      }
+      seenHeader = true;
+    } else if (t == 0x504C5445) {
+      // PLTE
+      npal = (len / 3) as u32;
+      if (npal > 256) {
+        return imageFailed("broken PNG");
+      }
+      for (let k: usize = 0; k < (npal as usize); k++) {
+        const q = d + k * 3;
+        palette[k] = 0xFF000000 | ((data[q] as u32) << 16) | ((data[q + 1] as u32) << 8) | (data[q + 2] as u32);
+      }
+    } else if (t == 0x74524E53) {
+      // tRNS
+      if (ctype == 3) {
+        for (let k: usize = 0; k < len && k < 256; k++) {
+          palette[k] = (palette[k] & 0xFFFFFF) | ((data[d + k] as u32) << 24);
+        }
+      } else if (ctype == 0 && len >= 2) {
+        hasKey = true;
+        keyR = pngBe16(data, d);
+      } else if (ctype == 2 && len >= 6) {
+        hasKey = true;
+        keyR = pngBe16(data, d);
+        keyG = pngBe16(data, d + 2);
+        keyB = pngBe16(data, d + 4);
+      }
+    } else if (t == 0x49444154) {
+      // IDAT
+      for (let k: usize = 0; k < len; k++) {
+        z.push(data[d + k]);
+      }
+    } else if (t == 0x49454E44) {
+      // IEND
+      ended = true;
+    }
+    p = d + len + 4;
+  }
+  if (!seenHeader || width == 0 || height == 0 || width > 32768 || height > 32768 || width * height > 0x4000000) {
+    return imageFailed("unsupported PNG (no header, or too large)");
+  }
+  let channels: u32 = 0;
+  if (ctype == 0 || ctype == 3) {
+    channels = 1;
+  } else if (ctype == 2) {
+    channels = 3;
+  } else if (ctype == 4) {
+    channels = 2;
+  } else if (ctype == 6) {
+    channels = 4;
+  } else {
+    return imageFailed("broken PNG");
+  }
+  const okDepth = (ctype == 0 && (depth == 1 || depth == 2 || depth == 4 || depth == 8 || depth == 16))
+    || (ctype == 3 && (depth == 1 || depth == 2 || depth == 4 || depth == 8))
+    || ((ctype == 2 || ctype == 4 || ctype == 6) && (depth == 8 || depth == 16));
+  if (!okDepth || (ctype == 3 && npal == 0)) {
+    return imageFailed(`unsupported PNG (color type ${ctype}, bit depth ${depth})`);
+  }
+  const bits = channels * depth;
+  // フィルタで左の画素とするバイトの数（1 バイト未満の画素では 1）。
+  let bpp = (bits / 8) as usize;
+  if (bpp == 0) {
+    bpp = 1;
+  }
+  const passes: u32 = interlace == 1 ? 7 : 1;
+  let rawSize: usize = 0;
+  for (let k: u32 = 0; k < passes; k++) {
+    const pw = interlace == 1 ? pngPassSize(width, PNG_X0[k as usize], PNG_DX[k as usize]) : width;
+    const ph = interlace == 1 ? pngPassSize(height, PNG_Y0[k as usize], PNG_DY[k as usize]) : height;
+    if (pw > 0 && ph > 0) {
+      rawSize += (ph as usize) * (1 + (((pw as usize) * (bits as usize) + 7) / 8));
+    }
+  }
+  // zlib の頭: 方式 8（deflate）、検査の値、辞書なし。
+  if (z.length < 6) {
+    return imageFailed("broken PNG");
+  }
+  const cmf = z[0] as u32;
+  const flg = z[1] as u32;
+  if ((cmf & 15) != 8 || (cmf * 256 + flg) % 31 != 0 || (flg & 32) != 0) {
+    return imageFailed("broken PNG");
+  }
+  let raw = new Buffer<u8>(rawSize);
+  let s: PngBits = { pos: 2, end: z.length, buf: 0, cnt: 0, bad: false };
+  if (!pngInflate(z, mut s, mut raw)) {
+    return imageFailed("broken PNG (the compressed image data is damaged or short)");
+  }
+
+  let img: Bitmap = { width: width as i32, height: height as i32, pixels: new Buffer<u32>((width * height) as usize), error: "" };
+  let at: usize = 0;
+  for (let k: u32 = 0; k < passes; k++) {
+    const x0 = interlace == 1 ? PNG_X0[k as usize] : 0;
+    const y0 = interlace == 1 ? PNG_Y0[k as usize] : 0;
+    const dx = interlace == 1 ? PNG_DX[k as usize] : 1;
+    const dy = interlace == 1 ? PNG_DY[k as usize] : 1;
+    const pw = pngPassSize(width, x0, dx);
+    const ph = pngPassSize(height, y0, dy);
+    if (pw == 0 || ph == 0) {
+      continue;
+    }
+    const stride = ((pw as usize) * (bits as usize) + 7) / 8;
+    for (let y: u32 = 0; y < ph; y++) {
+      const f = raw[at] as u32;
+      const row = at + 1;
+      const hasPrev = y > 0;
+      const prev = row - stride - 1;
+      // フィルタを外す（その場で書き換える）。
+      for (let i: usize = 0; i < stride; i++) {
+        const a = i >= bpp ? (raw[row + i - bpp] as u32) : 0;
+        const b = hasPrev ? (raw[prev + i] as u32) : 0;
+        const c = hasPrev && i >= bpp ? (raw[prev + i - bpp] as u32) : 0;
+        let v = raw[row + i] as u32;
+        if (f == 1) {
+          v += a;
+        } else if (f == 2) {
+          v += b;
+        } else if (f == 3) {
+          v += (a + b) / 2;
+        } else if (f == 4) {
+          const pa = (b as i32) - (c as i32);
+          const pb = (a as i32) - (c as i32);
+          const pc = pa + pb;
+          const ea = pa < 0 ? -pa : pa;
+          const eb = pb < 0 ? -pb : pb;
+          const ec = pc < 0 ? -pc : pc;
+          if (ea <= eb && ea <= ec) {
+            v += a;
+          } else if (eb <= ec) {
+            v += b;
+          } else {
+            v += c;
+          }
+        } else if (f != 0) {
+          return imageFailed("broken PNG");
+        }
+        raw[row + i] = (v & 255) as u8;
+      }
+      // 画素を置く。
+      const oy = y0 + y * dy;
+      for (let x: u32 = 0; x < pw; x++) {
+        const ox = x0 + x * dx;
+        let argb: u32 = 0;
+        if (ctype == 3) {
+          const idx = pngSample(raw, row, x, depth);
+          argb = idx < npal ? palette[idx as usize] : 0xFF000000;
+        } else if (ctype == 0) {
+          const gv = pngSample(raw, row, x, depth);
+          const g8 = pngTo8(gv, depth);
+          const alpha: u32 = hasKey && gv == keyR ? 0 : 255;
+          argb = (alpha << 24) | (g8 << 16) | (g8 << 8) | g8;
+        } else if (ctype == 4) {
+          const g8 = pngTo8(pngSample(raw, row, x * 2, depth), depth);
+          const a8 = pngTo8(pngSample(raw, row, x * 2 + 1, depth), depth);
+          argb = (a8 << 24) | (g8 << 16) | (g8 << 8) | g8;
+        } else {
+          const r = pngSample(raw, row, x * channels, depth);
+          const g = pngSample(raw, row, x * channels + 1, depth);
+          const b = pngSample(raw, row, x * channels + 2, depth);
+          let a8: u32 = 255;
+          if (ctype == 6) {
+            a8 = pngTo8(pngSample(raw, row, x * channels + 3, depth), depth);
+          } else if (hasKey && r == keyR && g == keyG && b == keyB) {
+            a8 = 0;
+          }
+          argb = (a8 << 24) | (pngTo8(r, depth) << 16) | (pngTo8(g, depth) << 8) | pngTo8(b, depth);
+        }
+        img.pixels[(oy as usize) * (width as usize) + (ox as usize)] = argb;
+      }
+      at = row + stride;
+    }
+  }
+  return img;
+}

@@ -4,6 +4,9 @@
 // expect: 100 frames, the last one at 3.96 s
 // expect: the frame numbers from the colour were all in order
 
+import { MediaPixels, MediaRead, mediaOpenVideo, mediaNextFrame, mediaClose, mediaInfoOf } from "um:media";
+
+
 export function main(): i32 {
   let path = "clip.mp4";
   let hw = "none";

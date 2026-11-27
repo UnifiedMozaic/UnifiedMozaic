@@ -9,6 +9,9 @@
 // expect: cannot read no_such_plugin.wasm
 // expect: could not compile the module
 
+import { WasmValue, WasmLimits, wasmLoad, wasmLoadFile, wasmFromWat, wasmNew, wasmCall, wasmCustomSection, wasmFreeModule, wasmFreeInstance } from "um:wasm";
+
+
 const WAT: string =
   "(module" +
   "  (@custom \"example.manifest\" \"@effect invert\\n@param amount f32 0 1\")" +

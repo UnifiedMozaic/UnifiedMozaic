@@ -2,9 +2,10 @@ import { execFileSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path';
-import { check } from './checker.ts';
+import { check, libBuiltins, libOfBuiltin } from './checker.ts';
 import { generate, kernelUses64 } from './codegen.ts';
 import { emitMsl } from './msl.ts';
+import { drawSources } from './render.ts';
 import { emitWgsl, WGSL_SIMDGROUP } from './wgsl.ts';
 import type { TargetKind } from './codegen.ts';
 import { parse } from './parser.ts';
@@ -425,12 +426,10 @@ const PRELUDE = join(import.meta.dirname, '..', 'runtime', 'prelude.um');
  * ウィンドウの標準の型と関数（WindowEvent、pollWindowEvent など）。UM で書いてある。
  * ウィンドウを使わないプログラムに SDL3 をリンクさせないため、プログラムがこのファイルの名前を使うときだけ加える。
  */
-const WINDOW_PRELUDE = join(import.meta.dirname, '..', 'runtime', 'window.um');
 /**
  * WebAssembly の標準の型と関数（wasmLoad、wasmCall、WasmValue など）。UM で書いてある。
  * ウィンドウと同じく、プログラムがこのファイルの名前を使うときだけ加える（使わないプログラムは wasmtime をリンクしない）。
  */
-const WASM_PRELUDE = join(import.meta.dirname, '..', 'runtime', 'wasm.um');
 /**
  * wgpu-native（WebGPU の C API）で kernel を GPU で実行する経路を使うか。ネイティブのビルド（host）で、
  * 環境変数 UM_WGPU=1 を付けたときだけ有効にする。Windows（Direct3D 12 / Vulkan）・Linux（Vulkan）・macOS（Metal）で動く。
@@ -448,9 +447,12 @@ const RUNTIME_WASM_C = join(import.meta.dirname, '..', 'runtime', 'wasm_rt.c');
  * 動画・音声の標準の型と関数（mediaOpenVideo、mediaFrame、MediaPixels など）。UM で書いてある。
  * ウィンドウと同じく、プログラムがこのファイルの名前を使うときだけ加える（使わないプログラムは FFmpeg をリンクしない）。
  */
-const MEDIA_PRELUDE = join(import.meta.dirname, '..', 'runtime', 'media.um');
-/** HTTP の標準の型と関数（httpPoll、HttpState、httpRequest など）。UM で書いてある。使うときだけ加える。 */
-const HTTP_PRELUDE = join(import.meta.dirname, '..', 'runtime', 'http.um');
+/** 描画の標準の型と関数（GpuImage、gpuBeginImage など）。プログラムが gpu.beginImage / gpu.draw / gpu.endImage を使うときだけ加える。 */
+const RENDER_PRELUDE = join(import.meta.dirname, '..', 'runtime', 'render.um');
+/** ウィンドウに描く標準の関数（gpuBeginFrame、gpuEndFrame）。gpu.beginFrame / gpu.endFrame を使うときだけ加える。 */
+const RENDER_WINDOW_PRELUDE = join(import.meta.dirname, '..', 'runtime', 'render_window.um');
+/** ライブラリ（`import { … } from "um:名前";` で読む lib/名前.um。docs/libraries.ja.md）。 */
+const LIB_DIR = join(import.meta.dirname, '..', 'lib');
 
 /** ファイル番号を、宣言とその中のメソッドに付ける。 */
 function tag(d: Decl, file: number): void {
@@ -487,6 +489,40 @@ export function parseProgram(src: string, file?: string): Module {
     const names = new Set<string>();
     merged.importedNames!.set(id, names);
     for (const imp of mod.imports ?? []) {
+      const lib = /^um:([a-z][a-z0-9_]*)$/.exec(imp.path);
+      if (lib) {
+        // ライブラリ（lib/名前.um）。どのファイルからも、ファイルなしのソースからも読める。
+        const abs = join(LIB_DIR, `${lib[1]}.um`);
+        let target = loaded.get(abs);
+        if (!target) {
+          let text: string;
+          try {
+            text = readFileSync(abs, 'utf8');
+          } catch {
+            throw new CompileError('import-path', `there is no library '${imp.path}'`, imp.pos, 'the libraries are in the lib folder of UnifiedMozaic (docs/libraries.ja.md)');
+          }
+          texts.push(text);
+          target = { id: loaded.size + 1, mod: parse(text, imp.path) };
+          loaded.set(abs, target);
+          load(target.mod, target.id, undefined);
+        }
+        if (imp.all) {
+          for (const d of target.mod.decls) if (d.importable) names.add(d.name);
+          for (const b of libBuiltins(lib[1])) names.add(b);
+        }
+        for (const n of imp.names) {
+          // ライブラリの組み込みの関数（httpReadLine など。checker.ts の libOfBuiltin）も import する。
+          if (libOfBuiltin(n.name) === lib[1]) {
+            names.add(n.name);
+            continue;
+          }
+          const d = target.mod.decls.find((x) => x.name === n.name);
+          if (!d) throw new CompileError('import-name', `'${imp.path}' has no '${n.name}'`, n.pos);
+          if (!d.importable) throw new CompileError('import-name', `'${n.name}' is not exported by '${imp.path}'`, n.pos);
+          names.add(n.name);
+        }
+        continue;
+      }
       if (!dir || !root) {
         throw new CompileError('import-path', 'imports need the program to be compiled from a file', imp.pos);
       }
@@ -518,6 +554,9 @@ export function parseProgram(src: string, file?: string): Module {
         loaded.set(abs, target);
         load(target.mod, target.id, dirname(abs));
       }
+      if (imp.all) {
+        for (const d of target.mod.decls) if (d.importable) names.add(d.name);
+      }
       for (const n of imp.names) {
         const d = target.mod.decls.find((x) => x.name === n.name);
         if (!d) throw new CompileError('import-name', `'${imp.path}' has no '${n.name}'`, n.pos);
@@ -529,18 +568,30 @@ export function parseProgram(src: string, file?: string): Module {
     }
   };
   load(entry, 0, root);
+  // ライブラリの export する名前（読み込んでいない名前を使ったときのヒント）。組み込みの関数（httpReadLine など）も。
+  merged.libNames = new Map();
+  for (const f of readdirSync(LIB_DIR).filter((x) => x.endsWith('.um')).sort()) {
+    const lib = f.slice(0, -3);
+    for (const m of readFileSync(join(LIB_DIR, f), 'utf8').matchAll(/^export (?:kernel |vertex |fragment )?(?:function|struct|class|enum|const) (\w+)/gm)) {
+      merged.libNames.set(m[1], lib);
+    }
+  }
 
   // 同じ名前をプログラムが定義していれば、標準のものは入れない。定数は別:
   // 標準の関数・型と同じ名前の定数は、標準のものを黙って消さずに `duplicate` にする（型検査が報告する）。
   const defined = new Set(merged.decls.filter((d) => d.kind !== 'const').map((d) => d.name));
   const prelude = parse(readFileSync(PRELUDE, 'utf8'), 'prelude.um');
   const standard = [...prelude.decls];
-  for (const [path, label] of [[WINDOW_PRELUDE, 'window.um'], [WASM_PRELUDE, 'wasm.um'], [MEDIA_PRELUDE, 'media.um'], [HTTP_PRELUDE, 'http.um']]) {
-    const extra = parse(readFileSync(path, 'utf8'), label);
-    const names = extra.decls.map((d) => d.name).filter((n) => !defined.has(n));
-    if (names.length === 0) continue;
-    const used = new RegExp(`\\b(?:${names.join('|')})\\b`);
-    if (texts.some((t) => used.test(t))) standard.push(...extra.decls);
+  // 描画: 標準の関数と、gpu.draw の vs と fs の組ごとの描画の関数（src/render.ts の drawSources）。
+  // ライブラリ（lib/text.um など）の中の gpu.draw も、読み込んだファイルの文字（texts）として数える。
+  if (texts.some((t) => /\bgpu\s*\.\s*(beginImage|draw|drawIndexed|endImage|beginFrame|endFrame)\b/.test(t))) {
+    const renderDecls = parse(readFileSync(RENDER_PRELUDE, 'utf8'), 'render.um').decls;
+    if (texts.some((t) => /\bgpu\s*\.\s*(beginFrame|endFrame)\b/.test(t))) {
+      renderDecls.push(...parse(readFileSync(RENDER_WINDOW_PRELUDE, 'utf8'), 'render.um').decls);
+    }
+    standard.push(...renderDecls);
+    const draws = drawSources([...merged.decls, ...renderDecls]);
+    if (draws) standard.push(...parse(draws, 'render-draw.um').decls);
   }
   for (const d of standard) {
     if (defined.has(d.name)) continue;
@@ -572,7 +623,9 @@ export function compileToLL(src: string, target: TargetName, sanitize: boolean |
   const appleArm = process.env.UM_GENERIC_SIMD !== '1' &&
     (target === 'arm64-macos' || (target === 'host' && process.platform === 'darwin' && process.arch === 'arm64'));
   const windows = target === 'host' && process.platform === 'win32';
-  return generate(prog, t.kind, sanitize, metal, appleArm, windows, target === 'wasm32-plugin', wgpu);
+  // UM_SHADER_FAST_MATH=1: 描画のシェーダ（vertex / fragment function）は GPU のふつうの計算を使う（docs/render.ja.md）。
+  const fastShaders = process.env.UM_SHADER_FAST_MATH === '1';
+  return generate(prog, t.kind, sanitize, metal, appleArm, windows, target === 'wasm32-plugin', wgpu, fastShaders);
 }
 
 /**

@@ -9,6 +9,9 @@
 // expect: audio thread: 4.0 s
 // expect: shared reader: some calls failed with "being used by another thread", or none overlapped
 
+import { MediaPixels, MediaRead, MediaAudioRead, mediaOpenVideo, mediaOpenAudio, mediaFrame, mediaNextFrame, mediaNextSamples, mediaClose } from "um:media";
+
+
 function numberOf(px: Buffer<u8>, w: i32, h: i32): i32 {
   const at = ((h / 2) * w + w / 2) * 4;
   return (px[at] as i32) / 16 + (px[at + 1] as i32) / 16 * 16;

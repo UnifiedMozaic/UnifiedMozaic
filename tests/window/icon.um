@@ -2,6 +2,8 @@
 // 停止せずに呼べることだけを確かめる。
 // expect: icon called
 
+import * from "um:window";
+
 export function main(): i32 {
   const opened = windowOpen("icon", 64, 64);
   if (opened == null) {

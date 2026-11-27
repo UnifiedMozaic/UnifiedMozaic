@@ -1,0 +1,57 @@
+// ブラウザのウィンドウ（canvas）に gpu.beginFrame で描く。tests/run.ts がブラウザ（Playwright の Chromium）で、
+// WebGPU なし（?gpu=0）で開くので、フレームは CPU で描いて canvas の 2D で表示する。
+// 表示（gpu.endFrame）ごとに wasm が一時停止し（JSPI）、ブラウザが描画の時機に再開する。
+// web-query: ?gpu=0&args=5
+// expect: size 640 x 480
+// expect: center 4294901760
+// expect: corner 4280295464
+// expect: 5
+
+import * from "um:window";
+
+struct VOut {
+  position: vec4<f32>;
+}
+
+vertex function vs(i: u32): VOut {
+  const xs: f32[3] = [-0.8, 0.8, 0];
+  const ys: f32[3] = [-0.8, -0.8, 0.8];
+  return { position: vec4(xs[i % 3], ys[i % 3], 0.5, 1) };
+}
+
+fragment function fs(v: VOut): vec4<f32> {
+  return vec4(1.0 as f32, 0, 0, 1);
+}
+
+export function main(): i32 {
+  const opened = windowOpen("web", 640, 480);
+  if (opened == null) {
+    print("no window");
+    return 1;
+  }
+  const win = opened;
+  const a = args();
+  let limit: i32 = 0;
+  for (const c of a[0]) {
+    limit = limit * 10 + ((c as i32) - 48);
+  }
+  let frames: i32 = 0;
+  while (frames < limit) {
+    while (pollWindowEvent(0) != null) {}
+    let frame = gpu.beginFrame(windowSurface(win), 0xFF202028);
+    gpu.draw(mut frame, 3, vs(), fs());
+    if (frames == 0) {
+      const w = frame.width as u32;
+      const h = frame.height as u32;
+      print(`size ${w} x ${h}`);
+      if (frame.handle == 0) {
+        print(`center ${frame.color[(h / 2) * w + w / 2]}`);
+        print(`corner ${frame.color[0]}`);
+      }
+    }
+    gpu.endFrame(mut frame);
+    frames++;
+  }
+  print(frames);
+  return 0;
+}

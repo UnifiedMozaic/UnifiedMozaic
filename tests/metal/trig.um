@@ -1,0 +1,72 @@
+// 三角関数を CPU と GPU で実行し、結果のビットが一致することを確かめる（四則演算と Math.sqrt / floor だけで
+// 計算するので、GPU の sin などの命令の精度に左右されない）。出力は各関数の不一致の個数（0）。
+// 入力は 1e-3 以上の大きさにする（GPU によっては、非正規化数を 0 にすることがあるため。docs/wgpu.ja.md）。
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: 0
+// expect: 0
+
+kernel function trig(i: u32, out: mut Buffer<f32>, xs: Buffer<f32>, ys: Buffer<f32>, which: u32): void {
+  const x = xs[i];
+  let r: f32 = 0;
+  if (which == 0) {
+    r = Math.sin(x);
+  } else if (which == 1) {
+    r = Math.cos(x);
+  } else if (which == 2) {
+    r = Math.tan(x);
+  } else if (which == 3) {
+    r = Math.asin(ys[i]);
+  } else if (which == 4) {
+    r = Math.acos(ys[i]);
+  } else if (which == 5) {
+    r = Math.atan(x);
+  } else {
+    r = Math.atan2(ys[i], x);
+  }
+  out[i] = r;
+}
+
+function diff(a: Buffer<f32>, b: Buffer<f32>): u32 {
+  let bad: u32 = 0;
+  for (let i: u32 = 0; i < a.length; i++) {
+    const same = a[i] == b[i] || (a[i] != a[i] && b[i] != b[i]);
+    if (!same) {
+      bad += 1;
+    }
+  }
+  return bad;
+}
+
+export function main(): i32 {
+  const n: u32 = 100000;
+  let xs = new Buffer<f32>(n);
+  let ys = new Buffer<f32>(n);
+  let s: u32 = 12345;
+  for (let i: u32 = 0; i < n; i++) {
+    s = s * 1664525 + 1013904223;
+    const u = ((s >> 8) as f32) / 16777216;
+    // -100 〜 100（π/4 の倍数の近くも含む）と、-1 〜 1
+    let x = (u * 2 - 1) * 100;
+    if (x > -0.001 && x < 0.001) {
+      x = 0.5;
+    }
+    xs[i] = x;
+    let y = u * 2 - 1;
+    if (y > -0.001 && y < 0.001) {
+      y = 0.25;
+    }
+    ys[i] = y;
+  }
+  for (let which: u32 = 0; which < 7; which++) {
+    let g = new Buffer<f32>(n);
+    let c = new Buffer<f32>(n);
+    gpu.dispatch(trig, n, mut g, xs, ys, which);
+    cpu.dispatch(trig, n, mut c, xs, ys, which);
+    print(diff(g, c));
+  }
+  return 0;
+}

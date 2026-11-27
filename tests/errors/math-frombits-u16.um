@@ -1,0 +1,6 @@
+// error: type-mismatch
+export function main(): i32 {
+  const b: u16 = 1;
+  print(Math.fromBits(b));
+  return 0;
+}

@@ -1,0 +1,65 @@
+// ブラウザでの音の出力（Web Audio）。数（書き込んだ・待ち行列にある・再生した）の意味がネイティブ
+// （tests/window/audio.um）と同じことを確かめる。tests/run.ts が自動再生を許す設定で Chromium を開く。
+// web-query: ?gpu=0
+// expect: open
+// expect: paused true
+// expect: queued 4800
+// expect: written 4800
+// expect: played 0
+// expect: still queued after pause ok
+// expect: playing ok
+// expect: clock moves ok
+// expect: cleared 0
+// expect: played kept ok
+// expect: gain true
+// expect: closed
+
+import * from "um:window";
+
+function check(cond: bool, label: string): void {
+  if (cond) {
+    print(`${label} ok`);
+  } else {
+    print(`${label} bad`);
+  }
+}
+
+export function main(): i32 {
+  const opened = audioOpen(48000, 2);
+  if (opened == null) {
+    print(`no audio: ${windowError()}`);
+    return 1;
+  }
+  const s = opened;
+  print("open");
+  print(`paused ${audioPaused(s)}`);
+
+  let buf = new Buffer<f32>(9600);
+  for (let i: u32 = 0; i < buf.length; i++) {
+    buf[i] = ((i / 2) / 50) % 2 == 0 ? 0.25 : -0.25;
+  }
+  audioWrite(s, buf, 0, -1);
+  print(`queued ${audioQueued(s)}`);
+  print(`written ${audioWritten(s)}`);
+  print(`played ${audioPlayed(s)}`);
+  sleepMs(100);
+  check(audioQueued(s) == 4800, "still queued after pause");
+
+  for (let k = 0; k < 9; k++) {
+    audioWrite(s, buf, 0, -1);
+  }
+  audioResume(s);
+  sleepMs(300);
+  check(!audioPaused(s) && audioQueued(s) < 48000, "playing");
+  const p = audioPlayed(s);
+  check(p > 0 && p + audioQueued(s) == audioWritten(s), "clock moves");
+
+  audioPause(s);
+  audioClear(s);
+  print(`cleared ${audioQueued(s)}`);
+  check(audioPlayed(s) >= p && audioWritten(s) == audioPlayed(s), "played kept");
+  print(`gain ${audioSetGain(s, 0.5)}`);
+  audioClose(s);
+  print("closed");
+  return 0;
+}

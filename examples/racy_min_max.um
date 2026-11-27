@@ -1,0 +1,67 @@
+// RacyBuffer の fetchMin / fetchMax: 小さい方 / 大きい方をアトミックに書き、前の値を返す。
+// 多くのスレッドが同じ要素に書いても、結果（最小・最大）は実行の順に左右されない。kernel の中でも使える（32 ビットの整数）。
+// 符号つきの要素は符号つきで、符号なしの要素は符号なしで比べる。
+// expect: 5
+// expect: 3
+// expect: 3
+// expect: -7
+// expect: 3
+// expect: true
+// expect: 4294967295
+// expect: 10
+
+// 各値を 8 つの箱に分け、箱ごとの最小と最大を求める。
+kernel function bounds(i: u32, lo: mut RacyBuffer<i32>, hi: mut RacyBuffer<i32>, data: Buffer<i32>): void {
+  const b = (i % 8) as u32;
+  lo.fetchMin(b, data[i]);
+  hi.fetchMax(b, data[i]);
+}
+
+export function main(): i32 {
+  let r = new RacyBuffer<i32>(2);
+  r[0] = 5;
+  print(r.fetchMin(0, 3));   // 前の値 5。r[0] は 3 になる
+  print(r.fetchMax(0, -7));  // 前の値 3。-7 は小さいので r[0] は 3 のまま
+  print(r[0]);
+  r[1] = 0;
+  r.fetchMin(1, -7);
+  print(r.fetchMax(1, 3));   // 前の値 -7
+  print(r[1]);
+
+  // 符号なしは符号なしで比べる（0xffffffff は最大）。
+  let u = new RacyBuffer<u32>(1);
+  u.fetchMax(0, 0xffffffff);
+  u.fetchMax(0, 1);
+  let w = new RacyBuffer<u64>(1);
+  w.fetchMax(0, 10);
+  w.fetchMin(0, 20);
+
+  const n: u32 = 100000;
+  let data = new Buffer<i32>(n);
+  let s: u32 = 3;
+  for (let i: u32 = 0; i < n; i++) {
+    s = s * 1664525 + 1013904223;
+    data[i] = (s as i32) >> 4;
+  }
+  let lo = new RacyBuffer<i32>(8);
+  let hi = new RacyBuffer<i32>(8);
+  lo.fill(2147483647);
+  hi.fill(-2147483648);
+  dispatch(bounds, n, mut lo, mut hi, data);
+  let same = true;
+  for (let b: u32 = 0; b < 8; b++) {
+    let mn: i32 = 2147483647;
+    let mx: i32 = -2147483648;
+    for (let i = b; i < n; i += 8) {
+      mn = Math.min(mn, data[i]);
+      mx = Math.max(mx, data[i]);
+    }
+    if (lo[b] != mn || hi[b] != mx) {
+      same = false;
+    }
+  }
+  print(same);
+  print(u[0]);
+  print(w[0]);
+  return 0;
+}

@@ -7,6 +7,8 @@
 画面を描きながら、毎コマ届いた分を取り出す使い方を前提にしています。AI の API のストリーミング
 （Claude の Messages API の SSE、Ollama の改行区切りの JSON、OpenAI 互換の API の SSE）を、1行ずつ読めます。
 
+`import { httpRequest, httpPoll, httpReadLine } from "um:http";` のように、ライブラリ `um:http` から読み込んで使います（[ライブラリ](libraries.ja.md)）。
+
 ## 用意するもの
 
 新しいライブラリは要りません。OS に入っているものを使います。
@@ -83,7 +85,7 @@ if (state >= 2) {                      // 2 受け取り終えた、3 失敗、4
 - **本文は、取り出すまで要求の中に溜まります。** 大きなファイルを受け取るときは、こまめに `httpRead` します。
 - 同じ機械の外へ出ない試験のため、`http://127.0.0.1:番号` / `http://localhost:番号` にも送れます（代理は OS の設定に従います）。
 
-## 標準の型と関数（runtime/http.um）
+## ライブラリの型と関数（um:http。lib/http.um）
 
 `httpPoll` などの名前を使うと、次のものが加わります。
 
@@ -104,6 +106,7 @@ function httpRequest(method: string, url: string, headers: string[], body: strin
 ```
 
 ```ts
+import { httpRequest, httpPoll } from "um:http";
 const id = httpRequest("POST", "http://localhost:11434/api/chat", ["Content-Type: application/json"], body, 0);
 // 毎コマ:
 const s = httpPoll(id);

@@ -1,0 +1,6 @@
+// error: type-mismatch
+export function main(): i32 {
+  let r = new RacyBuffer<f32>(1);
+  r.fetchMin(0, 1.5);
+  return 0;
+}

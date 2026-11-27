@@ -48,6 +48,109 @@ void *memmove(void *dst, const void *src, size_t n) {
   return dst;
 }
 
+// ---- 浮動小数点の剰余（% ）----
+// LLVM は浮動小数点の % を fmod / fmodf の呼び出しにする。wasm には libc がないので、ここで提供する。
+// 結果は正確（丸めなし。C の fmod と同じ）。musl の fmod / fmodf と同じ考え方で、指数をそろえて仮数を引いていく。
+double fmod(double x, double y) {
+  union { double f; unsigned long long i; } ux = {x}, uy = {y};
+  int ex = (int)(ux.i >> 52 & 0x7ff);
+  int ey = (int)(uy.i >> 52 & 0x7ff);
+  unsigned long long sx = ux.i >> 63;
+  unsigned long long uxi = ux.i;
+  if (uy.i << 1 == 0 || y != y || ex == 0x7ff) return (x * y) / (x * y);
+  if (uxi << 1 <= uy.i << 1) {
+    if (uxi << 1 == uy.i << 1) return 0 * x;
+    return x;
+  }
+  if (!ex) {
+    for (unsigned long long i = uxi << 12; i >> 63 == 0; ex--, i <<= 1) {}
+    uxi <<= -ex + 1;
+  } else {
+    uxi &= -1ULL >> 12;
+    uxi |= 1ULL << 52;
+  }
+  if (!ey) {
+    for (unsigned long long i = uy.i << 12; i >> 63 == 0; ey--, i <<= 1) {}
+    uy.i <<= -ey + 1;
+  } else {
+    uy.i &= -1ULL >> 12;
+    uy.i |= 1ULL << 52;
+  }
+  for (; ex > ey; ex--) {
+    unsigned long long i = uxi - uy.i;
+    if (i >> 63 == 0) {
+      if (i == 0) return 0 * x;
+      uxi = i;
+    }
+    uxi <<= 1;
+  }
+  unsigned long long i = uxi - uy.i;
+  if (i >> 63 == 0) {
+    if (i == 0) return 0 * x;
+    uxi = i;
+  }
+  for (; uxi >> 52 == 0; uxi <<= 1, ex--) {}
+  if (ex > 0) {
+    uxi -= 1ULL << 52;
+    uxi |= (unsigned long long)ex << 52;
+  } else {
+    uxi >>= -ex + 1;
+  }
+  uxi |= sx << 63;
+  ux.i = uxi;
+  return ux.f;
+}
+
+float fmodf(float x, float y) {
+  union { float f; unsigned i; } ux = {x}, uy = {y};
+  int ex = (int)(ux.i >> 23 & 0xff);
+  int ey = (int)(uy.i >> 23 & 0xff);
+  unsigned sx = ux.i & 0x80000000u;
+  unsigned uxi = ux.i;
+  if (uy.i << 1 == 0 || y != y || ex == 0xff) return (x * y) / (x * y);
+  if (uxi << 1 <= uy.i << 1) {
+    if (uxi << 1 == uy.i << 1) return 0 * x;
+    return x;
+  }
+  if (!ex) {
+    for (unsigned i = uxi << 9; i >> 31 == 0; ex--, i <<= 1) {}
+    uxi <<= -ex + 1;
+  } else {
+    uxi &= -1U >> 9;
+    uxi |= 1U << 23;
+  }
+  if (!ey) {
+    for (unsigned i = uy.i << 9; i >> 31 == 0; ey--, i <<= 1) {}
+    uy.i <<= -ey + 1;
+  } else {
+    uy.i &= -1U >> 9;
+    uy.i |= 1U << 23;
+  }
+  for (; ex > ey; ex--) {
+    unsigned i = uxi - uy.i;
+    if (i >> 31 == 0) {
+      if (i == 0) return 0 * x;
+      uxi = i;
+    }
+    uxi <<= 1;
+  }
+  unsigned i = uxi - uy.i;
+  if (i >> 31 == 0) {
+    if (i == 0) return 0 * x;
+    uxi = i;
+  }
+  for (; uxi >> 23 == 0; uxi <<= 1, ex--) {}
+  if (ex > 0) {
+    uxi -= 1U << 23;
+    uxi |= (unsigned)ex << 23;
+  } else {
+    uxi >>= -ex + 1;
+  }
+  uxi |= sx;
+  ux.i = uxi;
+  return ux.f;
+}
+
 // ---- ヒープ ----
 // 2のべき乗のサイズ別に空きリストを持つ、単純なアロケータ。
 // 各ブロックは 16 バイトのヘッダ（サイズクラス）+ 本体。本体は 16 バイト境界に揃う。
@@ -545,6 +648,55 @@ void um_http_error(long long h, unsigned char **out, size_t *len, int line) {
 int um_http_wait(long long h, int timeout_ms, int line) { (void)h, (void)timeout_ms, (void)line; return 0; }
 void um_http_cancel(long long h, int line) { (void)h, (void)line; }
 void um_http_close(long long h, int line) { (void)h, (void)line; }
+
+#ifndef UM_PLUGIN
+// ---- ウィンドウ（ブラウザ。windowOpen など）----
+// ブラウザでは、ウィンドウは canvas、イベントは DOM のイベント、表示は canvas への描画（runtime/host.mjs の um_host_window_*）。
+// 関数の形はネイティブ（runtime/window.c）と同じ。表示と待つイベントは、ホストが JSPI で wasm を一時停止して、
+// ブラウザに描画と入力の処理をさせる（while (running) { ... } のループのまま動く）。
+#define WIMPORT(name) __attribute__((import_module("env"), import_name(#name)))
+WIMPORT(um_host_window_open) int um_host_window_open(const char *title, size_t len, int width, int height, int line);
+WIMPORT(um_host_window_close) void um_host_window_close(int id, int line);
+WIMPORT(um_host_window_poll) int um_host_window_poll(int *event, size_t len, int timeout_ms, int line);
+WIMPORT(um_host_window_present) void um_host_window_present(int id, const unsigned *pixels, size_t len, int width, int height, int x, int y, int rw, int rh, int show, int line);
+WIMPORT(um_host_window_ctl) long long um_host_window_ctl(int op, int id, long long *io, size_t len, int line);
+WIMPORT(um_host_window_ctl_f) double um_host_window_ctl_f(int op, int id, long long a, int line);
+WIMPORT(um_host_window_set_text) long long um_host_window_set_text(int op, int id, long long a, const char *text, size_t len, int line);
+WIMPORT(um_host_window_get_text) int um_host_window_get_text(int op, int id, long long a, int line);
+
+int um_window_open(const char *title, size_t len, int width, int height, int line) { return um_host_window_open(title, len, width, height, line); }
+void um_window_close(int id, int line) { um_host_window_close(id, line); }
+int um_window_poll(int *event, size_t len, int timeout_ms, int line) { return um_host_window_poll(event, len, timeout_ms, line); }
+void um_window_present(int id, const unsigned *pixels, size_t len, int width, int height, int line) {
+  um_host_window_present(id, pixels, len, width, height, 0, 0, width, height, 1, line);
+}
+void um_window_present_rect(int id, const unsigned *pixels, size_t len, int width, int height, int x, int y, int rw, int rh, int show, int line) {
+  um_host_window_present(id, pixels, len, width, height, x, y, rw, rh, show, line);
+}
+int um_window_set_icon(int id, const unsigned *pixels, size_t len, int width, int height, int line) {
+  (void)id, (void)pixels, (void)len, (void)width, (void)height, (void)line;
+  return 0;  // ブラウザのタブのアイコンは、ページ（favicon）が決める
+}
+long long um_window_ctl(int op, int id, long long *io, size_t len, int line) { return um_host_window_ctl(op, id, io, len, line); }
+double um_window_ctl_f(int op, int id, long long a, int line) { return um_host_window_ctl_f(op, id, a, line); }
+long long um_window_set_text(int op, int id, long long a, const char *text, size_t len, int line) {
+  return um_host_window_set_text(op, id, a, text, len, line);
+}
+void um_window_get_text(int op, int id, long long a, unsigned char **out, size_t *len, int line) {
+  take_pending(um_host_window_get_text(op, id, a, line), out, len);
+}
+// 音の出力（Web Audio。開く・問い合わせなどは windowCtl の 100 番台で、ホストの um_host_window_ctl が受ける）。
+WIMPORT(um_host_audio_write) int um_host_audio_write(int stream, const float *samples, size_t len, long long start, long long count, int line);
+int um_audio_write(int stream, const float *samples, size_t len, long long start, long long count, int line) {
+  return um_host_audio_write(stream, samples, len, start, count, line);
+}
+// GPU で描くウィンドウの OS の情報（ネイティブだけ。ブラウザの GPU は canvas を直接使うので呼ばれない）。
+int um_window_native(int id, void *out, int line) {
+  (void)id, (void)out, (void)line;
+  return 0;
+}
+#undef WIMPORT
+#endif
 
 #ifdef UM_PLUGIN
 // ---- プラグイン（--target wasm32-plugin）----

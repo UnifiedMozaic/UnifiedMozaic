@@ -1,0 +1,27 @@
+// 表示の面に描く標準の関数（docs/render.ja.md の「ウィンドウに描く」）。プログラムが gpu.beginFrame / gpu.endFrame を
+// 使うときだけ、ドライバが render.um と一緒に加える。
+//
+// 表示の面（GpuSurface）は、表示する側のライブラリが作る（いまは um:window の windowSurface）。
+// GPU が使えれば、フレームは面の GPU の表示の面に描き、gpu.endFrame で表示する。
+// 使えなければ、CPU の画像に描き、gpu.endFrame で面に写す（ウィンドウなら windowPresent）。
+
+// gpu.beginFrame(surface, clear)。大きさは面の画素の大きさ。
+function __std_gpuBeginFrame(surface: GpuSurface, clear: u32): GpuImage {
+  const window = surface.id;
+  const size = windowPixelSize(window);
+  let frame = new GpuImage(size.width, size.height, gpu.rawBeginFrame(window, size.width, size.height, clear), clear);
+  frame.window = window;
+  return frame;
+}
+
+// gpu.endFrame(mut frame)。描いたフレームを面に表示する。
+function __std_gpuEndFrame(frame: mut GpuImage): void {
+  if (frame.handle != 0) {
+    gpu.rawEndFrame(frame.handle);
+    frame.handle = 0;
+    return;
+  }
+  if (frame.width > 0 && frame.height > 0) {
+    windowPresent(frame.window, frame.color, frame.width, frame.height);
+  }
+}

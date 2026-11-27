@@ -23,7 +23,7 @@
 //   }
 
 // wasm の値。関数の引数と戻り値に使う。
-enum WasmValue {
+export enum WasmValue {
   I32(value: i32),
   I64(value: i64),
   F32(value: f32),
@@ -31,7 +31,7 @@ enum WasmValue {
 }
 
 // wasm の値の型（export の一覧に使う）。V128 と Ref の引数・戻り値を持つ関数は wasmCall で呼べない。
-enum WasmType {
+export enum WasmType {
   I32,
   I64,
   F32,
@@ -40,7 +40,7 @@ enum WasmType {
   Ref,
 }
 
-enum WasmExportKind {
+export enum WasmExportKind {
   Function,
   Memory,
   Global,
@@ -49,7 +49,7 @@ enum WasmExportKind {
 }
 
 // export 1つ。params と results は関数のときだけ中身がある。
-struct WasmExport {
+export struct WasmExport {
   name: string;
   kind: WasmExportKind;
   params: WasmType[];
@@ -57,7 +57,7 @@ struct WasmExport {
 }
 
 // インスタンスの上限。0 は上限なし。燃料と時間は、呼び出し1回（とインスタンスを作るときの start 関数）ごと。
-class WasmLimits {
+export class WasmLimits {
   fuel: i64 = 0;          // 燃料（だいたい wasm の命令の数）。尽きると、その呼び出しはトラップで失敗する
   timeoutMs: i64 = 0;     // 時間（ミリ秒）。過ぎると、その呼び出しはトラップで失敗する（精度は数ミリ秒）
   memoryBytes: i64 = 0;   // 線形メモリの大きさの上限（バイト）。超える memory.grow は失敗し、超える初期の大きさなら作れない
@@ -65,7 +65,7 @@ class WasmLimits {
 }
 
 // wasm のバイナリを読み込んで（コンパイルして）、モジュールの番号を返す。
-function wasmLoad(bytes: u8[]): Result<i64, string> {
+export function wasmLoad(bytes: u8[]): Result<i64, string> {
   const m = wasmCompile(bytes);
   if (m != null) {
     return Result.Ok(m);
@@ -74,7 +74,7 @@ function wasmLoad(bytes: u8[]): Result<i64, string> {
 }
 
 // ファイルから読み込む。
-function wasmLoadFile(path: string): Result<i64, string> {
+export function wasmLoadFile(path: string): Result<i64, string> {
   const bytes = readFile(path);
   if (bytes != null) {
     return wasmLoad(bytes);
@@ -83,7 +83,7 @@ function wasmLoadFile(path: string): Result<i64, string> {
 }
 
 // テキスト形式（.wat）を wasm のバイナリにする。
-function wasmFromWat(text: string): Result<u8[], string> {
+export function wasmFromWat(text: string): Result<u8[], string> {
   const bytes = wasmWat(text);
   if (bytes.length == 0) {  // wasm のバイナリは空にならない（空は失敗）
     return Result.Err(wasmError());
@@ -92,7 +92,7 @@ function wasmFromWat(text: string): Result<u8[], string> {
 }
 
 // インスタンスを作る。インスタンスごとに、別のメモリと別の状態を持つ。
-function wasmNew(module: i64, limits: WasmLimits): Result<i64, string> {
+export function wasmNew(module: i64, limits: WasmLimits): Result<i64, string> {
   const inst = wasmInstantiate(module, limits.fuel, limits.timeoutMs, limits.memoryBytes, limits.stubImports);
   if (inst != null) {
     return Result.Ok(inst);
@@ -102,7 +102,7 @@ function wasmNew(module: i64, limits: WasmLimits): Result<i64, string> {
 
 // export された関数を呼ぶ。引数の型は関数の宣言と同じでなければならない（i32 の引数に WasmValue.I64 は渡せない）。
 // トラップ・燃料切れ・時間切れは Result.Err になる（プログラムは止まらない）。
-function wasmCall(instance: i64, name: string, args: WasmValue[]): Result<WasmValue[], string> {
+export function wasmCall(instance: i64, name: string, args: WasmValue[]): Result<WasmValue[], string> {
   const n = args.length;
   const room = n < 16 ? 16 : n;
   let kinds = new Array<i32>(room);
@@ -164,7 +164,7 @@ function wasmTypeOf(c: u8): WasmType {
 }
 
 // モジュールの export の一覧（宣言の順）。
-function wasmExports(module: i64): WasmExport[] {
+export function wasmExports(module: i64): WasmExport[] {
   const raw = wasmExportList(module);
   let out = new Array<WasmExport>(0);
   for (const s of raw) {
@@ -221,7 +221,7 @@ function wasmReadLeb(bytes: u8[], pos: i64): WasmLeb {
 
 // wasm のバイナリから、名前が name のカスタムセクションの中身を取り出す（最初に見つかったもの）。
 // なければ、またはバイナリが壊れていれば null。コンパイルしないので速く、プラグインの宣言を読むのに向く。
-function wasmCustomSection(bytes: u8[], name: string): u8[] | null {
+export function wasmCustomSection(bytes: u8[], name: string): u8[] | null {
   const len = bytes.length as i64;
   // 先頭の 8 バイト: "\0asm" と版（1）。
   if (len < 8 || bytes[0] != 0 || bytes[1] != 97 || bytes[2] != 115 || bytes[3] != 109) {

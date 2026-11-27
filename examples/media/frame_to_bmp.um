@@ -8,6 +8,9 @@
 // expect: frame number from the colour: 50
 // expect: wrote frame.bmp (307254 bytes)
 
+import { MediaPixels, MediaRead, mediaOpenVideo, mediaFrame, mediaClose, mediaInfoOf } from "um:media";
+
+
 // 文字列の秒（"12.5" など）を f64 にする（ここでは簡単に、整数部と小数部だけ）。
 function parseSeconds(s: string): f64 {
   let v = 0.0;

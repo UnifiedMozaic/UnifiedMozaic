@@ -9,6 +9,8 @@
 // expect: 1 s
 // expect: done
 
+import * from "um:window";
+
 const RATE: i32 = 48000;
 const CHANNELS: i32 = 2;
 const CHUNK: i32 = 1024;  // 1 回に書くフレームの数

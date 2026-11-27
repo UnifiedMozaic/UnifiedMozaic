@@ -15,6 +15,9 @@
 // expect: 48000 Hz -0.1 s -> 0 s, starts at 0
 // expect: 48000 Hz 100 s: end
 
+import { MediaAudioRead, mediaOpenAudio, mediaSamples, mediaNextSamples, mediaClose } from "um:media";
+
+
 export function main(): i32 {
   if (check(44100, false) != 0) {
     return 1;

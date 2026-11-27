@@ -1,0 +1,5 @@
+// error: arg-count
+export function main(): i32 {
+  print(Math.atan2(1.0));
+  return 0;
+}

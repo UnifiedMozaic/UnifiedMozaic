@@ -1,0 +1,6 @@
+// ウィンドウの低い層の組み込みは、標準の window.um の中だけで使える。
+// error: unknown-name
+export function main(): i32 {
+  let io = new Buffer<i64>(4);
+  return windowCtl(2, 1, mut io) as i32;
+}

@@ -43,8 +43,16 @@
 //
 // UM_TEST_KNOWN_FAILURES=一覧のファイル を付けると、そこに理由つきで挙げた試験の失敗を「known」として表示し、
 // 失敗には数えない（CI の特定の環境でだけ起きる、UM のせいではない失敗のため。.github/ci/known-failures-*.txt）。
+//
+// 手元で一部だけ確かめるとき（時間の短縮）:
+//   UM_TEST_ONLY=正規表現   パス（examples/trig.um など）がこれに合うファイルの試験だけを行う
+//   UM_TEST_SKIP=正規表現   パスがこれに合うファイルの試験を行わない（UM_TEST_ONLY と一緒にも使える）
+//   UM_TEST_MEMCHECK=0      メモリ検査つきの実行（AddressSanitizer・valgrind・leaks）をすべて省く
+//   例: UM_TEST_ONLY='trig|float_bits|errors/math-' node tests/run.ts
+//       UM_TEST_SKIP='threads/handoff' node tests/run.ts
 
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -145,11 +153,20 @@ function stdinText(src: string): string {
   return stdinLines(src).map((l) => l + '\n').join('');
 }
 
+/** UM_TEST_ONLY / UM_TEST_SKIP（パスの正規表現）で、試験するファイルを選ぶ。パスの区切りは / で比べる。 */
+const onlyRe = process.env.UM_TEST_ONLY ? new RegExp(process.env.UM_TEST_ONLY) : null;
+const skipRe = process.env.UM_TEST_SKIP ? new RegExp(process.env.UM_TEST_SKIP) : null;
+function selected(f: string): boolean {
+  const p = f.replace(/\\/g, '/');
+  return (!onlyRe || onlyRe.test(p)) && !(skipRe && skipRe.test(p));
+}
+
 function files(dir: string): string[] {
   return readdirSync(join(root, dir))
     .filter((f) => f.endsWith('.um'))
     .sort()
-    .map((f) => join(dir, f));
+    .map((f) => join(dir, f))
+    .filter(selected);
 }
 
 async function runWasm(src: string, tag: string): Promise<{ out: string[]; panic?: string }> {
@@ -344,8 +361,9 @@ try {
   console.log('      macOS では `brew install llvm lld` で入れてください（入っていれば wasm32 には自動でそれを使います）。');
 }
 
-const memCheck = detectMemCheck();
-if (!memCheck) console.log('note: AddressSanitizer も valgrind も leaks も使えないため、メモリ検査つきの実行は省略します');
+const memCheck = process.env.UM_TEST_MEMCHECK === '0' ? null : detectMemCheck();
+if (process.env.UM_TEST_MEMCHECK === '0') console.log('note: UM_TEST_MEMCHECK=0 のため、メモリ検査つきの実行は省略します');
+else if (!memCheck) console.log('note: AddressSanitizer も valgrind も leaks も使えないため、メモリ検査つきの実行は省略します');
 else if (memCheck === 'asan' && windows) console.log('note: Windows の AddressSanitizer は解放漏れを調べられないため、メモリ検査では解放漏れを確かめません');
 
 for (const f of files('examples')) {
@@ -461,7 +479,7 @@ for (const f of files('tests/gpu')) {
 
     // 2. tests/msl/kernels.um: ネイティブ（CPU）の出力と、MSL を C++ として実行した出力が一致すること
     const f = 'tests/msl/kernels.um';
-    try {
+    if (selected(f)) try {
       const src = readFileSync(join(root, f), 'utf8');
       const cpu = runNative(src, 'msl_kernels');
       if (cpu.panic) throw new Error(cpu.panic);
@@ -500,7 +518,7 @@ for (const f of files('tests/gpu')) {
   const path = join(root, f);
   const src = readFileSync(path, 'utf8');
   const want = directives(src, 'expect');
-  for (const target of ['wasm32', 'host'] as const) {
+  for (const target of selected(f) ? ['wasm32', 'host'] as const : []) {
     try {
       const exe = join(tmp, `modules_basic.${target === 'wasm32' ? 'wasm' : 'bin'}`);
       build(compileToLL(src, target, false, path), target, exe);
@@ -521,6 +539,7 @@ for (const f of files('tests/gpu')) {
   }
   for (const name of readdirSync(join(root, 'tests/modules/errors')).sort()) {
     const ef = `tests/modules/errors/${name}/main.um`;
+    if (!selected(ef)) continue;
     const epath = join(root, ef);
     const esrc = readFileSync(epath, 'utf8');
     const ewant = directives(esrc, 'error');
@@ -822,7 +841,7 @@ if (windows) {
 // フォルダに置いて実行する（子は同じ実行ファイル。窓は出さない）。続けて、切り離した子（processStart）が、親が終わったあとも
 // 残って印のファイルを書くことと、親の標準出力のパイプを持ち続けない（spawnSync が子を待たずに戻る）ことを確かめる。
 // wasm32 では口がなければ失敗の値を返し、口があればそれを呼ぶことを確かめる。
-{
+if (selected('tests/process/process.um')) {
   const file = 'tests/process/process.um';
   const src = readFileSync(join(root, file), 'utf8');
   const want = directives(src, 'expect');
@@ -1014,6 +1033,7 @@ if (windows) {
   if (hasWasm) {
     const wname = 'HTTP requests fail with a reason [wasm32]';
     const src = [
+      'import { httpStart, httpState, httpStatus, httpWait, httpError, httpReadLine, httpRead, httpHeaders, httpCancel, httpClose } from "um:http";',
       'export function main(): i32 {',
       '  const id = httpStart("GET", "http://127.0.0.1:1/", "", "", 0);',
       '  print(`${httpState(id)} ${httpStatus(id)} ${httpWait(id, 0)}`);',
@@ -1081,6 +1101,24 @@ if (windows) {
     else fail(name, problems.join('\n'));
   } catch (e) {
     fail(name, String(e));
+  }
+}
+
+// 画像の読み込み（lib/png.um）。ネイティブと wasm32 で同じ結果になることを確かめる。
+for (const f of files('tests/image')) {
+  const src = readFileSync(join(root, f), 'utf8');
+  const want = directives(src, 'expect');
+  const tag = f.replace(/[^a-z0-9]/gi, '_');
+  for (const target of ['host', 'wasm32'] as const) {
+    const name = `${f} [${target}]`;
+    try {
+      const r = target === 'host' ? runNative(src, tag) : await runWasm(src, tag);
+      if (r.panic) fail(name, r.panic);
+      else if (same(r.out, want)) ok(name);
+      else fail(name, `expected: ${want.join(' ')}\nactual:   ${r.out.join(' ')}`);
+    } catch (e) {
+      fail(name, String(e));
+    }
   }
 }
 
@@ -1272,16 +1310,26 @@ for (const f of files('tests/wgpu')) {
           if (!text) throw new Error(`no WGSL for kernel '${name}'`);
           writeFileSync(join(tmp, `${name}.wgsl`), text);
         }
-        const exe = join(tmp, `${tag}_wgpu.bin`);
-        build(compileToLL(src, 'host', false, join(root, f)), 'host', exe);
+        // `// fast-math` があれば、描画のシェーダを GPU のふつうの計算にしたビルド（UM_SHADER_FAST_MATH=1）でも照合する。
+        const variants: [string, boolean][] = [['', false]];
+        if (/^\/\/ fast-math\s*$/m.test(src)) variants.push([', fast math', true]);
+        for (const [variant, fast] of variants) {
+        const exe = join(tmp, `${tag}_wgpu${fast ? '_fast' : ''}.bin`);
+        if (fast) process.env.UM_SHADER_FAST_MATH = '1';
+        try {
+          build(compileToLL(src, 'host', false, join(root, f)), 'host', exe);
+        } finally {
+          delete process.env.UM_SHADER_FAST_MATH;
+        }
         for (const be of backends.length > 0 ? backends : ['']) {
-          const label = be ? `${f} [wgpu ${be}]` : `${f} [wgpu]`;
+          const label = be ? `${f} [wgpu ${be}${variant}]` : `${f} [wgpu${variant}]`;
           const env = { ...process.env, ...(be ? { UM_WGPU_BACKEND: be } : {}) };
           const r = spawnSync(exe, [], { encoding: 'utf8', input: stdinText(src), cwd: tmp, env, timeout: 300000 });
           const out = r.stdout.split('\n').filter((l) => l !== '');
           if (r.status !== 0) fail(label, `exit ${r.status}: ${r.stderr.trim().slice(0, 1500)}`);
           else if (same(out, want)) ok(label);
           else fail(label, `expected: ${want.join(' ')}\nactual:   ${out.join(' ')}`);
+        }
         }
       } catch (e) {
         fail(`${f} [wgpu]`, String(e));
@@ -1447,6 +1495,64 @@ if (!ffmpegAvailable()) {
     } catch (e) {
       fail(`${f} [host]`, String(e));
     }
+  }
+}
+
+// ブラウザ（docs/web.ja.md）。Playwright（とその Chromium）があれば、`build --web` の形でブラウザで開き、
+// 画面の下の出力を `// expect:` と照合する。`// web-query: ?…` は URL の後ろに付ける（?gpu=0 で WebGPU を使わない、?args=…）。
+// tests/web/*.um と、描画のテスト（tests/wgpu/draw*.um）を WebGPU あり（SwiftShader）となしで開く。
+{
+  let pw: { chromium: { launch(o: unknown): Promise<any> } } | null = null;
+  try {
+    pw = createRequire(import.meta.url)('playwright');
+  } catch {
+    console.log('note: Playwright が見つからないため、ブラウザのテスト（tests/web）は省略します');
+  }
+  if (pw) {
+    const { createServer } = await import('node:http');
+    const types: Record<string, string> = { '.html': 'text/html', '.mjs': 'text/javascript', '.wasm': 'application/wasm' };
+    const webRoot = join(tmp, 'web');
+    mkdirSync(webRoot);
+    const server = createServer((req, res) => {
+      const path = join(webRoot, decodeURIComponent((req.url ?? '/').split('?')[0]));
+      if (!path.startsWith(webRoot) || !existsSync(path)) {
+        res.writeHead(404).end();
+        return;
+      }
+      res.writeHead(200, { 'content-type': types[path.slice(path.lastIndexOf('.'))] ?? 'application/octet-stream' }).end(readFileSync(path));
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as { port: number }).port;
+    const browser = await pw.chromium.launch({ args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-vulkan=swiftshader', '--use-webgpu-adapter=swiftshader', '--autoplay-policy=no-user-gesture-required'] });
+    const cases: [string, string][] = [];
+    for (const f of files('tests/web')) cases.push([f, directives(readFileSync(join(root, f), 'utf8'), 'web-query')[0] ?? '']);
+    for (const f of files('tests/wgpu').filter((x) => /\/draw/.test(x))) cases.push([f, ''], [f, '?gpu=0']);
+    for (const [f, query] of cases) {
+      const label = `${f} [web${query.includes('gpu=0') ? ', no GPU' : ''}]`;
+      try {
+        const src = readFileSync(join(root, f), 'utf8');
+        const want = directives(src, 'expect');
+        const dir = join(webRoot, f.replace(/[^a-z0-9]/gi, '_'));
+        mkdirSync(dir, { recursive: true });
+        build(compileToLL(src, 'wasm32', false, join(root, f)), 'wasm32', join(dir, 'app.wasm'));
+        for (const name of ['host.mjs', 'web.mjs']) writeFileSync(join(dir, name), readFileSync(join(root, 'runtime', name)));
+        writeFileSync(join(dir, 'index.html'), readFileSync(join(root, 'runtime', 'web', 'index.html')));
+        const page = await browser.newPage();
+        await page.goto(`http://127.0.0.1:${port}/${dir.slice(webRoot.length + 1)}/index.html${query}`);
+        await page.waitForFunction(() => (globalThis as any).document.body.dataset.exit !== undefined, null, { timeout: 120000 });
+        const exit = await page.evaluate(() => (globalThis as any).document.body.dataset.exit);
+        const out = String(await page.evaluate(() => (globalThis as any).document.getElementById('out').textContent)).split('\n').filter((l) => l !== '');
+        const errText = String(await page.evaluate(() => (globalThis as any).document.getElementById('err').textContent)).trim();
+        await page.close();
+        if (exit !== '0') fail(label, `exit ${exit}: ${out.join(' | ')}\n${errText}`);
+        else if (same(out, want)) ok(label);
+        else fail(label, `expected: ${want.join(' | ')}\nactual:   ${out.join(' | ')}`);
+      } catch (e) {
+        fail(label, String(e));
+      }
+    }
+    await browser.close();
+    server.close();
   }
 }
 

@@ -1,0 +1,24 @@
+// マウスの相対モード（windowSetRelativeMouse）。tests/run.ts は SDL_VIDEO_DRIVER=offscreen で実行するので、
+// 入れる・切るが通ることと、切ったあとの状態が読めることまでを確かめる（offscreen は相対モードを持たないので、
+// 入れた結果は見ない。動きの量の届き方は実際の画面で）。
+// expect: opened
+// expect: set
+// expect: off false
+
+import * from "um:window";
+
+export function main(): i32 {
+  const opened = windowOpen("relative", 64, 64);
+  if (opened == null) {
+    print(`no window: ${windowError()}`);
+    return 1;
+  }
+  const w = opened;
+  print("opened");
+  windowSetRelativeMouse(w, true);
+  print("set");
+  windowSetRelativeMouse(w, false);
+  print(`off ${windowRelativeMouse(w)}`);
+  windowClose(w);
+  return 0;
+}

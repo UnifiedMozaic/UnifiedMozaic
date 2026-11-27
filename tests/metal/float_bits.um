@@ -1,0 +1,39 @@
+// Math.toBits / Math.fromBits を CPU と GPU で実行し、結果が一致することを確かめる。
+// 入力は NaN と非正規化数を避ける（GPU では NaN のビットの並びや非正規化数が揃うとは限らない。docs/wgpu.ja.md）。
+// 出力は不一致の個数（0）。
+// expect: 0
+// expect: 0
+
+kernel function bits(i: u32, out: mut Buffer<u32>, back: mut Buffer<f32>, src: Buffer<f32>): void {
+  out[i] = Math.toBits(src[i]) ^ 0x80000000;
+  back[i] = Math.fromBits(out[i] ^ 0x80000000);
+}
+
+export function main(): i32 {
+  const n: u32 = 100000;
+  let src = new Buffer<f32>(n);
+  let s: u32 = 99;
+  for (let i: u32 = 0; i < n; i++) {
+    s = s * 1664525 + 1013904223;
+    src[i] = (((s >> 8) as f32) / 16777216 - 0.5) * 1000;
+  }
+  let g = new Buffer<u32>(n);
+  let gb = new Buffer<f32>(n);
+  let c = new Buffer<u32>(n);
+  let cb = new Buffer<f32>(n);
+  gpu.dispatch(bits, n, mut g, mut gb, src);
+  cpu.dispatch(bits, n, mut c, mut cb, src);
+  let bad: u32 = 0;
+  let badBack: u32 = 0;
+  for (let i: u32 = 0; i < n; i++) {
+    if (g[i] != c[i]) {
+      bad += 1;
+    }
+    if (gb[i] != cb[i] || cb[i] != src[i]) {
+      badBack += 1;
+    }
+  }
+  print(bad);
+  print(badBack);
+  return 0;
+}

@@ -2,7 +2,7 @@ import { isCollectiveLet, tyStr } from './ast.ts';
 import type { Arg, Expr, FnDecl, Stmt, Sym, Ty } from './ast.ts';
 import { isCopyTy, isPlace, passByPtr, simdInfo } from './checker.ts';
 import type { FnSig, Program } from './checker.ts';
-import { emitWgsl, gpuLayout, has64, WGSL_SIMDGROUP } from './wgsl.ts';
+import { emitWgsl, emitWgslRender, gpuLayout, has64, WGSL_SIMDGROUP } from './wgsl.ts';
 import { CompileError } from './diag.ts';
 import type { Pos } from './diag.ts';
 import { emitMsl } from './msl.ts';
@@ -1123,6 +1123,10 @@ class ModuleGen {
 
   /** wgpu のランタイムを直接呼ぶ組み込み（gpu.loadKernel / gpu.runKernel / gpu.ready / gpu.wait）を使ったか。 */
   usesGpuRuntime = false;
+  /** 描画のシェーダ（vertex と fragment の組。キーは "vs|fs"）。runtime/wgpu.c は番号ごとにパイプラインを作る。 */
+  renderShaders = new Map<string, { id: number; global: string; bytes: number }>();
+  /** 描画のシェーダで GPU のふつうの計算を使うか（UM_SHADER_FAST_MATH=1。kernel の dispatch には関わらない）。 */
+  fastShaders = false;
 
   /** wgpu の経路で、GPU を使う呼び出し（GPU で実行しうる dispatch、gpu.loadKernel）があるか。なければ wgpu をリンクしない。 */
   wgpuUsed(): boolean {
@@ -1399,6 +1403,26 @@ class ModuleGen {
     return name;
   }
 
+  /** 描画のシェーダ（vertex function と fragment function の組）を WGSL にし、文字列定数として埋め込む。同じ組は1回だけ。 */
+  renderShader(vs: string, fs: string, kind: { indexed: boolean; instanced: boolean }): { id: number; global: string; bytes: number } {
+    const tag = `${kind.indexed ? 'X' : ''}${kind.instanced ? 'I' : ''}`;
+    const key = `${vs}|${fs}|${tag}`;
+    let k = this.renderShaders.get(key);
+    if (!k) {
+      const source = emitWgslRender(this.prog, this.prog.fns.get(vs)!.decl, this.prog.fns.get(fs)!.decl, kind, this.fastShaders).source;
+      const bytes = Buffer.from(source, 'utf8');
+      let text = '';
+      for (const b of bytes) {
+        text += b >= 0x20 && b < 0x7f && b !== 0x22 && b !== 0x5c ? String.fromCharCode(b) : `\\${b.toString(16).toUpperCase().padStart(2, '0')}`;
+      }
+      const global = `@um.render.${vs}.${fs}${tag ? `.${tag}` : ''}`;
+      this.globals.push(`${global} = private unnamed_addr constant [${bytes.length} x i8] c"${text}"`);
+      k = { id: this.renderShaders.size, global, bytes: bytes.length };
+      this.renderShaders.set(key, k);
+    }
+    return k;
+  }
+
   /**
    * kernel を WGSL / MSL に変換し、文字列定数として埋め込む。同じ kernel は1回だけ。
    * groups: dispatchGroups 用（グループの番号から添字を作る形）。同じ kernel でも普通の dispatch とは別のシェーダになる。
@@ -1673,6 +1697,9 @@ class ModuleGen {
       // GPU（WebGPU）での実行。実装は runtime/host.mjs。
       imports.push('i32 um_gpu_available()', 'i32 um_gpu_pick(i32, i32)', 'void um_gpu_dispatch(i32, ptr, i32, i32, ptr, i32, ptr, i32)');
       imports.push('void um_gpu_group(i32)');
+      // 描画（runtime/web.mjs の RenderRunner）。
+      imports.push('i32 um_gpu_image_begin(i32, i32, i32)', 'void um_gpu_draw(i32, i32, ptr, i32, i32, i32, ptr, i32, ptr, i32)', `void um_gpu_image_end(i32, ptr, ${this.usz})`);
+      imports.push('i32 um_gpu_frame_begin(i32, ptr, i32, i32, i32, i32)', 'void um_gpu_frame_end(i32)', 'void um_gpu_draw_state(i32, i32)');
     }
     if (this.gpu === 'wgpu') {
       // wgpu-native での実行。実装は runtime/wgpu.c。GPU を使う呼び出しがなければ宣言せず（ドライバは wgpu をリンクしない）、
@@ -1684,6 +1711,9 @@ class ModuleGen {
         out.push('declare i64 @um_gpu_submit(i32, ptr, i32, i32, ptr, i32, ptr, i32) #0', 'declare i32 @um_gpu_ready(i64) #0', 'declare void @um_gpu_wait(i64) #0');
         out.push(`declare i32 @um_gpu_load(ptr, ${this.usz}) #0`, 'declare i32 @um_gpu_run(i32, i32, ptr, i32, ptr, i32) #0');
         out.push('declare i32 @um_gpu_set_flags(i32) #0', 'declare i32 @um_gpu_pick_bufs(i32, i32, ptr, i32) #0');
+        out.push('declare i32 @um_gpu_image_begin(i32, i32, i32) #0', 'declare void @um_gpu_draw(i32, i32, ptr, i32, i32, i32, ptr, i32, ptr, i32) #0');
+        out.push(`declare void @um_gpu_image_end(i32, ptr, ${this.usz}) #0`);
+        out.push('declare i32 @um_gpu_frame_begin(i32, ptr, i32, i32, i32, i32) #0', 'declare void @um_gpu_frame_end(i32) #0', 'declare void @um_gpu_draw_state(i32, i32) #0');
       } else {
         out.push(`define internal ptr @um_wgpu_alloc(${this.usz} %n, ${this.usz} %s) #0 {`, `  %p = call ptr @um_alloc_zeroed(${this.usz} %n, ${this.usz} %s)`, '  ret ptr %p', '}');
       }
@@ -1738,6 +1768,7 @@ class ModuleGen {
       out.push(`declare i32 @um_window_poll(ptr, ${this.usz}, i32, i32) #0`, `declare void @um_window_present(i32, ptr, ${this.usz}, i32, i32, i32) #0`);
       out.push(`declare void @um_window_present_rect(i32, ptr, ${this.usz}, i32, i32, i32, i32, i32, i32, i32, i32) #0`);
       out.push(`declare i32 @um_window_set_icon(i32, ptr, ${this.usz}, i32, i32, i32) #0`);
+      out.push('declare i32 @um_window_native(i32, ptr, i32) #0');
       out.push(`declare i64 @um_window_ctl(i32, i32, ptr, ${this.usz}, i32) #0`, 'declare double @um_window_ctl_f(i32, i32, i64, i32) #0');
       out.push(`declare i64 @um_window_set_text(i32, i32, i64, ptr, ${this.usz}, i32) #0`, 'declare void @um_window_get_text(i32, i32, i64, ptr, ptr, i32) #0');
       out.push(`declare i32 @um_audio_write(i32, ptr, ${this.usz}, i64, i64, i32) #0`);
@@ -4271,6 +4302,8 @@ class FnGen {
       return b;
     }
     if (e.callee === '__gpu_load' || e.callee === '__gpu_run') return this.gpuLoadCall(e);
+    if (e.callee === '__gpu_image_begin' || e.callee === '__gpu_draw' || e.callee === '__gpu_image_end'
+      || e.callee === '__gpu_frame_begin' || e.callee === '__gpu_frame_end' || e.callee === '__gpu_draw_state') return this.renderCall(e);
     if (e.callee === '__gpu_commit') {
       if (this.m.gpu === 'metal') this.emit('call void @um_gpu_commit()');
       return '';
@@ -4746,6 +4779,83 @@ class FnGen {
   }
 
   /**
+   * 描画（src/render.ts）: gpu.beginImage / gpu.draw / gpu.endImage。いまは wgpu の経路（UM_WGPU=1）だけ。
+   * draw の値の引数と Buffer は、vertex の引数（頂点の番号を除く）、fragment の引数（受け取る値を除く）の順に
+   * dispatch と同じ形（gpuArgs）にして渡す。WGSL の束縛の並び（wgsl.ts の render）と同じ。
+   */
+  renderCall(e: Expr & { kind: 'call' }): string {
+    if (this.m.gpu !== 'wgpu' && this.m.gpu !== 'webgpu') {
+      // GPU の描画の経路がないビルド。画像とフレームはいつも CPU に用意する（番号 0）ので、draw と end は呼ばれない。
+      if (e.callee === '__gpu_image_begin' || e.callee === '__gpu_frame_begin') {
+        for (const a of e.args) this.expr(a.expr);
+        return '0';
+      }
+      return '';
+    }
+    if (this.m.gpu === 'wgpu') this.m.usesGpuRuntime = true;
+    if (e.callee === '__gpu_image_begin') {
+      const [w, h, c] = e.args.map((a) => this.expr(a.expr));
+      const r = this.tmp();
+      this.emit(`${r} = call i32 @um_gpu_image_begin(i32 ${w}, i32 ${h}, i32 ${c})`);
+      return r;
+    }
+    if (e.callee === '__gpu_frame_begin') {
+      // ウィンドウの OS の情報を取る関数（runtime/window.c の um_window_native）の場所を渡す。GPU が使えるときだけ呼ばれる。
+      // ブラウザ（webgpu）では canvas を直接使うので渡さない。
+      const native = this.m.gpu === 'wgpu' ? '@um_window_native' : 'null';
+      if (this.m.gpu === 'wgpu') this.m.usesWindow = true;
+      const [win, w, h, c] = e.args.map((a) => this.expr(a.expr));
+      const r = this.tmp();
+      this.emit(`${r} = call i32 @um_gpu_frame_begin(i32 ${win}, ptr ${native}, i32 ${w}, i32 ${h}, i32 ${c}, i32 ${e.pos.line})`);
+      return r;
+    }
+    if (e.callee === '__gpu_draw_state') {
+      const [img, st] = e.args.map((a) => this.expr(a.expr));
+      this.emit(`call void @um_gpu_draw_state(i32 ${img}, i32 ${st})`);
+      return '';
+    }
+    if (e.callee === '__gpu_frame_end') {
+      const f = this.expr(e.args[0].expr);
+      this.emit(`call void @um_gpu_frame_end(i32 ${f})`);
+      return '';
+    }
+    if (e.callee === '__gpu_image_end') {
+      const img = this.expr(e.args[0].expr);
+      const [data, len] = this.heapParts(e.args[1].expr)();
+      this.emit(`call void @um_gpu_image_end(i32 ${img}, ptr ${data}, ${this.m.usz} ${len})`);
+      return '';
+    }
+    // 引数: [画像, 頂点の数か番号の Buffer, インスタンスの数, vs の引数..., fs の引数...]
+    const node = e as unknown as { vs: string; fs: string; vsArgc: number; indexed: boolean; instanced: boolean };
+    const kind = { indexed: node.indexed, instanced: node.instanced };
+    const vs = this.m.prog.fns.get(node.vs)!;
+    const fs = this.m.prog.fns.get(node.fs)!;
+    const shader = this.m.renderShader(node.vs, node.fs, kind);
+    const img = this.expr(e.args[0].expr);
+    let count = '';
+    if (!kind.indexed) count = this.expr(e.args[1].expr);
+    const indices: FnSig['params'] = kind.indexed ? [{ name: 'um_indices', mode: 'none', ty: e.args[1].expr.ty! }] : [];
+    const params: FnSig['params'] = [...indices, ...vs.params.slice(kind.instanced ? 2 : 1), ...fs.params.slice(1)];
+    const all = kind.indexed ? [e.args[1], ...e.args.slice(3)] : e.args.slice(3);
+    const thunks = this.prepArgs({ key: '', name: '', params, ret: { k: 'void' }, exported: false, decl: this.d }, all);
+    const instances = this.expr(e.args[2].expr);
+    const args = thunks.map((a) => a());
+    if (kind.indexed) {
+      // 描く頂点の数は番号の数。
+      const [, len] = this.heapParts(e.args[1].expr)();
+      if (this.m.usz === 'i32') {
+        count = len;
+      } else {
+        count = this.tmp();
+        this.emit(`${count} = trunc ${this.m.usz} ${len} to i32`);
+      }
+    }
+    const [block, bytes, table, nbufs] = this.gpuArgs(params, args);
+    this.emit(`call void @um_gpu_draw(i32 ${img}, i32 ${shader.id}, ptr ${shader.global}, i32 ${shader.bytes}, i32 ${count}, i32 ${instances}, ptr ${block}, i32 ${bytes}, ptr ${table}, i32 ${nbufs})`);
+    return '';
+  }
+
+  /**
    * GPU での実行をランタイムに頼む。値の引数は GPU 側の struct と同じ並び（gpuLayout）の塊にし、
    * Buffer は（データの場所、要素数、要素の大きさ、書き込みの有無）の表にして渡す。
    */
@@ -4863,6 +4973,13 @@ class FnGen {
       return this.cast(w, F32T, ty);
     }
     const t = llTy(ty);
+    if (e.fn === 'toBits' || e.fn === 'fromBits') {
+      // 同じビットを別の型として読む（f32 ⇄ 32 ビットの整数、f64 ⇄ 64 ビットの整数）。
+      const x = this.expr(e.args[0]);
+      const v = this.tmp();
+      this.emit(`${v} = bitcast ${llTy(e.args[0].ty!)} ${x} to ${t}`);
+      return v;
+    }
     if ((e.fn === 'shl' || e.fn === 'shr') && ty.k === 'int') {
       // マスクつきシフト: シフト量を値のビット幅で割った余りにする（範囲検査なし）。kernel の `<<` / `>>` と同じ意味。
       const val = this.expr(e.args[0]);
@@ -5382,7 +5499,7 @@ class FnGen {
     this.check(bad, PANIC_THREAD_IO, line);
   }
 
-  /** RacyBuffer のアトミック演算（load / store / fetchAdd / compareExchange、順序は seq_cst）。 */
+  /** RacyBuffer のアトミック演算（load / store / fetchAdd / fetchMin / fetchMax / compareExchange、順序は seq_cst）。 */
   racyAtomic(e: Expr & { kind: 'mcall' }): string {
     const elem = (e.recv.ty as Ty & { k: 'heap' }).elem;
     const t = llTy(elem);
@@ -5402,6 +5519,14 @@ class FnGen {
       case 'fetchAdd':
         this.emit(`${v} = atomicrmw add ptr ${p}, ${t} ${vals[0]} seq_cst, align ${al}`);
         return v;
+      case 'fetchMin':
+      case 'fetchMax': {
+        // 小さい方 / 大きい方を書き、前の値を返す。符号つきかどうかで比べ方が変わる。
+        const signed = (elem as Ty & { k: 'int' }).signed;
+        const op = `${signed ? '' : 'u'}${e.name === 'fetchMin' ? 'min' : 'max'}`;
+        this.emit(`${v} = atomicrmw ${op} ptr ${p}, ${t} ${vals[0]} seq_cst, align ${al}`);
+        return v;
+      }
       case 'compareExchange': {
         const r = this.tmp();
         this.emit(`${r} = cmpxchg ptr ${p}, ${t} ${vals[0]}, ${t} ${vals[1]} seq_cst seq_cst, align ${al}`);
@@ -5425,6 +5550,8 @@ class FnGen {
 }
 
 export function generate(prog: Program, target: TargetKind, sanitize: boolean | 'thread' = false, metal = false, appleArm = false, windows = false, plugin = false,
-  wgpu = false): string {
-  return new ModuleGen(prog, target, sanitize, metal, appleArm, windows, plugin, wgpu).generate();
+  wgpu = false, fastShaders = false): string {
+  const m = new ModuleGen(prog, target, sanitize, metal, appleArm, windows, plugin, wgpu);
+  m.fastShaders = fastShaders;
+  return m.generate();
 }

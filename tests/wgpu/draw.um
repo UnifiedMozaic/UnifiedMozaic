@@ -1,0 +1,92 @@
+// 描画（gpu.beginImage / gpu.draw / gpu.endImage）を GPU で実行し、塗られた画素を文字の絵で確かめる。
+// cpu-build で、GPU の経路のないビルド（CPU のラスタライザ）でも同じ絵になることを確かめる。
+//   - 頂点は kernel が作る（dispatch の結果を draw がそのまま読む）
+//   - 深度テスト: 先に描いた近い三角形（G）が、あとから描いた遠い三角形（R、B）に隠されない（左上と下の重なり）
+//   - vertex と fragment に値の引数（ずらす量と色）を渡す
+// 色は三角形ごとに一つ（補間しない）なので、GPU による違いが出ない。三角形の辺は画素の中心を通らない位置に置く。
+// cpu-build
+// fast-math
+// expect: ........................
+// expect: ....RRRRRRRRRRRRRRRRRR..
+// expect: ....RRRRRRRRRRRRRRRR....
+// expect: ....RRRRRRRRRRRRRR......
+// expect: ....RRRRGGGGGGGGG.......
+// expect: ....RRRRGGGGGGG.........
+// expect: ....RRRRGGGGG...........
+// expect: ....RRRRGGGB............
+// expect: ....RRRRGB..............
+// expect: ....RR..................
+// expect: ........................
+// expect: ........................
+// expect: 4278255360
+
+struct VOut {
+  position: vec4<f32>;
+  depth: f32;
+}
+
+// 三角形 t（0〜2）の頂点 k（0〜2）。直角を左下に置いた三角形を、t ごとに大きさと位置を変える。
+kernel function makeVerts(i: u32, out: mut Buffer<vec4<f32>>, size: Buffer<f32>, depth: Buffer<f32>): void {
+  const t = i / 3;
+  const k = i % 3;
+  const s = size[t];
+  let x: f32 = -0.66;
+  let y: f32 = 0.83;
+  if (t == 1) {
+    x = -0.33;
+    y = 0.37;
+  } else if (t == 2) {
+    x = -0.33;
+    y = -0.1;
+  }
+  if (k == 1) {
+    x += s;
+  } else if (k == 2) {
+    y -= s;
+  }
+  out[i] = vec4(x, y, depth[t], 1);
+}
+
+vertex function vs(i: u32, verts: Buffer<vec4<f32>>, first: u32, shift: f32): VOut {
+  const p = verts[first + i];
+  return { position: vec4(p.x + shift, p.y, p.z, p.w), depth: p.z };
+}
+
+fragment function fs(v: VOut, color: vec4<f32>): vec4<f32> {
+  return color;
+}
+
+export function main(): i32 {
+  const w: u32 = 24;
+  const h: u32 = 12;
+  let size = new Buffer<f32>(3);
+  size[0] = 1.6;
+  size[1] = 0.9;
+  size[2] = 0.45;
+  let depth = new Buffer<f32>(3);
+  depth[0] = 0.5;  // R
+  depth[1] = 0.3;  // G（いちばん近い）
+  depth[2] = 0.7;  // B（いちばん遠い。G と重なる所は G に隠れ、重ならない所は見える）
+  let verts = new Buffer<vec4<f32>>(9);
+  dispatch(makeVerts, 9, mut verts, size, depth);
+
+  const red: vec4<f32> = vec4(1, 0, 0, 1);
+  const green: vec4<f32> = vec4(0, 1, 0, 1);
+  const blue: vec4<f32> = vec4(0, 0, 1, 1);
+  let img = gpu.beginImage(w as i32, h as i32, 0xFF000000);
+  gpu.draw(mut img, 3, vs(verts, 3, 0.0 as f32), fs(green));
+  gpu.draw(mut img, 3, vs(verts, 0, 0.0 as f32), fs(red));
+  gpu.draw(mut img, 3, vs(verts, 6, 0.0 as f32), fs(blue));
+  let px = new Buffer<u32>((w * h) as usize);
+  gpu.endImage(mut img, mut px);
+  for (let y: u32 = 0; y < h; y++) {
+    let row = new Array<u8>(w as usize);
+    for (let x: u32 = 0; x < w; x++) {
+      const c = px[y * w + x];
+      row[x] = c == 0xFFFF0000 ? 82 : c == 0xFF00FF00 ? 71 : c == 0xFF0000FF ? 66 : c == 0xFF000000 ? 46 : 63;
+    }
+    print(stringFromBytes(row));
+  }
+  print(px[5 * w + 10]);
+  return 0;
+}

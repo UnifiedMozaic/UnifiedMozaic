@@ -1,0 +1,11 @@
+// error: type-mismatch
+struct VOut {
+  position: vec4<f32>;
+}
+vertex function vs(i: u32): VOut {
+  return { position: vec4(0.0 as f32, 0, 0, 1) };
+}
+export function main(): i32 {
+  dispatch(vs, 3);
+  return 0;
+}

@@ -1,0 +1,151 @@
+// ソフトウェアのラスタライザ: 回した立方体を、kernel で画素ごとに塗る（GPU でも動く）。
+// CPU は三角関数と行列（mat4Perspective・mat4LookAt・mat4RotateY など）で頂点を画面の座標にし、
+// kernel は画素ごとにすべての三角形を調べて、いちばん近い（深度の小さい）ものの明るさを書く。
+// ここでは結果を文字の絵にして出す（ウィンドウに出す版は examples/window/cube.um）。
+// expect: ................................................
+// expect: ................................................
+// expect: ................................................
+// expect: ................................................
+// expect: ..............===@@.............................
+// expect: .............=========@@@@@.....................
+// expect: .............============***@@@@@...............
+// expect: .............============*************@.........
+// expect: ............============***************.........
+// expect: ............===========***************..........
+// expect: ............===========**************...........
+// expect: ...........===========**************............
+// expect: ............==========*************.............
+// expect: .............========*************..............
+// expect: ...............======*************..............
+// expect: ................====************................
+// expect: .................===******......................
+// expect: ...................*............................
+// expect: ................................................
+// expect: ................................................
+
+import { mat4RotateX, mat4RotateY, mat4Perspective, mat4LookAt } from "um:transform";
+
+const WIDTH: u32 = 48;
+const HEIGHT: u32 = 20;
+
+// 画面の座標の三角形。x, y は画素、z は深度（0〜1。小さいほど近い）。shade は塗る値（ここでは文字）。
+struct Tri {
+  x0: f32;
+  y0: f32;
+  z0: f32;
+  x1: f32;
+  y1: f32;
+  z1: f32;
+  x2: f32;
+  y2: f32;
+  z2: f32;
+  shade: u32;
+}
+
+// 辺 (ax, ay)→(bx, by) から見て、点 (px, py) がどちら側か（2倍の符号つき面積）。
+kernel function edge(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32): f32 {
+  return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
+}
+
+// 1画素ぶん: 画素の中心を含む三角形のうち、いちばん近いものの shade を書く。
+kernel function raster(i: u32, out: mut Buffer<u32>, tris: Buffer<Tri>, count: u32, width: u32, background: u32): void {
+  const px = (i % width) as f32 + 0.5;
+  const py = (i / width) as f32 + 0.5;
+  let best: f32 = 2;
+  let color = background;
+  for (let t: u32 = 0; t < count; t++) {
+    const tri = tris[t];
+    let area = edge(tri.x0, tri.y0, tri.x1, tri.y1, tri.x2, tri.y2);
+    let w0 = edge(tri.x1, tri.y1, tri.x2, tri.y2, px, py);
+    let w1 = edge(tri.x2, tri.y2, tri.x0, tri.y0, px, py);
+    let w2 = edge(tri.x0, tri.y0, tri.x1, tri.y1, px, py);
+    if (area == 0) {
+      continue;
+    }
+    // 頂点の並びの向き（時計回りか）によらず、内側を正にする。
+    if (area < 0) {
+      area = -area;
+      w0 = -w0;
+      w1 = -w1;
+      w2 = -w2;
+    }
+    if (w0 >= 0 && w1 >= 0 && w2 >= 0) {
+      // 深度は、三角形の中での位置（重心座標）で頂点の深度を混ぜたもの。
+      const z = (w0 * tri.z0 + w1 * tri.z1 + w2 * tri.z2) / area;
+      if (z >= 0 && z < best) {
+        best = z;
+        color = tri.shade;
+      }
+    }
+  }
+  out[i] = color;
+}
+
+// 立方体の 6 面（12 個の三角形）を、角度 angle で回して画面の座標にする。
+// 面の明るさ（0〜1）は、回した法線と光の向きの内積で決め、ramp の何番目の値で塗るかにする。
+function cube(tris: mut Buffer<Tri>, angle: f32, width: f32, height: f32, aspect: f32, ramp: u32[]): void {
+  const model = mat4Mul(mat4RotateY(angle), mat4RotateX(angle * 0.6));
+  const view = mat4LookAt(vec3(0.0 as f32, 0, 4), vec3(0.0 as f32, 0, 0), vec3(0.0 as f32, 1, 0));
+  const proj = mat4Perspective(Math.PI / 3, aspect, 0.5, 20);
+  const m = mat4Mul(proj, mat4Mul(view, model));
+  const light = vec3Normalize(vec3(0.4 as f32, 0.8, 1));
+  const us: f32[4] = [-1, 1, 1, -1];
+  const vs: f32[4] = [-1, -1, 1, 1];
+  let n: u32 = 0;
+  for (let axis: u32 = 0; axis < 3; axis++) {
+    for (let side: u32 = 0; side < 2; side++) {
+      const s: f32 = side == 0 ? -1 : 1;
+      // 面の 4 つの角を、ぐるりと回る順に画面の座標にする。
+      let xs: f32[4];
+      let ys: f32[4];
+      let zs: f32[4];
+      for (let k: u32 = 0; k < 4; k++) {
+        let p: vec4<f32> = vec4(s, us[k], vs[k], 1);
+        if (axis == 1) {
+          p = vec4(us[k], s, vs[k], 1);
+        } else if (axis == 2) {
+          p = vec4(us[k], vs[k], s, 1);
+        }
+        const c = mat4MulVec(m, p);
+        xs[k] = (c.x / c.w * 0.5 + 0.5) * width;
+        ys[k] = (0.5 - c.y / c.w * 0.5) * height;
+        zs[k] = c.z / c.w;
+      }
+      // 法線を回して、光の向きとの内積で明るさを決める。
+      let nrm: vec4<f32> = vec4(s, 0, 0, 0);
+      if (axis == 1) {
+        nrm = vec4(0, s, 0, 0);
+      } else if (axis == 2) {
+        nrm = vec4(0, 0, s, 0);
+      }
+      const r = mat4MulVec(model, nrm);
+      const lit = Math.max(vec3Dot(vec3(r.x, r.y, r.z), light), 0) * 0.85 + 0.15;
+      let level = (lit * (ramp.length as f32)) as u32;
+      if (level >= ramp.length as u32) {
+        level = ramp.length as u32 - 1;
+      }
+      const shade = ramp[level];
+      tris[n] = { x0: xs[0], y0: ys[0], z0: zs[0], x1: xs[1], y1: ys[1], z1: zs[1], x2: xs[2], y2: ys[2], z2: zs[2], shade: shade };
+      tris[n + 1] = { x0: xs[0], y0: ys[0], z0: zs[0], x1: xs[2], y1: ys[2], z1: zs[2], x2: xs[3], y2: ys[3], z2: zs[3], shade: shade };
+      n += 2;
+    }
+  }
+}
+
+export function main(): i32 {
+  // 暗い順の文字。背景は '.'。
+  const ramp: u32[] = [58, 45, 61, 43, 42, 35, 37, 64]; // : - = + * # % @
+  let tris = new Buffer<Tri>(12);
+  // 文字は縦長なので、横を半分に見て縦横比を合わせる。
+  cube(mut tris, 0.7, WIDTH as f32, HEIGHT as f32, (WIDTH as f32) / (HEIGHT as f32) * 0.5, ramp);
+  let out = new Buffer<u32>((WIDTH * HEIGHT) as usize);
+  dispatch(raster, WIDTH * HEIGHT, mut out, tris, 12, WIDTH, 46);
+  for (let y: u32 = 0; y < HEIGHT; y++) {
+    let row = new Array<u8>(WIDTH as usize);
+    for (let x: u32 = 0; x < WIDTH; x++) {
+      row[x] = out[y * WIDTH + x] as u8;
+    }
+    print(stringFromBytes(row));
+  }
+  return 0;
+}

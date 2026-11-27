@@ -3,6 +3,9 @@
 // expect: bands agree: true
 // expect: instances are separate: true
 
+import { WasmValue, WasmLimits, wasmLoad, wasmFromWat, wasmNew, wasmCall, wasmFreeModule, wasmFreeInstance, wasmRead, wasmWrite } from "um:wasm";
+
+
 // invert(p, n): p から n バイトの RGBA の、RGB を反転する。
 // mark(v): メモリの 0 バイト目に v を書く。peek(): 0 バイト目を読む。
 const WAT: string =

@@ -13,6 +13,8 @@
 // expect: gain true
 // expect: closed
 
+import * from "um:window";
+
 function check(cond: bool, label: string): void {
   if (cond) {
     print(`${label} ok`);

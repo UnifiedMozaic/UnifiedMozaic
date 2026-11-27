@@ -7,6 +7,9 @@
 // expect: bframes.mp4 none: 75 of 75 frames found
 // expect: bframes.mp4 auto: 75 of 75 frames found
 
+import { MediaPixels, MediaRead, mediaOpenVideo, mediaFrame, mediaClose, mediaInfoOf } from "um:media";
+
+
 function numberOf(px: Buffer<u8>, w: i32, h: i32): i32 {
   const at = ((h / 2) * w + w / 2) * 4;
   return (px[at] as i32) / 16 + (px[at + 1] as i32) / 16 * 16;

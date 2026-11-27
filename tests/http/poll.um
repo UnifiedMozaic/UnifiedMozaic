@@ -1,10 +1,13 @@
-// runtime/http.um の httpRequest（頭を配列で渡す）と httpPoll（状態と届いた本文を1度に取り出す）。
+// lib/http.um の httpRequest（頭を配列で渡す）と httpPoll（状態と届いた本文を1度に取り出す）。
 // expect: phase Done status 200
 // expect: GET ?x
 // expect: x-api-key=k
 // expect: content-type=text/plain
 // expect: chunks > 0 true
 // expect: failed: Failed true
+
+import { HttpPhase, httpPoll, httpRequest, httpWait, httpClose } from "um:http";
+
 
 export function main(): i32 {
   const base = envVar("UM_TEST_HTTP");

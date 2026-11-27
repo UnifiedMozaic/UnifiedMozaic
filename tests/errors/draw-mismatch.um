@@ -1,0 +1,19 @@
+// error: type-mismatch
+struct VOut {
+  position: vec4<f32>;
+}
+struct Other {
+  position: vec4<f32>;
+  k: f32;
+}
+vertex function vs(i: u32): VOut {
+  return { position: vec4(0.0 as f32, 0, 0, 1) };
+}
+fragment function fs(v: Other): vec4<f32> {
+  return v.position;
+}
+export function main(): i32 {
+  let img = gpu.beginImage(4, 4, 0);
+  gpu.draw(mut img, 3, vs(), fs());
+  return 0;
+}

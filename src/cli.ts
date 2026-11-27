@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { basename } from 'node:path';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { CompileError, CompileErrors, formatDiagnostic } from './diag.ts';
 import type { Diagnostic } from './diag.ts';
 import { build, compileMsl, compileToLL, compileWgsl, TARGETS } from './driver.ts';
@@ -10,10 +10,12 @@ const USAGE = `UnifiedMozaic compiler
 
 usage:
   um check <file.um> [--target T] [--json]
-  um build <file.um> [--target T] [-o <out>] [--emit-llvm] [-O<level>] [--link-input <file>]... [--json]
+  um build <file.um> [--target T | --web] [-o <out>] [--emit-llvm] [-O<level>] [--link-input <file>]... [--json]
 
 targets (T): wasm32 (default), wasm32-plugin (a wasm module with no imports, to load from a host), arm64-macos, host
   --emit-llvm   write LLVM IR text instead of a binary
+  --web         build for the browser: write a folder (-o, default <name>-web) with app.wasm, index.html and the runtime
+                (host.mjs, web.mjs). Open index.html over HTTP; windows become canvases (docs/web.ja.md)
   --emit-wgsl   also write the WGSL of each kernel as <out>.<kernel>.wgsl (wasm32 and UM_WGPU=1 native builds embed the same
                 WGSL; gpu.loadKernel can load it as is, see docs/wgpu.ja.md)
   --emit-msl    also write the MSL of each kernel as <out>.<kernel>.metal (UM_METAL=1 native builds compile the same MSL at run time)
@@ -40,6 +42,7 @@ function main(argv: string[]): void {
   let target: TargetName = 'wasm32';
   let out: string | undefined;
   let emitLLVM = false;
+  let web = false;
   let emitWgsl = false;
   let emitMsl = false;
   let json = false;
@@ -57,6 +60,8 @@ function main(argv: string[]): void {
       if (!out) fail('-o needs a path');
     } else if (a === '--emit-llvm') {
       emitLLVM = true;
+    } else if (a === '--web') {
+      web = true;
     } else if (a === '--emit-wgsl') {
       emitWgsl = true;
     } else if (a === '--emit-msl') {
@@ -79,6 +84,7 @@ function main(argv: string[]): void {
     }
   }
   if (!file) fail(`missing source file\n\n${USAGE}`);
+  if (web) target = 'wasm32';
 
   let src: string;
   try {
@@ -109,6 +115,24 @@ function main(argv: string[]): void {
     const path = out ?? `${stem}.ll`;
     writeFileSync(path, ll);
     if (json) process.stdout.write(JSON.stringify({ ok: true, errors: [], output: path }) + '\n');
+    return;
+  }
+
+  if (web) {
+    // ブラウザで動かすフォルダ: app.wasm と、読み込むページ・ランタイム（runtime/web/index.html、host.mjs、web.mjs）。
+    const dir = out ?? `${stem}-web`;
+    mkdirSync(dir, { recursive: true });
+    try {
+      build(ll, target, join(dir, 'app.wasm'), opt);
+    } catch {
+      fail('error: the LLVM toolchain (clang) failed; see the messages above');
+    }
+    const rt = join(import.meta.dirname, '..', 'runtime');
+    copyFileSync(join(rt, 'web', 'index.html'), join(dir, 'index.html'));
+    copyFileSync(join(rt, 'host.mjs'), join(dir, 'host.mjs'));
+    copyFileSync(join(rt, 'web.mjs'), join(dir, 'web.mjs'));
+    if (json) process.stdout.write(JSON.stringify({ ok: true, errors: [], output: dir }) + '\n');
+    else process.stderr.write(`wrote ${dir}/ (open index.html over HTTP, e.g. \`npx serve ${dir}\` or \`python3 -m http.server -d ${dir}\`)\n`);
     return;
   }
 

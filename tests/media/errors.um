@@ -19,6 +19,9 @@
 // expect: wrong frame type: pixels in Rgba8 need a Buffer<u8>
 // expect: mpeg4 into mp4 after a bad frame: ok
 
+import { MediaPixels, MediaRead, MediaAudioRead, MediaVideoSettings, mediaOpenVideo, mediaOpenAudio, mediaProbe, mediaFrame, mediaSamples, mediaCreate, mediaAddVideoStream, mediaWriteFrame, mediaFinish, mediaClose } from "um:media";
+
+
 function contains(s: string, part: string): bool {
   if (part.length > s.length) {
     return false;

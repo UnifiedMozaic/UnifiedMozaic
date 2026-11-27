@@ -10,6 +10,8 @@
 //     割り算と平方根に数 ULP の誤差を許すので、GPU の命令のままでは CPU と結果が変わる
 //   - 浮動小数点の掛け算の結果は、足し算と1つの命令（FMA）にまとめられないよう、実行時にしか分からない 0 と OR する
 //     （um_fmul）。まとめられると丸めが1回減り、CPU と結果が変わる
+//   - 浮動小数点の足し算・引き算の結果も同じく 0 と OR する（um_fadd / um_fsub）。ドライバのコンパイラは
+//     `(a - b) + 1.0` を `(a + 1.0) - b` のように組み替えることがあり（Mesa の NIR など）、丸めが CPU と変わる
 //
 // レイアウト: WGSL にする kernel で使える型はすべて 4 バイト単位（i32 / u32 / f32 とその struct・固定長配列）なので、
 // LLVM 側の構造体と WGSL の構造体は、同じ並びで隙間なく一致する。
@@ -88,7 +90,7 @@ interface BufferRef {
   /** 8 / 16 ビットの要素。WGSL には 8 / 16 ビットの整数がないので、u32 の語に詰めて持ち、読み書きの関数を通す。 */
   small?: { bits: number; signed: boolean };
   /**
-   * アトミックに読み書きする RacyBuffer（kernel の中で load / store / fetchAdd / compareExchange を使うもの）。
+   * アトミックに読み書きする RacyBuffer（kernel の中で load / store / fetchAdd / fetchMin / fetchMax / compareExchange を使うもの）。
    * array<atomic<i32>> か array<atomic<u32>>（f32 はビット列）で持ち、要素の読み書きもすべて atomicLoad / atomicStore にする。
    */
   atomic?: { elem: Ty };
@@ -112,6 +114,11 @@ class Emitter {
   workgroupVars: string[] = [];
   /** 共有配列をグループの始めに 0 で埋める文（um_main の先頭に置く）。 */
   workgroupInit: string[] = [];
+  /**
+   * GPU のふつうの計算を使うか（描画のシェーダで UM_SHADER_FAST_MATH=1 のとき）。浮動小数点の割り算・平方根を
+   * GPU の命令のままにし、掛け算・足し算・引き算を FMA にまとめたり組み替えたりしてよいことにする。速いが、CPU と結果が少し変わる。
+   */
+  fast = false;
   /** 使った補助関数（um_fdiv など）。使ったものだけを出す。 */
   uses = new Set<string>();
   /** RacyBuffer の比較交換の関数（Buffer のグローバル変数の名前 → WGSL）。使ったものだけを出す。 */
@@ -373,6 +380,10 @@ class Emitter {
         return this.atomicStore(ref, i, a[0]);
       case 'fetchAdd':
         return `atomicAdd(&${ref.global}[um_clamp(${i}, ${ref.len})], ${a[0]})`;
+      case 'fetchMin':
+        return `atomicMin(&${ref.global}[um_clamp(${i}, ${ref.len})], ${a[0]})`;
+      case 'fetchMax':
+        return `atomicMax(&${ref.global}[um_clamp(${i}, ${ref.len})], ${a[0]})`;
       case 'compareExchange':
         this.uses.add(`um_cas_${ref.global}`);
         return `um_cas_${ref.global}(${i}, ${a[0]}, ${a[1]})`;
@@ -433,9 +444,20 @@ class Emitter {
           const rt = e.right.ty as Ty & { k: 'int' };
           return `(${l} ${e.op} (${rt.signed ? `u32(${r})` : r} & 31u))`;
         }
+        // 速い計算（fast）では、浮動小数点の四則演算は GPU の命令のまま。
+        if (this.fast && ty.k === 'float' && (e.op === '/' || e.op === '*' || e.op === '+' || e.op === '-')) {
+          return `(${l} ${e.op} ${r})`;
+        }
         // 正しく丸める割り算、FMA にまとめない掛け算、ドライバの誤りを避ける余り（ファイルの先頭の説明）。
         if (ty.k === 'float' && (e.op === '/' || e.op === '*')) {
           const fn = e.op === '/' ? 'um_fdiv' : 'um_fmul';
+          this.uses.add(fn);
+          return `${fn}(${l}, ${r})`;
+        }
+        // 組み替えさせない足し算・引き算（ファイルの先頭の説明）。um_z は um_fmul のところで宣言し、入口で入れる。
+        if (ty.k === 'float' && (e.op === '+' || e.op === '-')) {
+          const fn = e.op === '+' ? 'um_fadd' : 'um_fsub';
+          this.uses.add('um_fmul');
           this.uses.add(fn);
           return `${fn}(${l}, ${r})`;
         }
@@ -515,6 +537,7 @@ class Emitter {
           case 'group.count':
             return 'um_params.count';
           case 'sqrt':
+            if (this.fast) return `sqrt(${a[0]})`;
             this.uses.add('um_fsqrt');
             return `um_fsqrt(${a[0]})`;
           case 'floor':
@@ -526,6 +549,10 @@ class Emitter {
             // 浮動小数点は CPU 版と同じ「比較して選ぶ」定義にする（NaN の扱いを揃えるため）。
             if (ty.k === 'float') return `select(${a[1]}, ${a[0]}, ${a[0]} ${e.fn === 'min' ? '<' : '>'} ${a[1]})`;
             return `${e.fn}(${a[0]}, ${a[1]})`;
+          case 'toBits':
+          case 'fromBits':
+            // 同じビットを別の型として読む。kernel は 32 ビット（f32 ⇄ u32 / i32）。
+            return `bitcast<${this.ty(ty)}>(${a[0]})`;
           case 'popcount':
             return `countOneBits(${a[0]})`;
           case 'clz':
@@ -775,6 +802,175 @@ class Emitter {
     ].join('\n');
     return { source, buffers };
   }
+
+  /**
+   * vertex function と fragment function の組から、描画のシェーダ（@vertex um_vs と @fragment um_fs）を作る。
+   * 束縛は kernel と同じ形: binding 0 が UmParams（count = 頂点の数、row = 0、Buffer ごとの長さ、値の引数）、
+   * binding 1 からが Buffer。引数は vertex の引数（頂点の番号を除く）、fragment の引数（受け取る値を除く）の順。
+   * 名前がぶつからないよう、vertex の引数は v_、fragment の引数は f_ を付ける。
+   * 本体は普通の WGSL の関数（um_vs_body / um_fs_body）にし、入口が UM の struct と WGSL の組み込みの型を写し替える。
+   */
+  render(vs: FnDecl, fs: FnDecl, kind: { indexed: boolean; instanced: boolean } = { indexed: false, instanced: false }): WgslKernel {
+    const buffers: WgslBuffer[] = [];
+    const paramFields = ['  count: u32,', '  row: u32,'];
+    const globals: string[] = [];
+    // vertex function の先頭の引数は、頂点の番号（とインスタンスの番号）。fragment function の先頭は受け取る値。
+    const stages = [{ d: vs, tag: 'v', skip: kind.instanced ? 2 : 1 }, { d: fs, tag: 'f', skip: 1 }];
+    // 番号の Buffer（gpu.drawIndexed）は最初の Buffer。頂点の番号は、そこから読んだ値になる。
+    if (kind.indexed) {
+      buffers.push({ name: 'um_indices', writable: false, elem: { k: 'int', bits: 32, signed: false } });
+      paramFields.push('  len_um_indices: u32,');
+      globals.push('@group(0) @binding(1) var<storage, read> b_um_indices: array<u32>;');
+    }
+    for (const { d, tag, skip } of stages) {
+      for (const p of d.params.slice(skip)) {
+        const ty = p.ty!;
+        if (ty.k !== 'heap') continue;
+        const global = `b_${tag}_${p.name}`;
+        const binding = buffers.length + 1;
+        buffers.push({ name: `${tag}_${p.name}`, writable: false, elem: ty.elem });
+        paramFields.push(`  len_${tag}_${p.name}: u32,`);
+        globals.push(`@group(0) @binding(${binding}) var<storage, read> ${global}: array<${this.ty(ty.elem)}>;`);
+        this.bufs.set(p.sym!.id, { global, len: `um_params.len_${tag}_${p.name}` });
+      }
+    }
+    for (const { d, tag, skip } of stages) {
+      for (const p of d.params.slice(skip)) {
+        const ty = p.ty!;
+        if (ty.k === 'heap') continue;
+        paramFields.push(`  p_${tag}_${p.name}: ${ty.k === 'bool' ? 'u32' : this.ty(ty)},`);
+      }
+    }
+
+    // 本体を WGSL の関数にする。値の引数は UmParams から変数に写す。
+    const body = (d: FnDecl, tag: string, head: string, first: string, skip: number): string[] => {
+      this.lines = [];
+      this.indent = 1;
+      if (first) this.line(`var ${this.name(d.params[0].sym!)}: ${this.ty(d.params[0].ty!)} = ${first};`);
+      for (const p of d.params.slice(skip)) {
+        const ty = p.ty!;
+        if (ty.k === 'heap') continue;
+        const value = ty.k === 'bool' ? `(um_params.p_${tag}_${p.name} != 0u)` : `um_params.p_${tag}_${p.name}`;
+        this.line(`var ${this.name(p.sym!)}: ${this.ty(ty)} = ${value};`);
+      }
+      for (const st of d.body) this.stmt(st);
+      return [head, ...this.lines, '}', ''];
+    };
+    this.names.set(vs.params[0].sym!.id, 'um_i');
+    if (kind.instanced) this.names.set(vs.params[1].sym!.id, 'um_inst');
+    const out = vs.ret as Ty & { k: 'struct' };
+    const outTy = this.ty(out);
+    const color = this.ty(fs.ret!);
+    const vsText = body(vs, 'v', `fn um_vs_body(um_i: u32, um_inst: u32) -> ${outTy} {`, '', kind.instanced ? 2 : 1);
+    const fsText = body(fs, 'f', `fn um_fs_body(a_in: ${outTy}) -> ${color} {`, 'a_in', 1);
+
+    // 受け渡す値（varyings）。position は @builtin(position)、ほかは @location の順。整数は補間しない（flat）。
+    const info = this.prog.structs.get(out.name)!;
+    const wgslOf = (t: Ty): { ty: string; to: (x: string) => string; from: (x: string) => string; flat: boolean } => {
+      const v = vecInfo(this.prog, t);
+      if (v) {
+        const comps = ['x', 'y', 'z', 'w'].slice(0, v.n);
+        const ty = `vec${v.n}<${this.ty(v.elem)}>`;
+        return {
+          ty,
+          to: (x) => `${ty}(${comps.map((c) => `${x}.f_${c}`).join(', ')})`,
+          from: (x) => `${this.ty(t)}(${comps.map((c) => `${x}.${c}`).join(', ')})`,
+          flat: v.elem.k === 'int',
+        };
+      }
+      return { ty: this.ty(t), to: (x) => x, from: (x) => x, flat: t.k === 'int' };
+    };
+    const varyings: string[] = [];
+    const toVaryings: string[] = [];
+    const fromVaryings: string[] = [];
+    let loc = 0;
+    for (const f of info.fields) {
+      const w = wgslOf(f.ty);
+      const attr = f.name === 'position' ? '@builtin(position)' : `@location(${loc++})${w.flat ? ' @interpolate(flat)' : ''}`;
+      varyings.push(`  ${attr} f_${f.name}: ${w.ty},`);
+      toVaryings.push(`  r.f_${f.name} = ${w.to(`o.f_${f.name}`)};`);
+      fromVaryings.push(`  o.f_${f.name} = ${w.from(`v.f_${f.name}`)};`);
+    }
+    const colorOut = wgslOf(fs.ret!);
+    const setZ = this.uses.has('um_fmul') ? ['  um_z = um_params.row >> 30u;'] : [];
+
+    const source = [
+      `// UnifiedMozaic が vertex function '${vs.name}' と fragment function '${fs.name}' から生成した WGSL。手で編集しない。`,
+      '',
+      ...this.out,
+      'struct UmParams {',
+      ...paramFields,
+      '}',
+      '',
+      '@group(0) @binding(0) var<storage, read> um_params: UmParams;',
+      ...globals,
+      '',
+      'fn um_clamp(i: u32, len: u32) -> u32 {',
+      '  return min(i, max(len, 1u) - 1u);',
+      '}',
+      '',
+      'fn um_f2i(v: f32) -> i32 {',
+      '  let r: i32 = i32(clamp(v, -2147483648.0f, 2147483520.0f));',
+      '  let hi: i32 = select(r, 2147483647i, v >= 2147483648.0f);',
+      '  let lo: i32 = select(hi, -2147483647i - 1i, v <= -2147483648.0f);',
+      '  return select(lo, 0i, v != v);',
+      '}',
+      '',
+      'fn um_f2u(v: f32) -> u32 {',
+      '  let r: u32 = u32(clamp(v, 0.0f, 4294967040.0f));',
+      '  let hi: u32 = select(r, 4294967295u, v >= 4294967296.0f);',
+      '  let lo: u32 = select(hi, 0u, v <= 0.0f);',
+      '  return select(lo, 0u, v != v);',
+      '}',
+      '',
+      ...[...this.uses].filter((u) => HELPERS[u]).flatMap((u) => [...HELPERS[u], '']),
+      ...this.constDecls,
+      ...(this.constDecls.length > 0 ? [''] : []),
+      ...this.fnText,
+      ...vsText,
+      ...fsText,
+      'struct UmVaryings {',
+      ...varyings,
+      '}',
+      '',
+      '@vertex',
+      'fn um_vs(@builtin(vertex_index) um_vi: u32, @builtin(instance_index) um_ii: u32) -> UmVaryings {',
+      ...setZ,
+      kind.indexed ? '  let o = um_vs_body(b_um_indices[um_clamp(um_vi, um_params.len_um_indices)], um_ii);' : '  let o = um_vs_body(um_vi, um_ii);',
+      '  var r: UmVaryings;',
+      ...toVaryings,
+      '  return r;',
+      '}',
+      '',
+      '@fragment',
+      `fn um_fs(v: UmVaryings) -> @location(0) ${colorOut.ty} {`,
+      ...setZ,
+      `  var o: ${outTy};`,
+      ...fromVaryings,
+      `  return ${colorOut.to('um_fs_body(o)')};`,
+      '}',
+      '',
+    ].join('\n');
+    return { source, buffers };
+  }
+}
+
+/** vec2<T>〜vec4<T>（prelude の struct）なら、成分の数と型。 */
+function vecInfo(prog: Program, t: Ty): { n: number; elem: Ty } | null {
+  if (t.k !== 'struct') return null;
+  const m = /^vec([234])__(f32|i32|u32)$/.exec(t.name);
+  if (!m) return null;
+  const info = prog.structs.get(t.name);
+  if (!info) return null;
+  return { n: Number(m[1]), elem: info.fields[0].ty };
+}
+
+/** vertex function と fragment function の組から、描画のシェーダの WGSL を作る（Emitter.render）。 */
+export function emitWgslRender(prog: Program, vs: FnDecl, fs: FnDecl, kind: { indexed: boolean; instanced: boolean } = { indexed: false, instanced: false },
+  fast = false): WgslKernel {
+  const e = new Emitter(prog);
+  e.fast = fast;
+  return e.render(vs, fs, kind);
 }
 
 /** 補助関数の WGSL（Emitter.uses に入れた名前ごと）。 */
@@ -798,6 +994,17 @@ const HELPERS: Record<string, string[]> = {
     '  return bitcast<f32>(bitcast<u32>(a * b) | um_z);',
     '}',
   ],
+  um_fadd: [
+    '// 足し算の結果を um_z（実行時にしか分からない 0）と OR する。ドライバは、前後の足し算・引き算と組み替えられなくなる。',
+    'fn um_fadd(a: f32, b: f32) -> f32 {',
+    '  return bitcast<f32>(bitcast<u32>(a + b) | um_z);',
+    '}',
+  ],
+  um_fsub: [
+    'fn um_fsub(a: f32, b: f32) -> f32 {',
+    '  return bitcast<f32>(bitcast<u32>(a - b) | um_z);',
+    '}',
+  ],
   um_fdiv: [
     '// IEEE 754 の f32 の割り算（最近接偶数への丸め）。GPU の割り算の命令は数 ULP の誤差を許すので、整数の演算で求める。',
     '// 仮数を1ビットずつ割り（24 ビットと丸めのビット）、余りが残れば sticky。非正規化数・無限大・NaN も CPU と同じに扱う。',
@@ -809,7 +1016,9 @@ const HELPERS: Record<string, string[]> = {
     '  var eb = i32((ub >> 23u) & 0xffu);',
     '  var ma = ua & 0x7fffffu;',
     '  var mb = ub & 0x7fffffu;',
-    '  let nan = bitcast<f32>(0x7fc00000u);',
+    // NaN は実行時の値（ua & 0u）を混ぜて作る。定数の bitcast で NaN を作ると、ブラウザ（Chrome の Tint）は
+    // 「NaN は f32 で表せない」としてシェーダのコンパイルを拒む（wgpu-native の naga は通す）。
+    '  let nan = bitcast<f32>(0x7fc00000u | (ua & 0u));',
     '  if ((ea == 255 && ma != 0u) || (eb == 255 && mb != 0u)) {',
     '    return nan;',
     '  }',
@@ -893,7 +1102,7 @@ const HELPERS: Record<string, string[]> = {
     '    return a;',
     '  }',
     '  if ((ua & 0x80000000u) != 0u) {',
-    '    return bitcast<f32>(0x7fc00000u);',
+    '    return bitcast<f32>(0x7fc00000u | (ua & 0u));',  // 定数の NaN にしない（um_fdiv の説明）
     '  }',
     '  if (e == 255) {',
     '    return a;',

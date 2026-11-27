@@ -14,6 +14,9 @@
 // expect: ndjson {"done":true}
 // expect: ndjson state 2 status 200
 
+import { httpStart, httpState, httpStatus, httpReadLine, httpWait, httpClose } from "um:http";
+
+
 // "data: {...\"text\":\"X\"}}" から X を取り出す（試験用の小さな切り出し）。
 function textOf(line: string): string {
   const key = "\"text\":\"";

@@ -16,7 +16,7 @@
 // （null なら、まだ1行そろっていない）。
 
 // 要求の段階。
-enum HttpPhase {
+export enum HttpPhase {
   Waiting,    // 接続・送信・応答の頭を待っている
   Receiving,  // 状態コードと頭が届き、本文を受け取っている
   Done,       // 本文をすべて受け取った（状態コードが 404 などでも、受け取れたなら Done）
@@ -25,7 +25,7 @@ enum HttpPhase {
 }
 
 // httpPoll の結果。
-struct HttpState {
+export struct HttpState {
   phase: HttpPhase;
   status: i32;       // HTTP の状態コード（応答の頭が届くまでは 0）
   body: string;      // 前回の httpPoll（か httpRead）から後に届いた本文
@@ -50,7 +50,7 @@ function httpPhaseOf(code: i32): HttpPhase {
 }
 
 // 状態を調べ、届いた本文を取り出す。待たない。
-function httpPoll(id: i64): HttpState {
+export function httpPoll(id: i64): HttpState {
   // 状態を先に読む（終わっていたなら、そのあとの httpRead が残りをすべて取り出す）。
   const code = httpState(id);
   const body = httpRead(id);
@@ -58,7 +58,7 @@ function httpPoll(id: i64): HttpState {
 }
 
 // 要求を始める。headers は "名前: 値" の並び。timeoutMs は待ちの上限（0 は 60 秒）。
-function httpRequest(method: string, url: string, headers: string[], body: string, timeoutMs: i32): i64 {
+export function httpRequest(method: string, url: string, headers: string[], body: string, timeoutMs: i32): i64 {
   let joined = "";
   for (const h of headers) {
     if (joined.length > 0) {

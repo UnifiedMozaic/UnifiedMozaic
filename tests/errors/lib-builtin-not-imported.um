@@ -1,0 +1,6 @@
+// ライブラリの組み込みの関数（httpReadLine）も、import しないと使えない。
+// error: not-imported
+export function main(): i32 {
+  const line = httpReadLine(1);
+  return 0;
+}

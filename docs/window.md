@@ -68,13 +68,13 @@ other character keys are `Char(codepoint)` (lower case) and the rest are `Other(
 ## How it works
 
 The built-ins live in `runtime/window.c` (C and SDL3). `WindowEvent`, `Key`, `Mods` and `pollWindowEvent` are written in UM in
-`runtime/window.um` and are added to a program only when it uses one of those names, so programs without a window never link SDL3.
+`lib/window.um`, the library `um:window`: write `import * from "um:window";`. Programs without a window never link SDL3.
 The lower-level `windowPoll(event: mut Buffer<i32>, timeoutMs: i32): bool` writes `[kind, window, a, b, c, d]` into `event`.
 
 ## More: audio, dialogs, drop, clipboard, cursors, IME, window control, HiDPI, time
 
 The Japanese page ([window.ja.md](window.ja.md)) has the full reference; this is a summary. All of these are written in UM in
-`runtime/window.um` on top of a few numbered low-level built-ins (`windowCtl`, `windowCtlF`, `windowSetText`, `windowGetText`, `audioWrite`).
+`lib/window.um` on top of a few numbered low-level built-ins (`windowCtl`, `windowCtlF`, `windowSetText`, `windowGetText`, `audioWrite`).
 
 - **Partial present**: `windowPresentRect(window, pixels, width, height, x, y, w, h)` uploads only the changed rectangle and presents;
   `windowUpdateRect(...)` uploads without presenting (for several rectangles). 1920×1080, D3D11: full present ≈ 2.1 ms, two small rects ≈ 0.4 ms.

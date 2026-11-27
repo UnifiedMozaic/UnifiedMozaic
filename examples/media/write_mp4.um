@@ -6,6 +6,9 @@
 // expect: read back: h264 320x240, 30/1 fps, 60 frames, aac 48000 Hz 2 channels
 // expect: frame at 1.5 s has the number 45
 
+import { MediaPixels, MediaRead, MediaVideoSettings, MediaAudioSettings, mediaOpenVideo, mediaProbe, mediaFrame, mediaCreate, mediaAddVideoStream, mediaAddAudioStream, mediaWriteFrame, mediaWriteSamples, mediaFinish, mediaClose } from "um:media";
+
+
 // sin(2π x)。x の整数部を捨てて [-0.5, 0.5) の周期に寄せ、テイラー展開で求める（UM にはまだ Math.sin がない）。
 function sine(x: f64): f64 {
   let f = x - Math.floor(x);

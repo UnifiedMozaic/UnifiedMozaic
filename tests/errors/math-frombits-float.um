@@ -1,0 +1,5 @@
+// error: type-mismatch
+export function main(): i32 {
+  print(Math.fromBits(1.5));
+  return 0;
+}

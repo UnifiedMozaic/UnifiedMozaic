@@ -11,6 +11,9 @@
 // expect: Yuv420p10 y 76 u 157 v 190
 // expect: odd size 33x17 Yuv420p8: 867 bytes, Rgba8: 2244 bytes
 
+import { MediaPixels, MediaRead, mediaOpenVideo, mediaFrame, mediaClose } from "um:media";
+
+
 // 期待の値に近ければ期待の値を、遠ければ実際の値を出す（違いが分かるように）。
 function near(v: i32, want: i32): i32 {
   if (v >= want - 6 && v <= want + 6) {

@@ -178,6 +178,11 @@ export interface FnDecl {
   pos: Pos;
   /** GPUでも実行できる関数。本体に制限があり、整数演算と添字はGPUと同じ意味になる。 */
   isKernel?: boolean;
+  /**
+   * 描画のシェーダ（`vertex function` / `fragment function`）。kernel と同じ制限を持ち（isKernel も立つ）、
+   * gpu.draw の中でだけ使える（src/render.ts）。
+   */
+  stage?: 'vertex' | 'fragment';
   /** kernel が group.* か共有配列を使うか（dispatchGroups でだけ実行できる）。型検査が設定する。 */
   usesGroup?: boolean;
   /** kernel が group.barrier() を使うか。 */
@@ -244,6 +249,8 @@ export type Decl = FnDecl | StructDecl | ClassDecl | InterfaceDecl | ConstDecl;
 
 export interface Import {
   names: { name: string; pos: Pos }[];
+  /** `import * from "…";`: 相手が export するすべての名前（ライブラリなら組み込みの関数も）。 */
+  all?: boolean;
   path: string;
   pos: Pos;
 }
@@ -253,6 +260,8 @@ export interface Module {
   imports?: Import[];
   /** 複数のファイルをまとめたとき: ファイル番号 → そのファイルが import した名前。 */
   importedNames?: Map<number, Set<string>>;
+  /** ライブラリ（lib/*.um）が export する名前 → ライブラリの名前。読み込んでいない名前を使ったときのヒントに使う。 */
+  libNames?: Map<string, string>;
 }
 
 /** simdgroup の集計（`group.simdSum(x)` など）。barrier と同じく、グループの全スレッドが通る場所に置く集団の操作。 */

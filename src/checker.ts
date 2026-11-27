@@ -1,4 +1,5 @@
 import { inferGpuLoad, isGpuLoadCall } from './gpuload.ts';
+import { inferRender, isRenderCall } from './render.ts';
 import { CompileError, CompileErrors } from './diag.ts';
 import type { Pos } from './diag.ts';
 import { displayNames, GROUP_COLLECTIVE, isAgg, isCollectiveLet, isNumeric, tyEq, tyStr } from './ast.ts';
@@ -196,6 +197,22 @@ const IO_BUILTINS = new Set(['readLine', 'inputReady', 'clock', 'stringFromBytes
   'mediaEncoderList', 'mediaError', 'mediaVersion',
   'httpStart', 'httpState', 'httpStatus', 'httpRead', 'httpReadLine', 'httpHeaders', 'httpError', 'httpWait', 'httpCancel', 'httpClose']);
 
+/**
+ * ライブラリ（lib/名前.um。docs/libraries.ja.md）の組み込みの関数: そのライブラリから import したときだけ使える
+ * （ライブラリのファイルの中からは import なしで使える）。名前の頭で決まる。
+ */
+export function libOfBuiltin(name: string): string | null {
+  if (!IO_BUILTINS.has(name)) return null;
+  for (const lib of ['wasm', 'media', 'http', 'window']) if (name.startsWith(lib)) return lib;
+  if (name === 'audioWrite') return 'window';
+  return null;
+}
+
+/** ライブラリの組み込みの関数の一覧（`import * from "um:…";` で読む）。 */
+export function libBuiltins(lib: string): string[] {
+  return [...IO_BUILTINS].filter((n) => libOfBuiltin(n) === lib);
+}
+
 /** 最上位の定数。値は最初に使われたとき（遅くとも宣言の収集の終わり）に求める。 */
 interface ConstInfo {
   decl: ConstDecl;
@@ -235,6 +252,14 @@ const MAX_VALUE_SCALARS = 4096;
  */
 const MAX_CONST_SCALARS = 1 << 22;
 
+/** prelude.um の関数で計算する Math の関数。名前の後ろに F32 / F64 を付けた関数を呼ぶ。 */
+const MATH_PRELUDE: Record<string, string> = {
+  sin: '__std_mathSin', cos: '__std_mathCos', tan: '__std_mathTan', asin: '__std_mathAsin', acos: '__std_mathAcos', atan: '__std_mathAtan', atan2: '__std_mathAtan2',
+};
+
+/** Math.xxx として読める定数。 */
+const MATH_CONSTS: Record<string, number> = { PI: Math.PI };
+
 /** Math.xxx として呼べる組み込み。float はすべての浮動小数点型、num は整数も受け付ける。 */
 const MATH: Record<string, { argc: number; kind: 'float' | 'num' | 'int' }> = {
   sqrt: { argc: 1, kind: 'float' },
@@ -243,6 +268,18 @@ const MATH: Record<string, { argc: number; kind: 'float' | 'num' | 'int' }> = {
   abs: { argc: 1, kind: 'num' },
   min: { argc: 2, kind: 'num' },
   max: { argc: 2, kind: 'num' },
+  // 三角関数（f32 と f64）。標準の関数 __std_mathSinF32 / __std_mathSinF64 など（runtime/prelude.um）の呼び出しに置き換える。
+  sin: { argc: 1, kind: 'float' },
+  cos: { argc: 1, kind: 'float' },
+  tan: { argc: 1, kind: 'float' },
+  asin: { argc: 1, kind: 'float' },
+  acos: { argc: 1, kind: 'float' },
+  atan: { argc: 1, kind: 'float' },
+  atan2: { argc: 2, kind: 'float' },
+  // ビットの並びの読み替え。toBits(f32) は u32、toBits(f64) は u64。fromBits は逆（32 ビットの整数は f32、64 ビットは f64）。
+  // 型の検査は inferMath の専用の分岐で行う（kind は使わない）。
+  toBits: { argc: 1, kind: 'float' },
+  fromBits: { argc: 1, kind: 'int' },
   // ビット演算。立っているビットの数、上位・下位から続く 0 の数（値が 0 ならビット幅）。
   popcount: { argc: 1, kind: 'int' },
   clz: { argc: 1, kind: 'int' },
@@ -545,13 +582,14 @@ class Checker {
     }
     const h = TYPE_HINTS[n.name];
     if (h) this.err(h[0], `type '${n.name}' is not available`, n.pos, h[1]);
-    this.err('unknown-type', `unknown type '${n.name}'`, n.pos);
+    this.err('unknown-type', `unknown type '${n.name}'`, n.pos, this.libHint(n.name));
   }
 
   // ---- 宣言の収集 ----
 
   collect(mod: Module): FnDecl[] {
     this.importedNames = mod.importedNames ?? new Map();
+    this.libNames = mod.libNames ?? new Map();
     for (const d of mod.decls) if (!this.fileOf.has(d.name)) this.fileOf.set(d.name, d.file ?? 0);
     const typeDecls: (StructDecl | ClassDecl)[] = [];
     const fnDecls: FnDecl[] = [];
@@ -821,7 +859,7 @@ class Checker {
 
   /** 定数の初期化に書ける形かどうかを確かめる。 */
   constShape(e: Expr): void {
-    const hint = 'a top-level constant may use literals, array literals, other top-level constants (and their elements `T[i]`), operators, `as` and parentheses; compute anything else inside a function';
+    const hint = 'a top-level constant may use literals, array literals, other top-level constants (and their elements `T[i]`), `Math.PI`, operators, `as` and parentheses; compute anything else inside a function';
     switch (e.kind) {
       case 'int':
       case 'float':
@@ -848,6 +886,10 @@ class Checker {
         // 定数の配列の要素: `T[3]`、`T[N - 1][0]`。
         this.constShape(e.base);
         return this.constShape(e.index);
+      case 'field':
+        // `Math.PI`（型検査で小数のリテラルになる）。
+        if (e.base.kind === 'ident' && e.base.name === 'Math' && !this.consts.has('Math') && e.name in MATH_CONSTS) return;
+        break;
     }
     const what = e.kind === 'call' || e.kind === 'mcall' || e.kind === 'new' || e.kind === 'newArray' ? 'a call'
       : e.kind === 'object' ? 'an object literal' : e.kind === 'cond' ? '`? :`'
@@ -1083,6 +1125,13 @@ class Checker {
   /** 名前 → それを宣言したファイルの番号。 */
   fileOf = new Map<string, number>();
   importedNames = new Map<number, Set<string>>();
+  libNames = new Map<string, string>();
+
+  /** ライブラリにある名前なら、足すべき import の行。 */
+  libHint(name: string): string | undefined {
+    const lib = this.libNames.get(name);
+    return lib ? `'${name}' is in the library "um:${lib}": add \`import { ${name} } from "um:${lib}";\` at the top (docs/libraries.ja.md)` : undefined;
+  }
   /** いま検査している宣言のファイル。 */
   curFile = 0;
 
@@ -1105,8 +1154,11 @@ class Checker {
   /** 他のファイルの名前は、import していなければ使えない。標準の関数（ファイル -1）はどこからでも使える。 */
   visible(name: string, pos: Pos): void {
     const owner = this.fileOf.get(name);
-    if (owner === undefined || owner === -1 || owner === this.curFile) return;
+    // 標準の関数（ファイル -1）は、読み込まれたライブラリの名前も使える（gpu.beginFrame が um:window の関数を使う）。
+    if (owner === undefined || owner === -1 || owner === this.curFile || this.curFile === -1) return;
     if (this.importedNames.get(this.curFile)?.has(name)) return;
+    // コンパイラが作る描画の関数（src/render.ts の drawSource）は、プログラムのシェーダと struct を使う。
+    if (this.curFile === -1 && pos.file === 'render-draw.um') return;
     this.err('not-imported', `'${name}' is defined in another file and is not imported here`, pos,
       `add \`import { ${name} } from "./<file>.um";\` at the top (the other file must mark it with \`export\`)`);
   }
@@ -1381,10 +1433,75 @@ class Checker {
     if (d.ret!.k !== 'void' && !this.isKernelValue(d.ret!)) {
       this.err('kernel-type', `return type ${tyStr(d.ret!)} is not available in a kernel function`, d.pos, hint);
     }
+    if (d.stage) return; // 描画のシェーダの決まりは、本体を検査するときに確かめる（checkStageSignature。struct のフィールドが決まってから）
     const first = d.params[0]?.ty;
     if (writes && !(first && first.k === 'int' && first.bits === 32 && !first.signed)) {
       this.err('kernel-restriction', `kernel '${d.name}' writes to a Buffer, so its first parameter must be the element index`, d.pos,
         'declare it as `i: u32`; the kernel may only write to `buf[i]`');
+    }
+  }
+
+  /**
+   * 描画のシェーダ（vertex function / fragment function。src/render.ts）の引数と戻り値の決まり:
+   *   vertex:   第1引数は頂点の番号（u32）。戻り値は `position: vec4<f32>` を持つ struct（受け渡す値）
+   *   fragment: 第1引数はその struct（補間された値。position は画素の座標と深度）。戻り値は色の vec4<f32>（0〜1）
+   * どちらも Buffer は読むだけ（`mut` なし）。Buffer の要素と値は WGSL の 32 ビットの型だけ。
+   * 受け渡す struct のフィールドは f32 / i32 / u32 か、それらの vec2〜vec4（整数は補間しない）。
+   */
+  checkStageSignature(d: FnDecl): void {
+    const what = `${d.stage} function '${d.name}'`;
+    // 型引数を埋めた struct の名前は vec4__f32 の形（tyStr では vec4<f32>）。
+    const vec4f = (t: Ty): boolean => t.k === 'struct' && t.name === 'vec4__f32';
+    const wide = (t: Ty): boolean => {
+      if (t.k === 'int') return t.bits !== 32;
+      if (t.k === 'float') return t.bits !== 32;
+      if (t.k === 'bool') return true;
+      if (t.k === 'array') return wide(t.elem);
+      if (t.k === 'struct') return (this.structs.get(t.name)?.fields ?? []).some((f) => wide(f.ty));
+      return false;
+    };
+    const varyingOk = (t: Ty): boolean => {
+      if ((t.k === 'int' || t.k === 'float') && t.bits === 32) return true;
+      if (t.k !== 'struct' || !/^vec[234]__(f32|i32|u32)$/.test(t.name)) return false;
+      return true;
+    };
+    const checkVaryings = (t: Ty, pos: Pos, role: string): void => {
+      const info = t.k === 'struct' ? this.structs.get(t.name) : undefined;
+      if (!info || info.isClass || !info.fields.some((f) => f.name === 'position' && vec4f(f.ty))) {
+        this.err('kernel-type', `${role} of ${what} must be a struct with a field \`position: vec4<f32>\``, pos,
+          'e.g. `struct VOut { position: vec4<f32>; color: vec3<f32>; }`; position is the clip-space position');
+      }
+      for (const f of info.fields) {
+        if (!varyingOk(f.ty)) {
+          this.err('kernel-type', `field '${f.name}' of ${tyStr(t)} has type ${tyStr(f.ty)}, which cannot be passed from the vertex to the fragment function`, pos,
+            'use f32, i32, u32, or vec2 / vec3 / vec4 of those');
+        }
+      }
+    };
+    d.params.forEach((p, i) => {
+      const ty = p.ty!;
+      if (p.mode === 'mut') {
+        this.err('kernel-restriction', `${what} cannot write to a Buffer (\`mut\`)`, p.pos, 'shaders only read Buffers; compute data with a kernel and `dispatch` before drawing');
+      }
+      if (i === 0) return;
+      if (ty.k === 'heap' && ty.racy) this.err('kernel-type', `${what} cannot take a RacyBuffer`, p.pos, 'pass a `Buffer<T>`');
+      const inner = ty.k === 'heap' ? ty.elem : ty;
+      if (wide(inner)) {
+        this.err('kernel-type', `parameter '${p.name}' of ${what} has type ${tyStr(ty)}, which a shader cannot use`, p.pos,
+          'shaders use 32-bit values only: i32, u32, f32, and structs / fixed-length arrays of those');
+      }
+    });
+    const first = d.params[0];
+    if (!first) {
+      this.err('kernel-type', `${what} needs a first parameter`, d.pos,
+        d.stage === 'vertex' ? 'the vertex index: `vertex function vs(i: u32, ...): VOut`' : 'the values from the vertex function: `fragment function fs(v: VOut, ...): vec4<f32>`');
+    }
+    if (d.stage === 'vertex') {
+      if (!tyEq(first.ty!, U32)) this.err('kernel-type', `the first parameter of ${what} must be the vertex index \`${first.name}: u32\``, first.pos);
+      checkVaryings(d.ret!, d.pos, 'the return type');
+    } else {
+      checkVaryings(first.ty!, first.pos, 'the first parameter');
+      if (!vec4f(d.ret!)) this.err('kernel-type', `${what} must return the color as vec4<f32> (red, green, blue, alpha from 0 to 1)`, d.pos);
     }
   }
 
@@ -1446,6 +1563,7 @@ class Checker {
     this.loops = [];
     this.movedAt = new Map();
     this.inKernel = !!d.isKernel;
+    if (d.stage) this.checkStageSignature(d);
     this.idxParam = null;
     if (d.cls) {
       // this は書き換え可能として検査し、実際に書き換えたかどうかを記録する（mutatesThis の推論）。
@@ -2360,6 +2478,15 @@ class Checker {
       }
 
       case 'field': {
+        // `Math.PI`: 小数のリテラルに置き換えて、文脈の型（f32 / f64）に合わせる。
+        if (e.base.kind === 'ident' && e.base.name === 'Math' && !this.lookup('Math')) {
+          const v = MATH_CONSTS[e.name];
+          if (v === undefined) {
+            this.err('unknown-field', `\`Math.${e.name}\` is not available`, e.pos, `available: ${Object.keys(MATH_CONSTS).map((n) => `Math.${n}`).join(', ')}`);
+          }
+          this.rewrite(e, { kind: 'float', value: v });
+          return this.infer(e, want);
+        }
         // `Shape.Empty`: 値を持たない選択肢。
         if (e.base.kind === 'ident' && !this.lookup(e.base.name) && this.isEnumName(e.base.name)) {
           return this.enumValue(e, e.base.name, e.name, [], want);
@@ -2685,7 +2812,9 @@ class Checker {
     }
 
     // gpu.loadKernel / gpu.runKernel（src/gpuload.ts）と gpu.available / gpu.prefer の検査済みの式をもう一度検査するときは、前の結果の型。
-    if ((e.callee === '__gpu_load' || e.callee === '__gpu_run' || e.callee === '__gpu_available' || e.callee === '__gpu_prefer') && e.ty) return e.ty;
+    if ((e.callee === '__gpu_load' || e.callee === '__gpu_run' || e.callee === '__gpu_available' || e.callee === '__gpu_prefer'
+      || e.callee === '__gpu_image_begin' || e.callee === '__gpu_draw' || e.callee === '__gpu_image_end'
+      || e.callee === '__gpu_frame_begin' || e.callee === '__gpu_frame_end' || e.callee === '__gpu_draw_state') && e.ty) return e.ty;
     // 入出力の組み込み。検査済みの式（名前が `__io_...` になっている）をもう一度検査することもある。
     const io = e.callee.startsWith('__io_') ? e.callee.slice(5) : e.callee;
     if (IO_BUILTINS.has(io) && (io !== e.callee || (!this.fns.has(io) && !this.generics.has(io)))) return this.inferIo(e, io);
@@ -2694,8 +2823,13 @@ class Checker {
     if (this.generics.has(e.callee) && !this.fns.has(e.callee)) this.instantiate(e, want);
     const sig = this.fns.get(e.callee);
     if (!sig) {
-      const hint = this.structs.get(e.callee)?.isClass ? `write \`new ${e.callee}(...)\`` : undefined;
+      const hint = this.structs.get(e.callee)?.isClass ? `write \`new ${e.callee}(...)\`` : this.libHint(e.callee);
       this.err('unknown-name', `unknown function '${e.callee}'`, e.pos, hint);
+    }
+    // 描画の関数（src/render.ts の drawSource。ファイル render-draw.um）は、CPU で描くときにシェーダの関数を呼ぶ。
+    if (sig.decl.stage && e.pos.file !== 'render-draw.um') {
+      this.err('kernel-restriction', `'${sig.name}' is a ${sig.decl.stage} function, so it can only be used in \`gpu.draw\``, e.pos,
+        'e.g. `gpu.draw(image, vertexCount, vs(...), fs(...))`; share code through a `kernel function` that both can call');
     }
     if (this.inKernel) {
       if (!sig.decl.isKernel) {
@@ -2709,12 +2843,12 @@ class Checker {
       this.kernelCalls.push({ caller: this.curFn, callee: sig.decl, pos: e.pos });
     }
     if (sig.decl.isKernel) this.kernelUses.push({ callee: sig.decl, pos: e.pos });
-    // runtime/wasm.um の関数（wasmLoad など）。wasmCustomSection はバイト列を読むだけなので wasm32 でも使える。
-    if (this.ptrBits === 32 && sig.decl.pos.file === 'wasm.um' && e.pos.file !== 'wasm.um' && sig.name !== 'wasmCustomSection') {
+    // lib/wasm.um の関数（wasmLoad など）。wasmCustomSection はバイト列を読むだけなので wasm32 でも使える。
+    if (this.ptrBits === 32 && sig.decl.pos.file === 'um:wasm' && e.pos.file !== 'um:wasm' && sig.name !== 'wasmCustomSection') {
       this.wasmOnly(sig.name, e.pos);
     }
-    // runtime/media.um の関数（mediaOpenVideo など）。
-    if (this.ptrBits === 32 && sig.decl.pos.file === 'media.um' && e.pos.file !== 'media.um') this.mediaOnly(sig.name, e.pos);
+    // lib/media.um の関数（mediaOpenVideo など）。
+    if (this.ptrBits === 32 && sig.decl.pos.file === 'um:media' && e.pos.file !== 'um:media') this.mediaOnly(sig.name, e.pos);
     this.checkArgs(sig, e.args, e.pos);
     return sig.ret;
   }
@@ -2771,10 +2905,10 @@ class Checker {
    *   windowCtlF(op: i32, window: i32, a: i64): f64                     小数を返す操作。
    *   windowSetText(op: i32, window: i32, a: i64, text: string): i64   文字列を渡す操作。
    *   windowGetText(op: i32, window: i32, a: i64): string               文字列を返す操作。
-   *       操作番号は runtime/window.c と runtime/audio.c。ふつうは runtime/window.um の名前のある関数を使う。
+   *       操作番号は runtime/window.c と runtime/audio.c。ふつうは um:window（lib/window.um）の名前のある関数を使う。
    *   audioWrite(stream: i32, samples: Buffer<f32>, start: i64, count: i64): bool  音の標本を書き込む（runtime/audio.c）。
    * WebAssembly（ネイティブだけ。どのスレッドからも呼べる。runtime/wasm.c が wasmtime で実装する。
-   * ふつうは runtime/wasm.um の wasmLoad / wasmNew / wasmCall を使う。モジュールとインスタンスは i64 の番号）:
+   * ふつうは lib/wasm.um の wasmLoad / wasmNew / wasmCall を使う。モジュールとインスタンスは i64 の番号）:
    *   wasmCompile(bytes: u8[]): i64 | null           wasm のバイナリをコンパイルする。失敗なら null（理由は wasmError）。
    *   wasmFreeModule(module: i64): void
    *   wasmExportList(module: i64): string[]          export の一覧（形は runtime/wasm.c の um_wasm_exports）。
@@ -2789,7 +2923,7 @@ class Checker {
    *   wasmWat(text: string): u8[]                    テキスト形式（.wat）をバイナリにする。失敗なら空。
    *   wasmError(): string                            このスレッドで最後に失敗した理由。
    * 動画・音声（ネイティブだけ。どのスレッドからも呼べる。runtime/media.c が FFmpeg で実装する。
-   * ふつうは runtime/media.um の mediaOpenVideo / mediaFrame / mediaCreate などを使う。読み手と書き手は i64 の番号）:
+   * ふつうは lib/media.um の mediaOpenVideo / mediaFrame / mediaCreate などを使う。読み手と書き手は i64 の番号）:
    *   mediaOpen(path: string, kind: i32, hwaccel: string): i64 | null   kind は 0 情報だけ、1 映像、2 音。失敗なら null（理由は mediaError）。
    *   mediaClose(reader: i64): void
    *   mediaInfoNumbers(reader: i64): f64[] / mediaInfoText(reader: i64): string[]   情報（並びは runtime/media.c）。
@@ -2939,13 +3073,18 @@ class Checker {
       httpCancel: { params: [['req', I64]], ret: VOID },
       httpClose: { params: [['req', I64]], ret: VOID },
     };
-    // wasm.um の中の呼び出しは報告しない（wasm.um の関数を呼んだ所で報告する。下の wasmOnly）。
-    if (name.startsWith('wasm') && this.ptrBits === 32 && e.pos.file !== 'wasm.um') this.wasmOnly(name, e.pos);
-    if (name.startsWith('media') && this.ptrBits === 32 && e.pos.file !== 'media.um') this.mediaOnly(name, e.pos);
-    if ((name.startsWith('window') || name.startsWith('audio')) && this.ptrBits === 32) {
-      this.err('not-implemented', `\`${name}\` is only available in native programs`, e.pos,
-        'windows and audio need a desktop OS; build with `--target host` (the wasm32 target has no window)');
+    // ウィンドウの低い層の組み込み（イベントと操作の番号の受け渡し）は、ライブラリ um:window の中だけで使う。
+    if (['windowPoll', 'windowCtl', 'windowCtlF', 'windowSetText', 'windowGetText'].includes(name) && e.pos.file !== 'um:window') {
+      this.err('unknown-name', `unknown function '${name}'`, e.pos, 'use the window functions such as `pollWindowEvent` (docs/window.ja.md)');
     }
+    const lib = libOfBuiltin(name);
+    if (lib && this.curFile !== -1 && e.pos.file !== `um:${lib}` && !this.importedNames.get(this.curFile)?.has(name)) {
+      this.err('not-imported', `'${name}' is in the library "um:${lib}" and is not imported here`, e.pos, `add \`import { ${name} } from "um:${lib}";\` at the top`);
+    }
+    // um:wasm の中の呼び出しは報告しない（um:wasm の関数を呼んだ所で報告する。下の wasmOnly）。
+    if (name.startsWith('wasm') && this.ptrBits === 32 && e.pos.file !== 'um:wasm') this.wasmOnly(name, e.pos);
+    if (name.startsWith('media') && this.ptrBits === 32 && e.pos.file !== 'um:media') this.mediaOnly(name, e.pos);
+    // ウィンドウは wasm32 でも使える（ブラウザの canvas。runtime/host.mjs）。音の出力はまだない（audioOpen は null）。
     const shape = shapes[name];
     const decl: FnDecl = { kind: 'fn', name, exported: false, params: [], body: [], pos: e.pos };
     const sig: FnSig = { key: name, name, params: shape.params.map(([n, ty], i) => ({ name: n, mode: (shape.mut?.includes(i) ? 'mut' : 'none') as Mode, ty })), ret: shape.ret, exported: false, decl };
@@ -3076,7 +3215,7 @@ class Checker {
     const k = args[0].expr;
     if (k.kind === 'ident' && this.fns.has(k.name)) this.visible(k.name, k.pos);
     const sig = k.kind === 'ident' ? this.fns.get(k.name) : undefined;
-    if (args[0].mode !== 'none' || !sig || !sig.decl.isKernel) {
+    if (args[0].mode !== 'none' || !sig || !sig.decl.isKernel || sig.decl.stage) {
       this.err('type-mismatch', 'the first argument of `dispatch` must be the name of a kernel function', k.pos,
         'declare it as `kernel function name(i: u32, ...): void`');
     }
@@ -3354,6 +3493,25 @@ class Checker {
       node.args = exprs;
       return VOID;
     }
+    // ビットの並びの読み替え（値は変えず、同じビットを別の型として読む）。深度を整数のアトミック演算で比べる、など。
+    if (e.name === 'toBits' || e.name === 'fromBits') {
+      const to = e.name === 'toBits';
+      // 型の決まらない整数リテラルは u32 として読む（`Math.fromBits(0xbf800000)`）。
+      const at = !to && exprs[0].kind === 'int' && !exprs[0].fixed ? this.checkExpr(exprs[0], U32) : this.checkExpr(exprs[0]);
+      let ret: Ty | undefined;
+      if (to && at.k === 'float' && (at.bits === 32 || at.bits === 64)) ret = at.bits === 32 ? U32 : U64;
+      if (!to && at.k === 'int' && (at.bits === 32 || at.bits === 64)) ret = at.bits === 32 ? F32 : F64;
+      if (!ret) {
+        this.err('type-mismatch', to ? `\`Math.toBits\` needs f32 or f64 but found ${tyStr(at)}` : `\`Math.fromBits\` needs a 32- or 64-bit integer but found ${tyStr(at)}`, e.pos,
+          to ? 'convert first, e.g. `x as f32`' : 'use u32 for an f32 (`Math.fromBits(b as u32)`) or u64 for an f64');
+      }
+      if (at.bits === 64) this.noKernel(`\`Math.${e.name}\` on 64-bit values`, e.pos, 'kernels have no f64; use f32 and u32');
+      const node = e as unknown as { kind: string; fn: string; args: Expr[] };
+      node.kind = 'math';
+      node.fn = e.name;
+      node.args = exprs;
+      return ret;
+    }
     // マスクつきシフトは、値とシフト量の型を揃えない（量はどの整数型でもよい。値のビット幅で割った余りにする）。
     if (e.name === 'shl' || e.name === 'shr') {
       const vt = this.checkExpr(exprs[0]);
@@ -3379,6 +3537,16 @@ class Checker {
     }
     if (e.name === 'clz32') {
       this.err('ts-feature', '`Math.clz32` is not available', e.pos, 'use `Math.clz(x)`; it works on any integer type');
+    }
+    const fn = MATH_PRELUDE[e.name];
+    if (fn) {
+      // 三角関数は標準の関数の呼び出しにする。四則演算だけで計算するので、どのターゲットでも同じ値になる。
+      if (t.k === 'float' && t.bits !== 32 && t.bits !== 64) {
+        this.err('type-mismatch', `\`Math.${e.name}\` needs f32 or f64 but found ${tyStr(t)}`, e.pos, 'convert first, e.g. `x as f32`');
+      }
+      const callee = `${fn}${t.k === 'float' && t.bits === 64 ? 'F64' : 'F32'}`;
+      this.rewrite(e, { kind: 'call', callee, args: exprs.map((expr) => ({ mode: 'none', expr })) });
+      return this.infer(e);
     }
     const node = e as unknown as { kind: string; fn: string; args: Expr[] };
     node.kind = 'math';
@@ -3598,6 +3766,8 @@ class Checker {
     }
     // `gpu.loadKernel(wgsl)` / `gpu.runKernel(k, count, ...)`: 実行時に読み込む kernel（src/gpuload.ts）。
     if (isGpuLoadCall(e, (n) => this.lookup(n))) return inferGpuLoad(this, e);
+    // `gpu.beginImage` / `gpu.draw` / `gpu.endImage`: 描画（src/render.ts）。
+    if (isRenderCall(e, (n) => this.lookup(n))) return inferRender(this, e);
     if (this.isThreadCall(e)) return this.inferThread(e);
     // `Shape.Circle(1.5)`: enum の値を作る。
     if (e.recv.kind === 'ident' && !this.lookup(e.recv.name) && this.isEnumName(e.recv.name)) {
@@ -3605,7 +3775,7 @@ class Checker {
     }
     // kernel の中で使えるメソッドは、RacyBuffer のアトミック演算だけ。
     const rs = e.recv.kind === 'ident' ? this.lookup(e.recv.name) : undefined;
-    const atomic = rs?.ty.k === 'heap' && rs.ty.racy === true && ['load', 'store', 'fetchAdd', 'compareExchange'].includes(e.name);
+    const atomic = rs?.ty.k === 'heap' && rs.ty.racy === true && ['load', 'store', 'fetchAdd', 'fetchMin', 'fetchMax', 'compareExchange'].includes(e.name);
     if (!atomic) this.noKernel('a method call', e.pos);
     const rt = this.checkExpr(e.recv);
     if (rt.k === 'heap') return this.inferArrayMethod(e, rt);
@@ -3653,9 +3823,9 @@ class Checker {
         e.name === 'clear' ? 'to set every element to 0, write `b.fill(0)`'
           : 'use a growable array (`T[]`) to build the data, or allocate the final size with `new Buffer<T>(n)`');
     }
-    if (rt.racy && ['load', 'store', 'fetchAdd', 'compareExchange'].includes(e.name)) {
+    if (rt.racy && ['load', 'store', 'fetchAdd', 'fetchMin', 'fetchMax', 'compareExchange'].includes(e.name)) {
       // RacyBuffer のアトミック演算（順序は seq_cst）。書き換えるものも、読み取り借用から呼べる。
-      const n = ({ load: 1, store: 2, fetchAdd: 2, compareExchange: 3 } as Record<string, number>)[e.name];
+      const n = ({ load: 1, store: 2, fetchAdd: 2, fetchMin: 2, fetchMax: 2, compareExchange: 3 } as Record<string, number>)[e.name];
       argc(n);
       const before = new Set(this.moved);
       const it = this.checkExpr(e.args[0].expr);
@@ -3664,7 +3834,7 @@ class Checker {
       if (idx.kind === 'int' && idx.value < 0n) this.err('index-range', `index ${idx.value} is negative`, idx.pos);
       for (const a of e.args.slice(1)) this.expect(a.expr, rt.elem);
       this.notMovedSince(e.recv, before);
-      if ((e.name === 'fetchAdd' || e.name === 'compareExchange') && rt.elem.k === 'float') {
+      if (e.name !== 'load' && e.name !== 'store' && rt.elem.k === 'float') {
         this.err('type-mismatch', `\`${e.name}\` needs integer elements, but this RacyBuffer holds ${tyStr(rt.elem)}`, e.pos,
           'for f32, keep the bits in a RacyBuffer<u32> (NaN and -0 make bit equality and `==` disagree)');
       }
@@ -3734,7 +3904,7 @@ class Checker {
     const closures = ['map', 'filter', 'forEach', 'reduce', 'find', 'some', 'every', 'sort', 'findIndex', 'flatMap'];
     const hint = closures.includes(e.name)
       ? 'function values are not implemented yet; write the loop with `for (const x of xs)`'
-      : rt.racy ? 'available: load, store, fetchAdd, compareExchange, fill, clone, and the `length` property'
+      : rt.racy ? 'available: load, store, fetchAdd, fetchMin, fetchMax, compareExchange, fill, clone, and the `length` property'
       : rt.buffer ? 'available: fill, clone, and the `length` property'
       : 'available: push, pop, clear, fill, clone, and the `length` property';
     this.err('unknown-method', `arrays have no method '${e.name}'`, e.pos, hint);

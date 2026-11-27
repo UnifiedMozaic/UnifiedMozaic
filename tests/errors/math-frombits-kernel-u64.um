@@ -1,0 +1,7 @@
+// error: kernel-restriction
+kernel function k(i: u32, out: mut Buffer<u32>, src: Buffer<u64>): void {
+  out[i] = Math.fromBits(src[i]) as u32;
+}
+export function main(): i32 {
+  return 0;
+}

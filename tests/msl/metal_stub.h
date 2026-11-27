@@ -2,10 +2,18 @@
 // 生成した MSL が使う範囲だけを、Metal の意味で定義する。clang++ -std=c++14 で使う。
 // 先に標準ヘッダを include してから、このヘッダを include すること（kernel などのマクロが標準ヘッダに影響しないように）。
 // sqrt / floor / ceil / fabs / fmod / INFINITY / NAN は <cmath> のものをそのまま使う。
+// Metal と同じく float を渡せば float を返すよう、std の多重定義を名前空間なしで見えるようにする
+// （<cmath> だけでは、名前空間なしの floor(float) が C の floor(double) になり、結果が double になることがある）。
 #pragma once
 
 #include <cmath>
 #include <cstdint>
+
+using std::ceil;
+using std::fabs;
+using std::floor;
+using std::fmod;
+using std::sqrt;
 
 // アドレス空間と kernel は、C++ では何もしない。
 #define kernel
@@ -105,6 +113,17 @@ inline uint atomic_fetch_add_explicit(atomic_uint *p, uint x, memory_order) {
   p->v = old + x;
   return old;
 }
+// fetch_min / fetch_max: 小さい方 / 大きい方を書き、前の値を返す（atomic_int は符号つき、atomic_uint は符号なしで比べる）。
+template <class A, class T>
+inline T um_stub_fetch_minmax(A *p, T x, bool min) {
+  T old = p->v;
+  if (min ? x < old : x > old) p->v = x;
+  return old;
+}
+inline int atomic_fetch_min_explicit(atomic_int *p, int x, memory_order) { return um_stub_fetch_minmax(p, x, true); }
+inline uint atomic_fetch_min_explicit(atomic_uint *p, uint x, memory_order) { return um_stub_fetch_minmax(p, x, true); }
+inline int atomic_fetch_max_explicit(atomic_int *p, int x, memory_order) { return um_stub_fetch_minmax(p, x, false); }
+inline uint atomic_fetch_max_explicit(atomic_uint *p, uint x, memory_order) { return um_stub_fetch_minmax(p, x, false); }
 template <class A, class T>
 inline bool atomic_compare_exchange_weak_explicit(A *p, T *expected, T desired, memory_order, memory_order) {
   if (p->v == *expected) {

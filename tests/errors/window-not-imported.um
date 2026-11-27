@@ -1,0 +1,6 @@
+// ライブラリの名前は、import で読んでいなければ使えない（um:window も標準ではない）。
+// error: not-imported
+export function main(): i32 {
+  const w = windowOpen("x", 10, 10);
+  return 0;
+}

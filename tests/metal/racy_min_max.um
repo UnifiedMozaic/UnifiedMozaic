@@ -1,0 +1,56 @@
+// RacyBuffer の fetchMin / fetchMax を CPU と GPU で実行し、結果が一致することを確かめる。
+// 最小・最大は書く順に左右されないので、GPU の結果も CPU と同じになる。出力は不一致の個数（0）。
+// expect: 0
+// expect: 0
+// expect: 0
+
+kernel function bounds(i: u32, lo: mut RacyBuffer<i32>, hi: mut RacyBuffer<i32>, ulo: mut RacyBuffer<u32>, data: Buffer<i32>): void {
+  const b = (i % 64) as u32;
+  lo.fetchMin(b, data[i]);
+  hi.fetchMax(b, data[i]);
+  ulo.fetchMin(b, data[i] as u32);
+}
+
+function diff(a: RacyBuffer<i32>, b: RacyBuffer<i32>): u32 {
+  let bad: u32 = 0;
+  for (let i: u32 = 0; i < a.length; i++) {
+    if (a[i] != b[i]) {
+      bad += 1;
+    }
+  }
+  return bad;
+}
+
+export function main(): i32 {
+  const n: u32 = 300000;
+  let data = new Buffer<i32>(n);
+  let s: u32 = 11;
+  for (let i: u32 = 0; i < n; i++) {
+    s = s * 1664525 + 1013904223;
+    data[i] = s as i32;
+  }
+  let glo = new RacyBuffer<i32>(64);
+  let ghi = new RacyBuffer<i32>(64);
+  let gu = new RacyBuffer<u32>(64);
+  let clo = new RacyBuffer<i32>(64);
+  let chi = new RacyBuffer<i32>(64);
+  let cu = new RacyBuffer<u32>(64);
+  glo.fill(2147483647);
+  clo.fill(2147483647);
+  ghi.fill(-2147483648);
+  chi.fill(-2147483648);
+  gu.fill(0xffffffff);
+  cu.fill(0xffffffff);
+  gpu.dispatch(bounds, n, mut glo, mut ghi, mut gu, data);
+  cpu.dispatch(bounds, n, mut clo, mut chi, mut cu, data);
+  print(diff(glo, clo));
+  print(diff(ghi, chi));
+  let bad: u32 = 0;
+  for (let i: u32 = 0; i < 64; i++) {
+    if (gu[i] != cu[i]) {
+      bad += 1;
+    }
+  }
+  print(bad);
+  return 0;
+}

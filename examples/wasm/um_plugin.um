@@ -13,6 +13,7 @@
 // expect: panic code 1 at line 34
 
 import { brighten, checksum } from "./plugin/brighten.um";
+import { WasmValue, WasmLimits, wasmLoadFile, wasmNew, wasmCall, wasmFreeModule, wasmFreeInstance, wasmRead, wasmWrite } from "um:wasm";
 
 const W: i32 = 1280;
 const H: i32 = 720;

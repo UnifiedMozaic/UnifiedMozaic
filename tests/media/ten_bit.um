@@ -6,6 +6,9 @@
 // expect: frame 23 at 0.9583
 // expect: Yuv420p10 luma above 255: true
 
+import { MediaPixels, MediaRead, mediaOpenVideo, mediaFrame, mediaClose, mediaInfoOf } from "um:media";
+
+
 function near(v: i32, want: i32, tol: i32): i32 {
   if (v >= want - tol && v <= want + tol) {
     return want;

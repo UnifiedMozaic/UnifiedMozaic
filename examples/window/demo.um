@@ -1,0 +1,716 @@
+// 3D のデモ: 宝石あつめ。市松模様の広場で立方体を動かし、回る宝石を全部あつめる。
+//   移動: W A S D（か ↑ ↓）  向き: ← → かマウスのドラッグ  ジャンプ: Space  やり直し: R
+//   レイトレーシング（影と映り込み）の入り切り: T  終わり: Esc
+// シェーダ（光・市松模様・霧・レンガのテクスチャ）、宝石のインスタンス描画（8 つを 1 回の gpu.draw で）、深度テスト、
+// 画面の文字（drawText）、
+// 三角関数と行列、キーとマウスの入力を使う。
+// 影と映り込みはレイトレーシングに任せる: 普通の描画は画素ごとに見える面を決めるだけで、その画素の fragment function
+// の中で、光源の向き（影）と反射の向き（映り込み。床・宝石・立方体）に光線を飛ばす（箱と正八面体との当たり判定。T で切り替え）。
+// 同じソースが、GPU（UM_WGPU=1）でも CPU でも、ネイティブでもブラウザ（--web）でも動く（docs/render.ja.md、docs/web.ja.md）。
+//   UM_WGPU=1 node src/cli.ts build examples/window/demo.um --target host -o demo && ./demo
+//   node src/cli.ts build examples/window/demo.um --web -o demo-web   （HTTP で開く）
+// 引数に数を渡すと、そのフレーム数だけ動かして終わる（テスト用。宝石は自動で集める）。
+
+import * from "um:window";
+import { drawText, textWidth } from "um:text";
+import { textureSample } from "um:texture";
+import { mat4Translate, mat4RotateY, mat4Perspective, mat4LookAt } from "um:transform";
+
+// ---- 形 ----
+
+struct Vertex {
+  pos: vec3<f32>;
+  normal: vec3<f32>;
+  color: vec3<f32>;
+  uv: vec2<f32>;   // テクスチャの座標（2 単位で 1 枚）
+  material: f32;   // 0 色のまま、1 市松模様（地面）、2 レンガのテクスチャ（壁と柱）
+}
+
+// 頂点の配列に、軸にそろった直方体（中心 c、半分の大きさ h）を足す。
+function addBox(out: mut Vertex[], c: vec3<f32>, h: vec3<f32>, color: vec3<f32>, material: f32): void {
+  const us: f32[6] = [-1, 1, 1, -1, 1, -1];
+  const ws: f32[6] = [-1, -1, 1, -1, 1, 1];
+  for (let axis: u32 = 0; axis < 3; axis++) {
+    for (let side: u32 = 0; side < 2; side++) {
+      const s: f32 = side == 0 ? -1 : 1;
+      for (let k: u32 = 0; k < 6; k++) {
+        let p: vec3<f32> = vec3(s, us[k], ws[k]);
+        let n: vec3<f32> = vec3(s, 0, 0);
+        if (axis == 1) {
+          p = vec3(us[k], s, ws[k]);
+          n = vec3(0, s, 0);
+        } else if (axis == 2) {
+          p = vec3(us[k], ws[k], s);
+          n = vec3(0, 0, s);
+        }
+        const wp: vec3<f32> = vec3(c.x + p.x * h.x, c.y + p.y * h.y, c.z + p.z * h.z);
+        // 面の上の 2 つの座標（世界の長さ）で、テクスチャを並べる。縦は上が 0。
+        let uv: vec2<f32> = vec2(wp.z * 0.5, -wp.y * 0.5);
+        if (axis == 1) {
+          uv = vec2(wp.x * 0.5, wp.z * 0.5);
+        } else if (axis == 2) {
+          uv = vec2(wp.x * 0.5, -wp.y * 0.5);
+        }
+        out.push({ pos: wp, normal: n, color: color, uv: uv, material: material });
+      }
+    }
+  }
+}
+
+// 宝石（正八面体）。8 つの面それぞれに法線を一つ。
+function addGem(out: mut Vertex[], color: vec3<f32>): void {
+  for (let f: u32 = 0; f < 8; f++) {
+    const sx: f32 = (f & 1) != 0 ? 1 : -1;
+    const sy: f32 = (f & 2) != 0 ? 1 : -1;
+    const sz: f32 = (f & 4) != 0 ? 1 : -1;
+    const n = vec3Normalize(vec3(sx, sy * 0.7, sz));
+    out.push({ pos: vec3(sx * 0.5, 0, 0), normal: n, color: color, uv: vec2(0.0 as f32, 0), material: 0 });
+    out.push({ pos: vec3(0.0 as f32, sy * 0.8, 0), normal: n, color: color, uv: vec2(0.0 as f32, 0), material: 0 });
+    out.push({ pos: vec3(0, 0, sz * 0.5), normal: n, color: color, uv: vec2(0.0 as f32, 0), material: 0 });
+  }
+}
+
+// レンガのテクスチャ（32 × 32 の 0xAARRGGBB）。横 16・縦 8 画素のレンガを、段ごとに半分ずらして積む。
+function brickTexture(): Buffer<u32> {
+  let px = new Buffer<u32>(32 * 32);
+  for (let y: u32 = 0; y < 32; y++) {
+    for (let x: u32 = 0; x < 32; x++) {
+      const row = y / 8;
+      const sx = (x + (row % 2) * 8) % 32;
+      const mortar = y % 8 == 0 || sx % 16 == 0;
+      // レンガごとに少し明るさを変える。
+      const id = row * 2 + sx / 16;
+      const shade = 200 + (id * 37) % 56;
+      let c: u32 = 0xFFD8D2C8;
+      if (!mortar) {
+        c = 0xFF000000 | (shade << 16) | ((shade * 3 / 5) << 8) | (shade / 2);
+      }
+      px[y * 32 + x] = c;
+    }
+  }
+  return px;
+}
+
+// 影（右下にずらした暗い文字）を付けて文字を描く。
+function shadowText(frame: mut GpuImage, text: string, x: f32, y: f32, scale: f32, color: u32): void {
+  const off = Math.max(Math.floor(scale / 2), 1);
+  drawText(mut frame, text, x + off, y + off, scale, 0xFF1A2230);
+  drawText(mut frame, text, x, y, scale, color);
+}
+
+function toBuffer(vs: Vertex[]): Buffer<Vertex> {
+  let b = new Buffer<Vertex>(vs.length);
+  for (let i: usize = 0; i < vs.length; i++) {
+    b[i] = vs[i];
+  }
+  return b;
+}
+
+// ---- シェーダ ----
+
+struct Camera {
+  viewProj: mat4<f32>;
+}
+
+// 物ごとの変換と色の掛け算。
+struct Object {
+  model: mat4<f32>;
+  tint: vec3<f32>;
+  shine: f32;   // 映り込みの強さ（0 は映らない）。地面は 0.3 に決めてある
+}
+
+struct Scene {
+  light: vec3<f32>;  // 光の来る向き（長さ 1）
+  fog: vec3<f32>;    // 霧の色（背景と同じ）
+  eye: vec3<f32>;    // カメラの位置
+}
+
+struct VOut {
+  position: vec4<f32>;
+  world: vec3<f32>;
+  normal: vec3<f32>;
+  color: vec3<f32>;
+  uv: vec2<f32>;
+  material: f32;
+  shine: f32;
+}
+
+// 頂点を物の変換とカメラで動かす（2 つの vertex function が使う）。
+kernel function shade(v: Vertex, cam: Camera, obj: Object): VOut {
+  const wp = mat4MulVec(obj.model, vec4(v.pos.x, v.pos.y, v.pos.z, 1.0 as f32));
+  const wn = mat4MulVec(obj.model, vec4(v.normal.x, v.normal.y, v.normal.z, 0.0 as f32));
+  return {
+    position: mat4MulVec(cam.viewProj, wp),
+    world: vec3(wp.x, wp.y, wp.z),
+    normal: vec3(wn.x, wn.y, wn.z),
+    color: vec3(v.color.x * obj.tint.x, v.color.y * obj.tint.y, v.color.z * obj.tint.z),
+    shine: v.material > 0.5 && v.material < 1.5 ? 0.3 : obj.shine,
+    uv: v.uv,
+    material: v.material,
+  };
+}
+
+// 1 つの物を描く。
+vertex function vs(i: u32, verts: Buffer<Vertex>, cam: Camera, obj: Object): VOut {
+  return shade(verts[i], cam, obj);
+}
+
+// 同じ形をインスタンスで何回も描く（宝石）。inst 番目の物の変換は objs[inst]。
+vertex function vsMany(i: u32, inst: u32, verts: Buffer<Vertex>, cam: Camera, objs: Buffer<Object>): VOut {
+  return shade(verts[i], cam, objs[inst]);
+}
+
+// ---- レイトレーシング ----
+// 光線を当てる物は、軸にそろった箱（壁・柱・立方体）と球（宝石）。場面が小さいので、毎回すべてと当たり判定をする。
+
+// 光線を当てる物は、箱（壁・柱・立方体）と宝石（正八面体）。どちらも y 軸のまわりに回っていてよい（cos と sin を持つ）。
+// どちらも「平行な 2 枚の板にはさまれた所」をいくつか重ねた形なので、同じ方法（slab 法）で当たり判定をする。
+// 場面が小さいので、毎回すべてと判定する。
+
+struct Box {
+  center: vec3<f32>;
+  half: vec3<f32>;   // 半分の大きさ
+  cosYaw: f32;
+  sinYaw: f32;
+  color: vec3<f32>;
+}
+
+struct Gem {
+  center: vec3<f32>;
+  cosYaw: f32;
+  sinYaw: f32;
+  color: vec3<f32>;
+}
+
+// 光線を当てる物の数と、レイトレーシングを使うか（1 で使う）。
+struct Trace {
+  boxes: u32;
+  gems: u32;
+  enabled: u32;
+}
+
+// 世界の向きを、y 軸のまわりに回った物の中の向きにする（mat4RotateY の逆）。
+kernel function toLocal(v: vec3<f32>, c: f32, s: f32): vec3<f32> {
+  return vec3(c * v.x - s * v.z, v.y, s * v.x + c * v.z);
+}
+
+// 物の中の向きを、世界の向きにする（mat4RotateY）。
+kernel function toWorld(v: vec3<f32>, c: f32, s: f32): vec3<f32> {
+  return vec3(c * v.x + s * v.z, v.y, -s * v.x + c * v.z);
+}
+
+// 物の中の座標で、光線（o から向き d）が「すべての k で -1 ≤ ns[k]・p ≤ 1」の形に当たる距離と、入った面の向き。
+// 返す vec4 の x が距離（当たらないか tmax より遠ければ -1）、yzw が面の向き（長さは 1 でない）。
+kernel function convexHit(o: vec3<f32>, d: vec3<f32>, ns: vec3<f32>[4], count: u32, tmax: f32): vec4<f32> {
+  let t0: f32 = 0;
+  let t1 = tmax;
+  let normal: vec3<f32> = vec3(0.0 as f32, 1, 0);
+  for (let k: u32 = 0; k < count; k++) {
+    const n = ns[k];
+    const num = vec3Dot(n, o);
+    const den = vec3Dot(n, d);
+    if (Math.abs(den) < 1.0e-8) {
+      // 板に平行。始点が板の間になければ当たらない。
+      if (num < -1 || num > 1) {
+        return vec4(-1.0 as f32, 0, 0, 0);
+      }
+    } else {
+      let ta = (-1 - num) / den;
+      let tb = (1 - num) / den;
+      if (ta > tb) {
+        const tmp = ta;
+        ta = tb;
+        tb = tmp;
+      }
+      if (ta > t0) {
+        t0 = ta;
+        // 入った面は、光線に向いている側の板。
+        if (den < 0) {
+          normal = n;
+        } else {
+          normal = vec3(-n.x, -n.y, -n.z);
+        }
+      }
+      t1 = Math.min(t1, tb);
+      if (t0 > t1) {
+        return vec4(-1.0 as f32, 0, 0, 0);
+      }
+    }
+  }
+  return vec4(t0, normal.x, normal.y, normal.z);
+}
+
+// 箱に当たる距離と、世界の向きの面の法線。
+kernel function hitBox(o: vec3<f32>, d: vec3<f32>, b: Box, tmax: f32): vec4<f32> {
+  const ns: vec3<f32>[4] = [vec3(1 / b.half.x, 0, 0), vec3(0, 1 / b.half.y, 0), vec3(0, 0, 1 / b.half.z), vec3(0.0 as f32, 0, 0)];
+  const h = convexHit(toLocal(o - b.center, b.cosYaw, b.sinYaw), toLocal(d, b.cosYaw, b.sinYaw), ns, 3, tmax);
+  const n = toWorld(vec3(h.y, h.z, h.w), b.cosYaw, b.sinYaw);
+  return vec4(h.x, n.x, n.y, n.z);
+}
+
+// 宝石（|x| / 0.5 + |y| / 0.8 + |z| / 0.5 ≤ 1 の正八面体。addGem と同じ形）に当たる距離と、世界の向きの面の法線。
+kernel function hitGem(o: vec3<f32>, d: vec3<f32>, g: Gem, tmax: f32): vec4<f32> {
+  const ns: vec3<f32>[4] = [vec3(2.0 as f32, 1.25, 2), vec3(2.0 as f32, 1.25, -2), vec3(2.0 as f32, -1.25, 2), vec3(2.0 as f32, -1.25, -2)];
+  const h = convexHit(toLocal(o - g.center, g.cosYaw, g.sinYaw), toLocal(d, g.cosYaw, g.sinYaw), ns, 4, tmax);
+  const n = toWorld(vec3(h.y, h.z, h.w), g.cosYaw, g.sinYaw);
+  return vec4(h.x, n.x, n.y, n.z);
+}
+
+// 光線が tmax までに何かに当たるか（影の判定。当たれば、すぐやめる）。
+kernel function blocked(o: vec3<f32>, d: vec3<f32>, boxes: Buffer<Box>, gems: Buffer<Gem>, tr: Trace, tmax: f32): bool {
+  for (let i: u32 = 0; i < tr.boxes; i++) {
+    if (hitBox(o, d, boxes[i], tmax).x >= 0) {
+      return true;
+    }
+  }
+  for (let i: u32 = 0; i < tr.gems; i++) {
+    if (hitGem(o, d, gems[i], tmax).x >= 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// 光線がいちばん近くで当たった物の、光の当たった色。当たらなければ w が 0。
+kernel function reflected(o: vec3<f32>, d: vec3<f32>, boxes: Buffer<Box>, gems: Buffer<Gem>, tr: Trace, light: vec3<f32>): vec4<f32> {
+  let best: f32 = 60;
+  let color: vec3<f32> = vec3(0.0 as f32, 0, 0);
+  let normal: vec3<f32> = vec3(0.0 as f32, 1, 0);
+  let found = false;
+  for (let i: u32 = 0; i < tr.boxes; i++) {
+    const b = boxes[i];
+    const h = hitBox(o, d, b, best);
+    if (h.x >= 0 && h.x < best) {
+      best = h.x;
+      color = b.color;
+      normal = vec3(h.y, h.z, h.w);
+      found = true;
+    }
+  }
+  for (let i: u32 = 0; i < tr.gems; i++) {
+    const g = gems[i];
+    const h = hitGem(o, d, g, best);
+    if (h.x >= 0 && h.x < best) {
+      best = h.x;
+      color = g.color;
+      normal = vec3(h.y, h.z, h.w);
+      found = true;
+    }
+  }
+  if (!found) {
+    return vec4(0.0 as f32, 0, 0, 0);
+  }
+  const lit = Math.max(vec3Dot(vec3Normalize(normal), light), 0) * 0.75 + 0.25;
+  return vec4(color.x * lit, color.y * lit, color.z * lit, 1.0 as f32);
+}
+
+fragment function fs(v: VOut, scene: Scene, bricks: Buffer<u32>, boxes: Buffer<Box>, gems: Buffer<Gem>, tr: Trace): vec4<f32> {
+  let base = v.color;
+  if (v.material > 1.5) {
+    // レンガのテクスチャ（32 × 32）。色は頂点の色に掛ける。
+    const t = textureSample(bricks, 32, 32, v.uv);
+    base = vec3(base.x * t.x, base.y * t.y, base.z * t.z);
+  } else if (v.material > 0.5) {
+    // 地面の市松模様（2 マスで 1 周期）。
+    const cx = Math.floor(v.world.x * 0.5);
+    const cz = Math.floor(v.world.z * 0.5);
+    const odd = cx + cz - Math.floor((cx + cz) * 0.5) * 2;
+    if (odd > 0.5) {
+      base = vec3(base.x * 0.72, base.y * 0.72, base.z * 0.72);
+    }
+  }
+  const n = vec3Normalize(v.normal);
+  let diffuse = Math.max(vec3Dot(n, scene.light), 0);
+  if (tr.enabled != 0 && diffuse > 0) {
+    // 影: 面から光源の向きへ光線を飛ばし、何かに当たれば光は届かない。
+    const o = v.world + n * 0.02;
+    if (blocked(o, scene.light, boxes, gems, tr, 60)) {
+      diffuse = 0;
+    }
+  }
+  const lit = diffuse * 0.75 + 0.25;
+  let color: vec3<f32> = vec3(base.x * lit, base.y * lit, base.z * lit);
+  if (tr.enabled != 0 && v.shine > 0) {
+    // 映り込み: 見る向きを面で跳ね返した光線が当たった物の色（当たらなければ空の色）を、面の光沢の分だけ混ぜる。
+    const view = vec3Normalize(v.world - scene.eye);
+    const r = view - n * (2 * vec3Dot(view, n));
+    const hit = reflected(v.world + n * 0.02, r, boxes, gems, tr, scene.light);
+    let seen: vec3<f32> = scene.fog;
+    if (hit.w > 0) {
+      seen = vec3(hit.x, hit.y, hit.z);
+    }
+    // 正面から見ると弱く、浅い角度から見るほど強く映る（フレネルの近似）。
+    const c = Math.max(-vec3Dot(view, n), 0);
+    const g = (1 - c) * (1 - c) * (1 - c);
+    const k = v.shine * (0.25 + 0.75 * g);
+    color = vec3(color.x * (1 - k) + seen.x * k, color.y * (1 - k) + seen.y * k, color.z * (1 - k) + seen.z * k);
+  }
+  // 遠いほど霧の色に近づける。
+  const d = vec3Length(v.world - scene.eye);
+  const f = Math.min(Math.max((d - 18) / 30, 0), 1);
+  const r = color.x * (1 - f) + scene.fog.x * f;
+  const g = color.y * (1 - f) + scene.fog.y * f;
+  const b = color.z * (1 - f) + scene.fog.z * f;
+  return vec4(r, g, b, 1.0 as f32);
+}
+
+// ---- 遊びの状態 ----
+
+const GEMS: u32 = 8;
+const ARENA: f32 = 18;
+
+class Game {
+  x: f32 = 0;
+  y: f32 = 0;   // 高さ（地面で 0）
+  z: f32 = 6;
+  vy: f32 = 0;  // 縦の速さ
+  yaw: f32 = 0; // 向き（ラジアン。0 で -z の向き）
+  gemX: f32[8];
+  gemZ: f32[8];
+  taken: bool[8];
+  score: u32 = 0;
+  forward: bool = false;
+  back: bool = false;
+  left: bool = false;
+  right: bool = false;
+  turnL: bool = false;
+  turnR: bool = false;
+  dragging: bool = false;
+  lastMouse: i32 = 0;
+  raytrace: bool = true;
+
+  constructor() {
+    this.gemX = [0, 0, 0, 0, 0, 0, 0, 0];
+    this.gemZ = [0, 0, 0, 0, 0, 0, 0, 0];
+    this.taken = [false, false, false, false, false, false, false, false];
+    this.reset();
+  }
+
+  // 宝石を円く並べ直し、立方体を真ん中に戻す。
+  reset(): void {
+    for (let k: u32 = 0; k < GEMS; k++) {
+      const a = (k as f32) * (2 * Math.PI / (GEMS as f32));
+      const r: f32 = (k % 2 == 0) ? 12 : 7;
+      this.gemX[k] = Math.sin(a) * r;
+      this.gemZ[k] = Math.cos(a) * r;
+      this.taken[k] = false;
+    }
+    this.score = 0;
+    this.x = 0;
+    this.y = 0;
+    this.z = 0;
+    this.vy = 0;
+  }
+}
+
+// 柱（ぶつかる）。中心と半分の幅。
+const PILLAR_X: f32[4] = [-9, 9, -9, 9];
+const PILLAR_Z: f32[4] = [-9, -9, 9, 9];
+const PILLAR_H: f32 = 1.2;
+
+// 立方体（半分の幅 0.5）を柱の外に押し出す。
+function pushOut(game: mut Game): void {
+  for (let k: u32 = 0; k < 4; k++) {
+    const dx = game.x - PILLAR_X[k];
+    const dz = game.z - PILLAR_Z[k];
+    const r = PILLAR_H + 0.5;
+    if (Math.abs(dx) < r && Math.abs(dz) < r) {
+      // 食い込みの浅い向きへ戻す。
+      if (r - Math.abs(dx) < r - Math.abs(dz)) {
+        game.x = PILLAR_X[k] + (dx < 0 ? -r : r);
+      } else {
+        game.z = PILLAR_Z[k] + (dz < 0 ? -r : r);
+      }
+    }
+  }
+}
+
+function update(game: mut Game, dt: f32, auto: bool): void {
+  // 向き
+  if (game.turnL) {
+    game.yaw += 2.2 * dt;
+  }
+  if (game.turnR) {
+    game.yaw -= 2.2 * dt;
+  }
+  game.yaw = game.yaw - Math.floor(game.yaw / (2 * Math.PI)) * (2 * Math.PI);
+  // 移動（向きに合わせて）。テストでは、残っている宝石へ自動で向かう。
+  let mx: f32 = 0;
+  let mz: f32 = 0;
+  const fx = -Math.sin(game.yaw);
+  const fz = -Math.cos(game.yaw);
+  if (game.forward) {
+    mx += fx;
+    mz += fz;
+  }
+  if (game.back) {
+    mx -= fx;
+    mz -= fz;
+  }
+  if (game.left) {
+    mx += fz;
+    mz -= fx;
+  }
+  if (game.right) {
+    mx -= fz;
+    mz += fx;
+  }
+  if (auto) {
+    for (let k: u32 = 0; k < GEMS; k++) {
+      if (!game.taken[k]) {
+        mx = game.gemX[k] - game.x;
+        mz = game.gemZ[k] - game.z;
+        break;
+      }
+    }
+  }
+  const len = Math.sqrt(mx * mx + mz * mz);
+  if (len > 0.001) {
+    const speed: f32 = 7;
+    game.x += mx / len * speed * dt;
+    game.z += mz / len * speed * dt;
+  }
+  game.x = Math.min(Math.max(game.x, -ARENA + 0.5), ARENA - 0.5);
+  game.z = Math.min(Math.max(game.z, -ARENA + 0.5), ARENA - 0.5);
+  pushOut(mut game);
+  // ジャンプと重力
+  game.vy -= 22 * dt;
+  game.y += game.vy * dt;
+  if (game.y < 0) {
+    game.y = 0;
+    game.vy = 0;
+  }
+  // 宝石を取る
+  for (let k: u32 = 0; k < GEMS; k++) {
+    if (!game.taken[k]) {
+      const dx = game.gemX[k] - game.x;
+      const dz = game.gemZ[k] - game.z;
+      if (dx * dx + dz * dz < 1.1 && game.y < 1.5) {
+        game.taken[k] = true;
+        game.score++;
+      }
+    }
+  }
+}
+
+function key(game: mut Game, k: Key, down: bool): void {
+  match (k) {
+    Key.Up => { game.forward = down; }
+    Key.Down => { game.back = down; }
+    Key.Left => { game.turnL = down; }
+    Key.Right => { game.turnR = down; }
+    Key.Char(c) => {
+      if (c == 119) {
+        game.forward = down;  // w
+      } else if (c == 115) {
+        game.back = down;     // s
+      } else if (c == 97) {
+        game.left = down;     // a
+      } else if (c == 100) {
+        game.right = down;    // d
+      }
+    }
+    _ => {}
+  }
+}
+
+export function main(): i32 {
+  const opened = windowOpen("UM demo", 960, 600);
+  if (opened == null) {
+    eprint("could not open a window");
+    return 1;
+  }
+  const win = opened;
+  let limit: i32 = -1;
+  const a = args();
+  if (a.length > 0) {
+    limit = 0;
+    for (const c of a[0]) {
+      limit = limit * 10 + ((c as i32) - 48);
+    }
+  }
+
+  // 動かない物（地面・壁・柱）は 1 つの Buffer にまとめて、1 回の draw で描く。
+  let worldVerts: Vertex[] = [];
+  const ground: vec3<f32> = vec3(0.55 as f32, 0.78, 0.5);
+  worldVerts.push({ pos: vec3(-ARENA, 0, -ARENA), normal: vec3(0.0 as f32, 1, 0), color: ground, uv: vec2(0.0 as f32, 0), material: 1 });
+  worldVerts.push({ pos: vec3(ARENA, 0, -ARENA), normal: vec3(0.0 as f32, 1, 0), color: ground, uv: vec2(0.0 as f32, 0), material: 1 });
+  worldVerts.push({ pos: vec3(ARENA, 0, ARENA), normal: vec3(0.0 as f32, 1, 0), color: ground, uv: vec2(0.0 as f32, 0), material: 1 });
+  worldVerts.push({ pos: vec3(-ARENA, 0, -ARENA), normal: vec3(0.0 as f32, 1, 0), color: ground, uv: vec2(0.0 as f32, 0), material: 1 });
+  worldVerts.push({ pos: vec3(ARENA, 0, ARENA), normal: vec3(0.0 as f32, 1, 0), color: ground, uv: vec2(0.0 as f32, 0), material: 1 });
+  worldVerts.push({ pos: vec3(-ARENA, 0, ARENA), normal: vec3(0.0 as f32, 1, 0), color: ground, uv: vec2(0.0 as f32, 0), material: 1 });
+  const wall: vec3<f32> = vec3(0.85 as f32, 0.8, 0.7);
+  addBox(mut worldVerts, vec3(0.0 as f32, 0.6, -ARENA - 0.3), vec3(ARENA + 0.6, 0.6, 0.3), wall, 2);
+  addBox(mut worldVerts, vec3(0.0 as f32, 0.6, ARENA + 0.3), vec3(ARENA + 0.6, 0.6, 0.3), wall, 2);
+  addBox(mut worldVerts, vec3(-ARENA - 0.3, 0.6, 0), vec3(0.3 as f32, 0.6, ARENA), wall, 2);
+  addBox(mut worldVerts, vec3(ARENA + 0.3, 0.6, 0), vec3(0.3 as f32, 0.6, ARENA), wall, 2);
+  for (let k: u32 = 0; k < 4; k++) {
+    addBox(mut worldVerts, vec3(PILLAR_X[k], 2.0, PILLAR_Z[k]), vec3(PILLAR_H, 2.0, PILLAR_H), vec3(0.85 as f32, 0.7, 0.95), 2);
+  }
+  const world = toBuffer(worldVerts);
+  let cubeVerts: Vertex[] = [];
+  addBox(mut cubeVerts, vec3(0.0 as f32, 0.5, 0), vec3(0.5 as f32, 0.5, 0.5), vec3(0.95 as f32, 0.45, 0.3), 0);
+  const cube = toBuffer(cubeVerts);
+  let gemVerts: Vertex[] = [];
+  addGem(mut gemVerts, vec3(0.35 as f32, 0.85, 1));
+  const gem = toBuffer(gemVerts);
+  const bricks = brickTexture();
+  // 宝石のインスタンスごとの変換（毎フレーム、残っている宝石の分だけ詰めて書く）。
+  let gemObjs = new Buffer<Object>(GEMS as usize);
+  // レイトレーシングの場面: 壁 4 つ・柱 4 つ（動かない）と立方体（毎フレーム）、宝石の球（毎フレーム）。
+  let boxes = new Buffer<Box>(9);
+  boxes[0] = { center: vec3(0.0 as f32, 0.6, -ARENA - 0.3), half: vec3(ARENA + 0.6, 0.6, 0.3), cosYaw: 1, sinYaw: 0, color: wall };
+  boxes[1] = { center: vec3(0.0 as f32, 0.6, ARENA + 0.3), half: vec3(ARENA + 0.6, 0.6, 0.3), cosYaw: 1, sinYaw: 0, color: wall };
+  boxes[2] = { center: vec3(-ARENA - 0.3, 0.6, 0), half: vec3(0.3 as f32, 0.6, ARENA), cosYaw: 1, sinYaw: 0, color: wall };
+  boxes[3] = { center: vec3(ARENA + 0.3, 0.6, 0), half: vec3(0.3 as f32, 0.6, ARENA), cosYaw: 1, sinYaw: 0, color: wall };
+  for (let k: u32 = 0; k < 4; k++) {
+    boxes[4 + k] = { center: vec3(PILLAR_X[k], 2.0, PILLAR_Z[k]), half: vec3(PILLAR_H, 2.0, PILLAR_H), cosYaw: 1, sinYaw: 0, color: vec3(0.62 as f32, 0.38, 0.4) };
+  }
+  let gemShapes = new Buffer<Gem>(GEMS as usize);
+
+  const sky: vec3<f32> = vec3(0.62 as f32, 0.78, 0.95);
+  const clear: u32 = 0xFF000000 | (((sky.x * 255) as u32) << 16) | (((sky.y * 255) as u32) << 8) | ((sky.z * 255) as u32);
+  const white: vec3<f32> = vec3(1.0 as f32, 1, 1);
+  let game = new Game();
+  let shown: u32 = 999;
+  let shownRt = true;
+  let last = ticksNs();
+  let frames: i32 = 0;
+  let time: f32 = 0;
+  let running = true;
+  while (running) {
+    while (true) {
+      const e = pollWindowEvent(0);
+      if (e == null) {
+        break;
+      }
+      match (e) {
+        WindowEvent.Close(w) => { running = false; }
+        WindowEvent.Quit => { running = false; }
+        WindowEvent.KeyDown(w, k, mods, repeat) => {
+          match (k) {
+            Key.Escape => { running = false; }
+            Key.Space => {
+              if (game.y == 0) {
+                game.vy = 9;
+              }
+            }
+            Key.Char(c) => {
+              if (c == 114) {
+                game.reset();  // r
+              } else if (c == 116) {
+                game.raytrace = !game.raytrace;  // t
+              }
+            }
+            _ => {}
+          }
+          key(mut game, k, true);
+        }
+        WindowEvent.KeyUp(w, k, mods) => { key(mut game, k, false); }
+        WindowEvent.MouseDown(w, x, y, button) => {
+          game.dragging = true;
+          game.lastMouse = x;
+        }
+        WindowEvent.MouseUp(w, x, y, button) => { game.dragging = false; }
+        WindowEvent.MouseMove(w, x, y) => {
+          if (game.dragging) {
+            game.yaw -= ((x - game.lastMouse) as f32) * 0.008;
+            game.lastMouse = x;
+          }
+        }
+        _ => {}
+      }
+    }
+
+    // 時間を進める（止まっていた分を一度に進めないよう、1 フレームは 1/20 秒まで）。テストでは 1/60 秒ずつ。
+    const now = ticksNs();
+    let dt = ((now - last) as f64 / 1.0e9) as f32;
+    last = now;
+    if (limit >= 0) {
+      dt = 1.0 / 60.0;
+    }
+    dt = Math.min(dt, 0.05);
+    time += dt;
+    update(mut game, dt, limit >= 0);
+    if (game.score != shown || game.raytrace != shownRt) {
+      shown = game.score;
+      shownRt = game.raytrace;
+      let rt = "";
+      if (!game.raytrace) {
+        rt = " (ray tracing off)";
+      }
+      if (game.score == GEMS) {
+        windowSetTitle(win, `UM demo - all ${GEMS} gems! (R to play again)${rt}`);
+      } else {
+        windowSetTitle(win, `UM demo - gems ${game.score} / ${GEMS}${rt}`);
+      }
+    }
+
+    let frame = gpu.beginFrame(windowSurface(win), clear);
+    if (frames == 0 && frame.handle == 0) {
+      // CPU で描くときは、画素ごとの光線がとても重いので、レイトレーシングは切った状態で始める（T で入れられる）。
+      game.raytrace = false;
+    }
+    // カメラは立方体の後ろ上から見下ろす。
+    const back: f32 = 9;
+    const eye: vec3<f32> = vec3(game.x + Math.sin(game.yaw) * back, game.y + 5.5, game.z + Math.cos(game.yaw) * back);
+    const target: vec3<f32> = vec3(game.x, game.y + 1, game.z);
+    const aspect = (frame.width as f32) / Math.max(frame.height as f32, 1);
+    const view = mat4LookAt(eye, target, vec3(0.0 as f32, 1, 0));
+    const proj = mat4Perspective(Math.PI / 3.2, aspect, 0.3, 120);
+    const cam: Camera = { viewProj: mat4Mul(proj, view) };
+    const scene: Scene = { light: vec3Normalize(vec3(0.5 as f32, 1, 0.35)), fog: sky, eye: eye };
+
+    // 光線を当てる場面を今の位置にする（立方体と、残っている宝石）。
+    boxes[8] = { center: vec3(game.x, game.y + 0.5, game.z), half: vec3(0.5 as f32, 0.5, 0.5), cosYaw: Math.cos(game.yaw), sinYaw: Math.sin(game.yaw), color: vec3(0.95 as f32, 0.45, 0.3) };
+    let nb: u32 = 0;
+    for (let k: u32 = 0; k < GEMS; k++) {
+      if (!game.taken[k]) {
+        const bob = Math.sin(time * 2.5 + (k as f32)) * 0.25 + 1.2;
+        // 描くときと同じ位置と回転（下の gemObjs）。
+        const spin = time * 1.8 + (k as f32);
+        gemShapes[nb] = { center: vec3(game.gemX[k], bob, game.gemZ[k]), cosYaw: Math.cos(spin), sinYaw: Math.sin(spin), color: vec3(0.35 as f32, 0.85, 1) };
+        nb++;
+      }
+    }
+    const tr: Trace = { boxes: 9, gems: nb, enabled: game.raytrace ? 1 : 0 };
+    gpu.draw(mut frame, world.length as u32, vs(world, cam, { model: mat4Identity(), tint: white, shine: 0 }), fs(scene, bricks, boxes, gemShapes, tr));
+    const player: Object = { model: mat4Mul(mat4Translate(game.x, game.y, game.z), mat4RotateY(game.yaw)), tint: white, shine: 0.2 };
+    gpu.draw(mut frame, cube.length as u32, vs(cube, cam, player), fs(scene, bricks, boxes, gemShapes, tr));
+    // 残っている宝石を、インスタンスで 1 回の draw で描く。
+    let left: u32 = 0;
+    for (let k: u32 = 0; k < GEMS; k++) {
+      if (!game.taken[k]) {
+        const bob = Math.sin(time * 2.5 + (k as f32)) * 0.25 + 1.2;
+        const spin = mat4RotateY(time * 1.8 + (k as f32));
+        gemObjs[left] = { model: mat4Mul(mat4Translate(game.gemX[k], bob, game.gemZ[k]), spin), tint: white, shine: 0.45 };
+        left++;
+      }
+    }
+    if (left > 0) {
+      gpu.draw(mut frame, gem.length as u32, left, vsMany(gem, cam, gemObjs), fs(scene, bricks, boxes, gemShapes, tr));
+    }
+    // 画面の文字（影を付けて読みやすく）。大きさは画面の高さに合わせる。
+    const ui: f32 = Math.max(Math.floor((frame.height as f32) / 400), 1);
+    shadowText(mut frame, `GEMS ${game.score} / ${GEMS}`, 10 * ui, 10 * ui, 3 * ui, 0xFFFFFFFF);
+    let rtLabel = "RAY TRACING ON";
+    if (!game.raytrace) {
+      rtLabel = "RAY TRACING OFF";
+    }
+    shadowText(mut frame, rtLabel, (frame.width as f32) - textWidth(rtLabel, 2 * ui) - 10 * ui, 10 * ui, 2 * ui, 0xFFFFE08A);
+    shadowText(mut frame, "WASD/ARROWS MOVE  SPACE JUMP  T RAY TRACING  R RESET", 10 * ui, (frame.height as f32) - 24 * ui, 2 * ui, 0xFFE8F0F8);
+    if (game.score == GEMS) {
+      const big = 8 * ui;
+      shadowText(mut frame, "CLEAR!", ((frame.width as f32) - textWidth("CLEAR!", big)) * 0.5, (frame.height as f32) * 0.35, big, 0xFFFFD54A);
+    }
+    gpu.endFrame(mut frame);
+
+    frames++;
+    if (limit >= 0 && frames >= limit) {
+      running = false;
+    }
+  }
+  windowClose(win);
+  print(`gems ${game.score} / ${GEMS}`);
+  return 0;
+}

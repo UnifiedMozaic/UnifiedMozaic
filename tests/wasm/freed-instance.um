@@ -1,6 +1,9 @@
 // 解放したインスタンスの番号を使うと停止する。
 // expect: 3
-// panic: invalid wasm call (an unknown or freed module / instance, or a range outside the array) (line 20)
+// panic: invalid wasm call (an unknown or freed module / instance, or a range outside the array) (line 23)
+
+import { wasmCompile, wasmInstantiate, wasmFreeInstance, wasmInvoke, wasmWat } from "um:wasm";
+
 export function main(): i32 {
   const bytes = wasmWat("(module (func (export \"three\") (result i32) i32.const 3))");
   const m = wasmCompile(bytes);
