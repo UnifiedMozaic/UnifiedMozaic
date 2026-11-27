@@ -374,7 +374,7 @@ kernel function count(i: u32, out: mut Buffer<u32>, boards: Buffer<Bb>): void {
 
 - **意味は 32 ビットと同じ規則です。** 演算はラップし、シフト量は 64 で割った余り、ゼロ除算は `x / 0 = x`、`x % 0 = 0`、最小値 / -1 = 最小値です。`f32` からの変換は範囲外で飽和し、NaN は 0 です。64 ビットの添字は、範囲外なら最後の要素に切り詰めます。
 - **GPU で実行できるのは Metal だけです。** MSL の `long` / `ulong` をそのまま使います（Apple M4 で `tests/metal/i64.um` が CPU と全要素一致）。WGSL には 64 ビットの整数がないので、64 ビットの整数を使う kernel（呼ぶ補助の kernel を含む）は、wgpu（`UM_WGPU=1`）と wasm32 では `dispatch` / `gpu.submit` が CPU で実行し、`gpu.dispatch` はコンパイルエラー（`kernel-type`）になります。
-- **64 ビットのアトミック演算（`fetchAdd` / `compareExchange` など）は kernel の外だけです**（Apple の GPU にも 64 ビットのアトミックな加算・比較交換はありません）。kernel の中の `RacyBuffer<u64>` の `b[i]` は普通の 8 バイトの読み書きです。CPU ではちぎれませんが、Metal が 8 バイトの読み書きを 1 回で行うことは仕様では保証されていません（別の実行が同じ要素を同時に書くと、上下 32 ビットが別々の値になりうると考えてください）。
+- **64 ビットのアトミック演算（`fetchAdd` / `fetchMin` / `fetchMax` / `compareExchange` など）は kernel の外だけです**（Apple の GPU にも 64 ビットのアトミックな加算・比較交換はありません）。kernel の中の `RacyBuffer<u64>` の `b[i]` は普通の 8 バイトの読み書きです。CPU ではちぎれませんが、Metal が 8 バイトの読み書きを 1 回で行うことは仕様では保証されていません（別の実行が同じ要素を同時に書くと、上下 32 ビットが別々の値になりうると考えてください）。
 - **並び**: `i64` / `u64` は 8 バイトで 8 バイト境界です（struct の中では前に詰め物が入ります。CPU と MSL で同じ並び）。dispatch の値の引数も、GPU 側の引数の struct と同じ境界に揃えて渡します（`src/codegen.ts` の `gpuDispatch`）。
 - 例: [tests/metal/i64.um](../tests/metal/i64.um)（Metal）。
 
@@ -431,7 +431,7 @@ dispatchGroups(groupSum, n / 256, 256, mut sums, xs);
 - **`group.barrier()` はグループの全スレッドが通る場所にだけ置けます**（GPU では、通らないスレッドがあると止まりうるため）。barrier を囲む `if` / `while` / `for` の条件は、グループの全スレッドで同じ値になる式（定数、値の引数、`group.id()` / `size()` / `count()`、Buffer の長さと、それらだけから計算した変数）に限ります。型検査が控えめに確かめ、満たさなければコンパイルエラーです。barrier を含むループの中の `break` / `continue`、barrier を使う kernel の `return`、`for...of` の中の barrier も使えません。
 - **barrier は共有配列の読み書きをそろえます。** barrier なしで、ほかのスレッドが書いた共有配列の要素を読んだときの値は決まりません（メモリは壊れません）。
 - **CPU では、グループを1つずつ実行します**（グループどうしはスレッドプールで並列）。barrier の間の文を、グループの全スレッドについて順に実行し、barrier を含む文の条件はスレッド 0 の値で決めます（上の規則により全スレッドで同じ）。barrier をまたいで生きる変数はスレッドごとの置き場所に置きます。barrier を使わない kernel は、スレッドを1つずつ最後まで実行します。GPU と CPU で、足す順番が同じ計算は同じ結果になります（`tests/metal/groups.um`）。
-- **kernel の中でも `RacyBuffer` のアトミック演算 `load` / `store` / `fetchAdd` / `compareExchange` が使えます**（要素は `i32` / `u32`、`load` / `store` は `f32` も）。書き換える演算は `mut` の RacyBuffer だけです。順序は CPU では seq_cst、GPU では relaxed（Metal の `atomic_*_explicit`、WebGPU の `atomic*`）です。kernel の中でアトミック演算を使う RacyBuffer は、GPU ではアトミックな型の配列として渡し、`b[j]` の読み書きもアトミック（relaxed）になります。
+- **kernel の中でも `RacyBuffer` のアトミック演算 `load` / `store` / `fetchAdd` / `fetchMin` / `fetchMax` / `compareExchange` が使えます**（要素は `i32` / `u32`、`load` / `store` は `f32` も）。書き換える演算は `mut` の RacyBuffer だけです。順序は CPU では seq_cst、GPU では relaxed（Metal の `atomic_*_explicit`、WebGPU の `atomic*`）です。kernel の中でアトミック演算を使う RacyBuffer は、GPU ではアトミックな型の配列として渡し、`b[j]` の読み書きもアトミック（relaxed）になります。
 - **simdgroup の集計**（CPU と Metal だけ。WGSL は対応しません）: simdgroup は、グループの中の連続した 32 スレッドです（グループの大きさが 32 で割り切れなければ、最後のものは短くなります）。
   - `const s = group.simdSum(x);`（和）、`group.simdMin(x)`、`group.simdMax(x)`: 同じ simdgroup の全スレッドの x（`i32` / `u32` / `f32`）を集めた値。
   - `const y = group.simdShuffle(x, lane);`: 同じ simdgroup の lane 番目のスレッドの x（lane が simdgroup の外なら最後のスレッド）。
@@ -691,7 +691,7 @@ const sh: Shared = { tt: new RacyBuffer<u64>(n), stop: new RacyBuffer<u32>(1) };
 - **持ち手（`thread.spawn` の結果）は、`const` の宣言の初期化式としてだけ書けます。** 移動・代入・`return`・引数・フィールド・配列の要素にはできません（型 `Thread<R>` / `Threads<R>` を書けるのは、その `const` の注釈だけ）。`thread.join` は持ち手を消費し、合流しなかった持ち手は、宣言を含むブロックの終わり（`return` / `break` / `continue` で抜けるときも）で自動で合流します（戻り値は捨てる）。
 - **スレッドへの渡し方**: コピーされる型は写し、`own` は移動（スレッドが所有して返すか解放する）、修飾なしのヒープを持つ値は読み取り借用で共有します。`mut` の引数を持つ関数は起動できません。読み取り借用で貸した変数は、`const` の宣言からブロックの終わりまで（`join` のあとも）書き換え・移動・`mut` 渡しができません。合流後に書き換えるなら、起動を内側のブロック `{ ... }` に入れます。一時値は貸せません（`const` に入れてから）。
 - **複数のスレッドが書き換えられるのは `RacyBuffer` の要素だけです。** kernel の外では、`RacyBuffer` の要素は読み取り借用からでも書けます（長さと領域は変わらない）。要素の読み書き `b[i]` は順序の保証がないアトミック命令（kernel の外は relaxed）で、値は実行ごとに変わりえますが、メモリは壊れません。`for...of` と `clone()` も要素を1つずつアトミックに読みます。要素の型は `i8` / `u8` / `i16` / `u16` / `i32` / `u32` / `f32` / `i64` / `u64` です（kernel の中の `i64` / `u64` は CPU と Metal だけ。上の「kernel の中の 64 ビットの整数」）。8 / 16 ビットの要素も、隣の要素を別のスレッドが同時に書いて混ざることはありません。kernel は `mut RacyBuffer` のどの要素にも読み書きできます。
-- **アトミック演算**: `b.load(i)`、`b.store(i, v)`、`b.fetchAdd(i, v)`（前の値を返す）、`b.compareExchange(i, expected, desired)`（前の値を返す）。順序は seq_cst で、`store` より前の書き込み（`b[i]` を含む）は、その値を `load` で見たスレッドから見えます。「データを書いてから印を立てる」受け渡しにはこれを使います（`b[i]` どうしには順序がない）。`fetchAdd` / `compareExchange` は整数だけです。kernel の中でも使えます（32 ビットの要素だけ。GPU では順序は relaxed。上の「グループ（共有配列・barrier）と kernel の中のアトミック演算」）。
+- **アトミック演算**: `b.load(i)`、`b.store(i, v)`、`b.fetchAdd(i, v)`（前の値を返す）、`b.fetchMin(i, v)` / `b.fetchMax(i, v)`（小さい方 / 大きい方を書き、前の値を返す。符号つきの要素は符号つきで、符号なしは符号なしで比べる）、`b.compareExchange(i, expected, desired)`（前の値を返す）。順序は seq_cst で、`store` より前の書き込み（`b[i]` を含む）は、その値を `load` で見たスレッドから見えます。「データを書いてから印を立てる」受け渡しにはこれを使います（`b[i]` どうしには順序がない）。`fetchAdd` / `fetchMin` / `fetchMax` / `compareExchange` は整数だけです。kernel の中でも使えます（32 ビットの要素だけ。GPU では順序は relaxed。上の「グループ（共有配列・barrier）と kernel の中のアトミック演算」）。
 - **kernel の `mut RacyBuffer` には、読み取り借用の `RacyBuffer` もそのまま渡せます**（`gpu.submit(k, n, mut sh.out, sh.inp)`。kernel は領域を差し替えられないため）。`dispatch` / `gpu.submit` / `gpu.ready` / `gpu.wait` / `gpu.flags` / `gpu.commit` はどのスレッドからでも呼べ（`gpu.flags` の印はスレッドごと）、券はどのスレッドで待ってもかまいません。
 - **`print` 1回の出力（1行）はほかのスレッドと混ざりません。** `readLine()` / `inputReady()` はメインスレッドだけで使えます（ほかで呼ぶと停止）。どのスレッドで停止しても、プログラム全体が止まります（メッセージは1回）。
 - 同時に存在できるスレッドは 256 本まで（超えると停止）。スタックは 64 MiB（`UM_THREAD_STACK_MB` で変更）。起動と合流の手間は1本 10〜15 マイクロ秒（Apple M4）。
@@ -790,7 +790,7 @@ print(Math.fromBits(Math.toBits(one) + 1)); // 1 の次に大きい f32
 ```
 
 - **kernel の中でも使えます（32 ビットだけ）。** GPU では WGSL の `bitcast`、MSL の `as_type` になります。
-- **0 以上の `f32` は、ビットを `u32` として比べても大小の順が同じです。** kernel の中のアトミック演算は 32 ビットの整数だけなので、深度（0〜1）のような値は `Math.toBits` で `u32` にしてから `compareExchange` で比べます（[float_bits.um](../examples/float_bits.um) の深度テスト）。負の値も含めて比べるときは、符号のビットで分けて並べ替える必要があります。
+- **0 以上の `f32` は、ビットを `u32` として比べても大小の順が同じです。** kernel の中のアトミック演算は 32 ビットの整数だけなので、深度（0〜1）のような値は `Math.toBits` で `u32` にしてから `fetchMin` で比べます（`depth.fetchMin(p, Math.toBits(z))`。[float_bits.um](../examples/float_bits.um) の深度テスト）。負の値も含めて比べるときは、符号のビットで分けて並べ替える必要があります。
 - NaN のビットの並び（符号や payload）は、GPU では CPU と揃うとは限りません（[wgpu での GPU 実行](wgpu.ja.md)の「残る違い」）。
 
 ## マスクつきシフトと範囲チェックの除去

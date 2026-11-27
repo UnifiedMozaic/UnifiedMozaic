@@ -21,7 +21,7 @@ interface BufferRef {
   ptr: string;
   len: string;
   /**
-   * アトミックに読み書きする RacyBuffer（kernel の中で load / store / fetchAdd / compareExchange を使うもの）。
+   * アトミックに読み書きする RacyBuffer（kernel の中で load / store / fetchAdd / fetchMin / fetchMax / compareExchange を使うもの）。
    * ポインタは atomic_int（i32）か atomic_uint（u32、f32 はビット列）を指し、要素の読み書きもすべてアトミック（relaxed）にする。
    */
   atomic?: { elem: Ty };
@@ -309,6 +309,10 @@ class Emitter {
         return this.atomicStore(ref, i, a[0]);
       case 'fetchAdd':
         return `atomic_fetch_add_explicit(${this.atomicPlace(ref, i)}, ${a[0]}, memory_order_relaxed)`;
+      case 'fetchMin':
+        return `atomic_fetch_min_explicit(${this.atomicPlace(ref, i)}, ${a[0]}, memory_order_relaxed)`;
+      case 'fetchMax':
+        return `atomic_fetch_max_explicit(${this.atomicPlace(ref, i)}, ${a[0]}, memory_order_relaxed)`;
       case 'compareExchange': {
         const signed = (ref.atomic.elem as Ty & { k: 'int' }).signed;
         return `${signed ? 'um_cas_i' : 'um_cas_u'}(${this.atomicPlace(ref, i)}, ${a[0]}, ${a[1]})`;
@@ -833,7 +837,7 @@ class Emitter {
 }
 
 /**
- * kernel の本体で、アトミック演算（load / store / fetchAdd / compareExchange）を使う `mut RacyBuffer` の引数。
+ * kernel の本体で、アトミック演算（load / store / fetchAdd / fetchMin / fetchMax / compareExchange）を使う `mut RacyBuffer` の引数。
  * これらは GPU 側でアトミックな型の配列として受け取り、要素の読み書きもすべてアトミックにする。
  */
 export function atomicParams(d: FnDecl): Set<number> {

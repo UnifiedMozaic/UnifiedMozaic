@@ -3667,7 +3667,7 @@ class Checker {
     }
     // kernel の中で使えるメソッドは、RacyBuffer のアトミック演算だけ。
     const rs = e.recv.kind === 'ident' ? this.lookup(e.recv.name) : undefined;
-    const atomic = rs?.ty.k === 'heap' && rs.ty.racy === true && ['load', 'store', 'fetchAdd', 'compareExchange'].includes(e.name);
+    const atomic = rs?.ty.k === 'heap' && rs.ty.racy === true && ['load', 'store', 'fetchAdd', 'fetchMin', 'fetchMax', 'compareExchange'].includes(e.name);
     if (!atomic) this.noKernel('a method call', e.pos);
     const rt = this.checkExpr(e.recv);
     if (rt.k === 'heap') return this.inferArrayMethod(e, rt);
@@ -3715,9 +3715,9 @@ class Checker {
         e.name === 'clear' ? 'to set every element to 0, write `b.fill(0)`'
           : 'use a growable array (`T[]`) to build the data, or allocate the final size with `new Buffer<T>(n)`');
     }
-    if (rt.racy && ['load', 'store', 'fetchAdd', 'compareExchange'].includes(e.name)) {
+    if (rt.racy && ['load', 'store', 'fetchAdd', 'fetchMin', 'fetchMax', 'compareExchange'].includes(e.name)) {
       // RacyBuffer のアトミック演算（順序は seq_cst）。書き換えるものも、読み取り借用から呼べる。
-      const n = ({ load: 1, store: 2, fetchAdd: 2, compareExchange: 3 } as Record<string, number>)[e.name];
+      const n = ({ load: 1, store: 2, fetchAdd: 2, fetchMin: 2, fetchMax: 2, compareExchange: 3 } as Record<string, number>)[e.name];
       argc(n);
       const before = new Set(this.moved);
       const it = this.checkExpr(e.args[0].expr);
@@ -3726,7 +3726,7 @@ class Checker {
       if (idx.kind === 'int' && idx.value < 0n) this.err('index-range', `index ${idx.value} is negative`, idx.pos);
       for (const a of e.args.slice(1)) this.expect(a.expr, rt.elem);
       this.notMovedSince(e.recv, before);
-      if ((e.name === 'fetchAdd' || e.name === 'compareExchange') && rt.elem.k === 'float') {
+      if (e.name !== 'load' && e.name !== 'store' && rt.elem.k === 'float') {
         this.err('type-mismatch', `\`${e.name}\` needs integer elements, but this RacyBuffer holds ${tyStr(rt.elem)}`, e.pos,
           'for f32, keep the bits in a RacyBuffer<u32> (NaN and -0 make bit equality and `==` disagree)');
       }
@@ -3796,7 +3796,7 @@ class Checker {
     const closures = ['map', 'filter', 'forEach', 'reduce', 'find', 'some', 'every', 'sort', 'findIndex', 'flatMap'];
     const hint = closures.includes(e.name)
       ? 'function values are not implemented yet; write the loop with `for (const x of xs)`'
-      : rt.racy ? 'available: load, store, fetchAdd, compareExchange, fill, clone, and the `length` property'
+      : rt.racy ? 'available: load, store, fetchAdd, fetchMin, fetchMax, compareExchange, fill, clone, and the `length` property'
       : rt.buffer ? 'available: fill, clone, and the `length` property'
       : 'available: push, pop, clear, fill, clone, and the `length` property';
     this.err('unknown-method', `arrays have no method '${e.name}'`, e.pos, hint);

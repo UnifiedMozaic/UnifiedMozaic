@@ -1,0 +1,7 @@
+// error: kernel-type
+kernel function k(i: u32, r: mut RacyBuffer<u64>): void {
+  r.fetchMax(0, i as u64);
+}
+export function main(): i32 {
+  return 0;
+}

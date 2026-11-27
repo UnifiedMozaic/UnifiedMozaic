@@ -88,7 +88,7 @@ interface BufferRef {
   /** 8 / 16 ビットの要素。WGSL には 8 / 16 ビットの整数がないので、u32 の語に詰めて持ち、読み書きの関数を通す。 */
   small?: { bits: number; signed: boolean };
   /**
-   * アトミックに読み書きする RacyBuffer（kernel の中で load / store / fetchAdd / compareExchange を使うもの）。
+   * アトミックに読み書きする RacyBuffer（kernel の中で load / store / fetchAdd / fetchMin / fetchMax / compareExchange を使うもの）。
    * array<atomic<i32>> か array<atomic<u32>>（f32 はビット列）で持ち、要素の読み書きもすべて atomicLoad / atomicStore にする。
    */
   atomic?: { elem: Ty };
@@ -373,6 +373,10 @@ class Emitter {
         return this.atomicStore(ref, i, a[0]);
       case 'fetchAdd':
         return `atomicAdd(&${ref.global}[um_clamp(${i}, ${ref.len})], ${a[0]})`;
+      case 'fetchMin':
+        return `atomicMin(&${ref.global}[um_clamp(${i}, ${ref.len})], ${a[0]})`;
+      case 'fetchMax':
+        return `atomicMax(&${ref.global}[um_clamp(${i}, ${ref.len})], ${a[0]})`;
       case 'compareExchange':
         this.uses.add(`um_cas_${ref.global}`);
         return `um_cas_${ref.global}(${i}, ${a[0]}, ${a[1]})`;

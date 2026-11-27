@@ -10,7 +10,13 @@
 // expect: 0.0015106201171875
 
 // 深度テスト: 同じ画素に重なる点のうち、いちばん近い（深度の小さい）ものを残す。
+// fetchMin は、小さい方を1回のアトミック演算で書く（GPU では atomicMin）。
 kernel function depthTest(i: u32, depth: mut RacyBuffer<u32>, pixel: Buffer<u32>, z: Buffer<f32>): void {
+  depth.fetchMin(pixel[i], Math.toBits(z[i]));
+}
+
+// 同じことを compareExchange で書いたもの（読んで、小さければ書き、ほかのスレッドに先を越されたらやり直す）。
+kernel function depthTestCas(i: u32, depth: mut RacyBuffer<u32>, pixel: Buffer<u32>, z: Buffer<f32>): void {
   const p = pixel[i];
   const mine = Math.toBits(z[i]);
   let old = depth.load(p);
@@ -45,6 +51,9 @@ export function main(): i32 {
   let depth = new RacyBuffer<u32>(16);
   depth.fill(Math.toBits(one));
   dispatch(depthTest, n, mut depth, pixel, z);
+  let depthCas = new RacyBuffer<u32>(16);
+  depthCas.fill(Math.toBits(one));
+  dispatch(depthTestCas, n, mut depthCas, pixel, z);
 
   // CPU で順に求めたものと比べる。
   let want = new Array<f32>(16);
@@ -54,7 +63,7 @@ export function main(): i32 {
   }
   let same = true;
   for (let p: u32 = 0; p < 16; p++) {
-    if (Math.fromBits(depth[p]) != want[p]) {
+    if (Math.fromBits(depth[p]) != want[p] || depthCas[p] != depth[p]) {
       same = false;
     }
   }

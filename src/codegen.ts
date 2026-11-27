@@ -5389,7 +5389,7 @@ class FnGen {
     this.check(bad, PANIC_THREAD_IO, line);
   }
 
-  /** RacyBuffer のアトミック演算（load / store / fetchAdd / compareExchange、順序は seq_cst）。 */
+  /** RacyBuffer のアトミック演算（load / store / fetchAdd / fetchMin / fetchMax / compareExchange、順序は seq_cst）。 */
   racyAtomic(e: Expr & { kind: 'mcall' }): string {
     const elem = (e.recv.ty as Ty & { k: 'heap' }).elem;
     const t = llTy(elem);
@@ -5409,6 +5409,14 @@ class FnGen {
       case 'fetchAdd':
         this.emit(`${v} = atomicrmw add ptr ${p}, ${t} ${vals[0]} seq_cst, align ${al}`);
         return v;
+      case 'fetchMin':
+      case 'fetchMax': {
+        // 小さい方 / 大きい方を書き、前の値を返す。符号つきかどうかで比べ方が変わる。
+        const signed = (elem as Ty & { k: 'int' }).signed;
+        const op = `${signed ? '' : 'u'}${e.name === 'fetchMin' ? 'min' : 'max'}`;
+        this.emit(`${v} = atomicrmw ${op} ptr ${p}, ${t} ${vals[0]} seq_cst, align ${al}`);
+        return v;
+      }
       case 'compareExchange': {
         const r = this.tmp();
         this.emit(`${r} = cmpxchg ptr ${p}, ${t} ${vals[0]}, ${t} ${vals[1]} seq_cst seq_cst, align ${al}`);
