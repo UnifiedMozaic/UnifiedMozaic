@@ -465,6 +465,7 @@ typedef struct {
   int has_ahead;
   int flushing;    // demuxer が終わり、復号器に終わりを伝えた
   int dec_eof;     // 復号器が終わった
+  int touched;     // 開いてから、読んだかシークしたか（開いた直後の位置は、ストリームの先頭）
   int64_t start;   // ストリームの最初の時刻（ストリームの時間の単位）
   int64_t next_pts;  // 時刻のないコマのための、次のコマの推定の時刻
   int64_t frame_dur; // 1 コマの長さの既定（ストリームの時間の単位）
@@ -897,6 +898,10 @@ static int seek_video(um_reader *r, int64_t ts) {
     double gap = (double)(ts - r->cur->pts) * av_q2d(r->st->time_base);
     if ((e && e->timestamp <= r->cur->pts) || gap < 0.5) forward = 1;
   }
+  // 開いた直後で目標が先頭の近く: 先頭から読む（シークしない）。パイプの形式（jpeg_pipe など）は、
+  // 最初の読み込み（2 KB）より大きなファイルで先頭へのシークが効かず、1 枚の画像を読み落としていた。
+  if (!r->touched && !r->has_cur && !r->has_ahead && (double)(ts - r->start) * av_q2d(r->st->time_base) < 0.5) forward = 1;
+  r->touched = 1;
   int64_t seek_ts = ts;
   int seeked = 0;
   if (!forward) {
