@@ -10,6 +10,8 @@
 //                      arm64-macos はオブジェクト生成まで確認。
 //   tests/gpu/*.um     GPU（WebGPU）用のテスト。ここでは wasm32 向けにコンパイルして WGSL を生成し、
 //                      CPU だけで実行して `// expect:` と照合する。GPU での実行はブラウザで行う。
+//                      `// wgsl-has: kernel 文字列` / `// wgsl-lacks: kernel 文字列` があれば、その kernel の WGSL に
+//                      文字列がある / ないことを確かめる。
 //   tests/msl/         MSL の出力を、Metal なしで確かめる。clang++ があれば: tests/gpu と examples の kernel の MSL を
 //                      スタブヘッダ（metal_stub.h）つきで C++14 として構文検査し、tests/msl/kernels.um の kernel の MSL を
 //                      C++ として実行して、CPU 実行（ネイティブ）とチェックサムを比べる。Metal コンパイラでの確認ではない。
@@ -427,6 +429,17 @@ for (const f of files('tests/gpu')) {
       // 生成物の形だけの確認（括弧の対応）。WGSL として正しいかはブラウザでの実行で確かめる。
       const depth = [...text].reduce((d, c) => d + (c === '{' ? 1 : c === '}' ? -1 : 0), 0);
       if (depth !== 0 || !text.includes('fn um_main(')) throw new Error(`malformed WGSL for kernel '${name}'`);
+    }
+    // `// wgsl-has: kernel 文字列` / `// wgsl-lacks: kernel 文字列`: その kernel の WGSL に文字列がある / ない。
+    for (const [key, want] of [['wgsl-has', true], ['wgsl-lacks', false]] as const) {
+      for (const d of directives(src, key)) {
+        const sp = d.indexOf(' ');
+        const name = d.slice(0, sp);
+        const text = d.slice(sp + 1);
+        const wgsl = shaders.get(name);
+        if (wgsl === undefined) throw new Error(`${key}: no WGSL for kernel '${name}'`);
+        if (wgsl.includes(text) !== want) throw new Error(`${key}: the WGSL of kernel '${name}' ${want ? 'lacks' : 'has'} '${text}'`);
+      }
     }
     const w = await runWasm(src, tag);
     if (w.panic) fail(`${f} [wasm32, CPU only]`, w.panic);

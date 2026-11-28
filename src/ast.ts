@@ -179,6 +179,11 @@ export interface FnDecl {
   /** GPUでも実行できる関数。本体に制限があり、整数演算と添字はGPUと同じ意味になる。 */
   isKernel?: boolean;
   /**
+   * `fast kernel function`。dispatch で GPU に送るとき、浮動小数点を GPU のふつうの計算にする（呼ぶ補助の kernel も含む）。
+   * CPU で実行するときの計算は変わらない。
+   */
+  fastMath?: boolean;
+  /**
    * 描画のシェーダ（`vertex function` / `fragment function`）。kernel と同じ制限を持ち（isKernel も立つ）、
    * gpu.draw の中でだけ使える（src/render.ts）。
    */

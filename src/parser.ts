@@ -250,6 +250,11 @@ class Parser {
   decl(): Decl {
     const pos = this.pos();
     const exported = this.eatK('export');
+    // `fast kernel function`: GPU のふつうの浮動小数点の計算を使う kernel。fast は予約語ではなく、すぐ後ろに kernel function があるときだけの印。
+    if (this.tok.kind === 'ident' && this.tok.text === 'fast' && this.toks[this.i + 1]?.text === 'kernel' && this.toks[this.i + 2]?.text === 'function') {
+      this.i += 3;
+      return { ...this.fnDecl(pos, false), isKernel: true, fastMath: true, importable: exported };
+    }
     if (this.isK('kernel') && this.toks[this.i + 1]?.text === 'function') {
       this.i += 2;
       // kernel の export は「他のファイルから import できる」という意味だけを持つ。

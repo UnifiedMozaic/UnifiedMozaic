@@ -1,0 +1,41 @@
+// `fast kernel function`: GPU に送るとき、浮動小数点を GPU のふつうの計算にする（呼ぶ補助の kernel も）。
+// WGSL に正確な丸めの関数（um_fdiv / um_fsqrt / um_fmul）が出ないことと、印のない kernel には出ることを確かめる。
+// 結果は四捨五入して整数にするので、GPU で数 ULP ずれても同じ値になる。
+// wgsl-lacks: scale um_fdiv
+// wgsl-lacks: scale um_fsqrt
+// wgsl-lacks: scale um_fmul
+// wgsl-has: exact um_fdiv
+// wgsl-has: exact um_fsqrt
+// expect: 2500
+// expect: 2500
+kernel function half(x: f32): f32 {
+  return x / 2.0;
+}
+
+fast kernel function scale(i: u32, out: mut Buffer<u32>): void {
+  const x = i as f32;
+  out[i] = Math.floor(half(Math.sqrt(x * x)) + 0.5) as u32;
+}
+
+kernel function exact(i: u32, out: mut Buffer<u32>): void {
+  const x = i as f32;
+  out[i] = Math.floor(half(Math.sqrt(x * x)) + 0.5) as u32;
+}
+
+function total(xs: Buffer<u32>): u32 {
+  let s: u32 = 0;
+  for (const v of xs) {
+    s += v;
+  }
+  return s;
+}
+
+export function main(useGpu: i32): i32 {
+  let a = new Buffer<u32>(100);
+  dispatch(scale, a.length, mut a);
+  print(total(a));
+  let b = new Buffer<u32>(100);
+  dispatch(exact, b.length, mut b);
+  print(total(b));
+  return 0;
+}

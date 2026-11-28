@@ -115,7 +115,7 @@ class Emitter {
   /** 共有配列をグループの始めに 0 で埋める文（um_main の先頭に置く）。 */
   workgroupInit: string[] = [];
   /**
-   * GPU のふつうの計算を使うか（描画のシェーダで UM_SHADER_FAST_MATH=1 のとき）。浮動小数点の割り算・平方根を
+   * GPU のふつうの計算を使うか（描画のシェーダで UM_SHADER_FAST_MATH=1 のときと、`fast kernel function` の dispatch）。浮動小数点の割り算・平方根を
    * GPU の命令のままにし、掛け算・足し算・引き算を FMA にまとめたり組み替えたりしてよいことにする。速いが、CPU と結果が少し変わる。
    */
   fast = false;
@@ -1142,5 +1142,8 @@ const HELPERS: Record<string, string[]> = {
 };
 
 export function emitWgsl(prog: Program, kernel: FnDecl, groups = false): WgslKernel {
-  return new Emitter(prog).kernel(kernel, groups);
+  const e = new Emitter(prog);
+  // `fast kernel function` は、呼ぶ補助の kernel も含めて GPU のふつうの計算にする。
+  e.fast = kernel.fastMath === true;
+  return e.kernel(kernel, groups);
 }
