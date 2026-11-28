@@ -81,7 +81,7 @@ Windows で exe にアイコンを付けるには、`llvm-rc`（LLVM に入っ�
 | 分類 | 内容 |
 | --- | --- |
 | 型 | `i8`〜`i64`、`u8`〜`u64`、`usize`、`f4`、`f8`、`f16`、`f32`、`f64`、`bool`、`string`、`struct`、`enum`（値つき。`match` で分岐）、`class`、固定長配列 `T[N]`、可変長配列 `T[]`（`Array<T>` と同じ）、`Buffer<T>`、`RacyBuffer<T>`、`T \| null`、標準の `Result<T, E>`、ベクトルと行列 `vec2<T>`〜`vec4<T>` / `mat2<T>`〜`mat4<T>`、SIMD の `i8x16` など |
-| 宣言 | `function`、`export function`、`kernel function`、描画のシェーダの `vertex function` / `fragment function`（[描画](render.ja.md)）、`struct`、`enum`、`class`（フィールド、初期値、`constructor`、メソッド、`private`、`implements`）、`interface`、ジェネリックな関数・struct・class・enum・kernel、最上位の定数 `const NAME: T = 定数式;`（`export const` も可）、`import { a, b } from "./x.um";` |
+| 宣言 | `function`、`export function`、`kernel function`（速い計算の `fast kernel function`）、描画のシェーダの `vertex function` / `fragment function`（[描画](render.ja.md)）、`struct`、`enum`、`class`（フィールド、初期値、`constructor`、メソッド、`private`、`implements`）、`interface`、ジェネリックな関数・struct・class・enum・kernel、最上位の定数 `const NAME: T = 定数式;`（`export const` も可）、`import { a, b } from "./x.um";` |
 | 文 | `let` / `const`（`let x: T;` はゼロで初期化）、代入と複合代入、`++` / `--`、`if` / `else`、`while`、`do ... while`、`for (;;)`、`for...of`、`switch`、`match`、`break`、`continue`、`return` |
 | 式 | 四則演算と剰余、比較、`&&` / `\|\|` / `!`、条件式 `a ? b : c`、`x ?? 既定値`、ビット演算とシフト、`as` による変換、関数とメソッドの呼び出し、`new`、`this`、フィールドと添字、オブジェクトリテラル、配列リテラル、`new Array<T>(n)`、`xs.length`、テンプレート文字列 `` `x = ${x}` ``、`String(x)` |
 | 配列のメソッド | `push`、`pop`、`clear`、`clone`、一括の書き込み `fill(v)` / `fill(v, start, end)`（Buffer / RacyBuffer にも。下の「一括の書き込み」） |
@@ -323,7 +323,7 @@ consume(own b);    // 所有権ごと渡す
 
 ## kernel と Buffer
 
-`kernel function` は、GPU でも実行できる関数です。`dispatch(kernel, 個数, 引数...)` で、0 から個数未満の各添字について実行します。CPU で実行しても GPU で実行しても同じ結果になるように意味を決めてあります。ネイティブの CPU では、大きな dispatch を複数のスレッドに分けて実行します。
+`kernel function` は、GPU でも実行できる関数です。`dispatch(kernel, 個数, 引数...)` で、0 から個数未満の各添字について実行します。CPU で実行しても GPU で実行しても同じ結果になるように意味を決めてあります（`fast kernel function` は浮動小数点が少し変わります。下の「速い計算の kernel」）。ネイティブの CPU では、大きな dispatch を複数のスレッドに分けて実行します。
 
 ```ts
 struct Particle {
@@ -353,6 +353,28 @@ export function main(): i32 {
 - **CPU と GPU を同時に走らせるには `gpu.submit` を使います**（下の「Metal（Mac）での GPU 実行」）。
 
 例: [examples/kernels.um](../examples/kernels.um)、[examples/particles_kernel.um](../examples/particles_kernel.um)、[examples/parallel_kernels.um](../examples/parallel_kernels.um)。
+
+### 速い計算の kernel（`fast kernel function`）
+
+ふつうの kernel は、GPU でも CPU と同じ値になるよう、浮動小数点の割り算と平方根を整数の演算で正しく丸め、掛け算と足し算を FMA にまとめさせず、組み替えさせません（[wgpu での GPU 実行](wgpu.ja.md)の「CPU と GPU で同じ結果にするために」）。割り算や平方根の多い大きな kernel（光線の計算など）では、そのぶん GPU のシェーダが大きくなり、最初の実行のときの翻訳（パイプラインの作成）も遅くなります。
+
+`kernel function` の前に `fast` を付けると、その kernel を GPU で実行するときは、GPU のふつうの浮動小数点の計算を使います。
+
+```ts
+fast kernel function trace(i: u32, color: mut Buffer<vec4<f32>>, scene: Scene): void {
+  // 割り算・平方根は GPU の命令のまま。掛け算と足し算は FMA にまとめたり組み替えたりしてよい。
+}
+```
+
+- **GPU の結果は CPU と少し変わります**（割り算・平方根は数 ULP の誤差を許し、FMA や組み替えで丸めが変わる）。値をビットまで揃えたい計算（集計、シミュレーションの状態、テストで比べる値）には付けないでください。
+- **CPU で実行するとき（`cpu.dispatch`、GPU のないビルドや環境）の計算は変わりません。** ふつうの kernel と同じです。
+- **dispatch する kernel の印が、呼ぶ補助の kernel にも効きます。** `fast` の kernel から呼んだ補助の kernel も速い計算になり、`fast` のない kernel から呼べば正確な計算のままです（補助の kernel に付けた `fast` は、それ自身を dispatch するときだけ意味を持ちます）。
+- WGSL（wgpu とブラウザの WebGPU）では、割り算・平方根・掛け算・足し算を GPU の命令のまま出します。Metal では、MSL を `math_mode(fast)` にし、速い計算の設定でコンパイルします（Metal での実行はまだ確かめていません）。
+- 三角関数（`Math.sin` など）は、印があっても CPU と同じ計算のままです。
+- `fast` は予約語ではありません（すぐ後ろに `kernel function` があるときだけの印です）。
+- 描画のシェーダ（vertex / fragment function）は、この印ではなく、ビルドのときの `UM_SHADER_FAST_MATH=1` で速くします（[描画](render.ja.md)の「速いシェーダの計算」）。
+
+例: [tests/gpu/fast_kernel.um](../tests/gpu/fast_kernel.um)。大きな光線の kernel（3D のレースゲームの画面全体の光線の計算）で、ネイティブの wgpu（Windows、NVIDIA）の最初の dispatch が、約 174 秒から約 2 秒になりました（翻訳を含む）。
 
 ### kernel の中の 64 ビットの整数
 

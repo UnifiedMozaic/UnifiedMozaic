@@ -87,7 +87,7 @@ WebGPU（Vulkan・Direct3D 12・Metal）は、浮動小数点の割り算と平�
 - **共有配列は、グループの始めに WGSL の中で 0 で埋めます**（WebGPU の仕様でも 0 ですが、NVIDIA の Vulkan で 0 にならないことがあったため）。
 - 範囲外の添字の切り詰め、ゼロ除算（`x / 0 = x`、`x % 0 = 0`）、シフト量の剰余、浮動小数点から整数への飽和する変換は、wasm32 の WebGPU と同じ WGSL です。
 
-描画のシェーダ（vertex / fragment function）は、ビルドのときの `UM_SHADER_FAST_MATH=1` で、これらをやめて GPU のふつうの計算にできます（[描画](render.ja.md)の「速いシェーダの計算」。kernel は変わりません）。
+描画のシェーダ（vertex / fragment function）は、ビルドのときの `UM_SHADER_FAST_MATH=1` で、これらをやめて GPU のふつうの計算にできます（[描画](render.ja.md)の「速いシェーダの計算」）。kernel は、`fast kernel function` と書いたものだけ GPU のふつうの計算になります（[ガイド](guide.ja.md)の「速い計算の kernel」）。
 
 **残る違い:** GPU によっては、非正規化数（絶対値が 2^-126 未満の `f32`）を足し算・掛け算の入力や結果で 0 にすることがあります（Vulkan・Direct3D の仕様で許されています）。非正規化数の値を CPU と GPU で揃える必要がある計算では、`cpu.dispatch` を使ってください。NaN のビットの並び（符号や payload）も揃うとは限りません（NaN であることは同じです）。
 

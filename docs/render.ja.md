@@ -204,7 +204,7 @@ UM_SHADER_FAST_MATH=1 node src/cli.ts build game.um --web -o game-web
 
 - 割り算と平方根は GPU の命令のまま（WebGPU は数 ULP の誤差を許す）。掛け算と足し算は FMA にまとめたり、順を組み替えたりしてよい。
 - 速くなるが、GPU の絵と CPU の絵が少し変わる（色が 1 / 255 ほど違う画素が出る）。どの画素を塗るかは、もともと GPU が決めるので、描画の結果はこの指定がなくてもビットまで同じにはならない。
-- **kernel（`dispatch`）は変わらない。** 正確な計算のまま、CPU と GPU で同じ値になる。
+- **kernel（`dispatch`）は変わらない。** 正確な計算のまま、CPU と GPU で同じ値になる。kernel を速い計算にするには、kernel ごとに `fast kernel function` と書く（[ガイド](guide.ja.md)の「速い計算の kernel」）。
 - CPU で描くとき（GPU がないとき）の計算は変わらない。
 
 ## 仕組み（GPU）
