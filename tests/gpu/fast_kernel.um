@@ -6,6 +6,9 @@
 // wgsl-lacks: scale um_fmul
 // wgsl-has: exact um_fdiv
 // wgsl-has: exact um_fsqrt
+// msl-has: scale // um:fast-math
+// msl-has: scale #pragma METAL fp math_mode(fast)
+// msl-has: exact #pragma METAL fp math_mode(safe)
 // expect: 2500
 // expect: 2500
 kernel function half(x: f32): f32 {

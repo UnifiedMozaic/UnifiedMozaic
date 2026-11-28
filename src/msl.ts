@@ -679,14 +679,29 @@ class Emitter {
         '  }',
       ];
 
+    // `fast kernel function` は、GPU のふつうの計算（近似と積和の融合を許す）にする。1 行目の印を見て、
+    // ランタイムもコンパイルの設定を速い計算にする（runtime/metal.m の um_metal_options）。
+    const head = d.fastMath
+      ? [
+        MSL_FAST_MATH_MARK,
+        `// UnifiedMozaic が kernel '${d.name}' から生成した MSL。手で編集しない。`,
+        '// fast kernel function なので、浮動小数点は GPU のふつうの計算にする（CPU と少し違う値になる）。',
+        '#include <metal_stdlib>',
+        'using namespace metal;',
+        '#pragma METAL fp math_mode(fast)',
+        '#pragma METAL fp contract(fast)',
+      ]
+      : [
+        `// UnifiedMozaic が kernel '${d.name}' から生成した MSL。手で編集しない。`,
+        '// 浮動小数点は CPU と同じ結果にするため、高速化の近似と積和の融合を切る。',
+        '// （MTLCompileOptions の fastMathEnabled = false か、コンパイラの -fno-fast-math も併せて指定すること）',
+        '#include <metal_stdlib>',
+        'using namespace metal;',
+        '#pragma METAL fp math_mode(safe)',
+        '#pragma METAL fp contract(off)',
+      ];
     return [
-      `// UnifiedMozaic が kernel '${d.name}' から生成した MSL。手で編集しない。`,
-      '// 浮動小数点は CPU と同じ結果にするため、高速化の近似と積和の融合を切る。',
-      '// （MTLCompileOptions の fastMathEnabled = false か、コンパイラの -fno-fast-math も併せて指定すること）',
-      '#include <metal_stdlib>',
-      'using namespace metal;',
-      '#pragma METAL fp math_mode(safe)',
-      '#pragma METAL fp contract(off)',
+      ...head,
       '',
       ...this.out,
       'struct UmParams {',
@@ -913,6 +928,9 @@ export function atomicParams(d: FnDecl): Set<number> {
   d.body.forEach(st);
   return ids;
 }
+
+/** `fast kernel function` の MSL の 1 行目。runtime/metal.m がこれを見て、速い計算の設定でコンパイルする。 */
+export const MSL_FAST_MATH_MARK = '// um:fast-math';
 
 export function emitMsl(prog: Program, kernel: FnDecl, groups = false): string {
   return new Emitter(prog).kernel(kernel, groups);

@@ -11,7 +11,7 @@
 //   tests/gpu/*.um     GPU（WebGPU）用のテスト。ここでは wasm32 向けにコンパイルして WGSL を生成し、
 //                      CPU だけで実行して `// expect:` と照合する。GPU での実行はブラウザで行う。
 //                      `// wgsl-has: kernel 文字列` / `// wgsl-lacks: kernel 文字列` があれば、その kernel の WGSL に
-//                      文字列がある / ないことを確かめる。
+//                      文字列がある / ないことを確かめる（`// msl-has:` は MSL。clang++ があるときの MSL の確認で）。
 //   tests/msl/         MSL の出力を、Metal なしで確かめる。clang++ があれば: tests/gpu と examples の kernel の MSL を
 //                      スタブヘッダ（metal_stub.h）つきで C++14 として構文検査し、tests/msl/kernels.um の kernel の MSL を
 //                      C++ として実行して、CPU 実行（ネイティブ）とチェックサムを比べる。Metal コンパイラでの確認ではない。
@@ -475,6 +475,14 @@ for (const f of files('tests/gpu')) {
       } catch (e) {
         fail(`${f} [msl syntax]`, String(e));
         continue;
+      }
+      // `// msl-has: kernel 文字列`: その kernel の MSL に文字列がある。
+      for (const d of directives(src, 'msl-has')) {
+        const sp = d.indexOf(' ');
+        const name = d.slice(0, sp);
+        const text = d.slice(sp + 1);
+        if (shaders.get(name)?.includes(text)) ok(`${f} kernel ${name} [msl has '${text}']`);
+        else fail(`${f} kernel ${name} [msl has '${text}']`, shaders.has(name) ? 'not found in the MSL' : 'no MSL for this kernel');
       }
       for (const [name, text] of shaders) {
         try {

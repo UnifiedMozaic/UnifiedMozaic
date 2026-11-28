@@ -1635,6 +1635,24 @@ void um_gpu_cpu_done(int32_t kernel, uint32_t count) {
 }
 
 static id<MTLComputePipelineState> um_pipeline_locked(int32_t kernel, const char *src, int32_t src_len);
+// kernel の MSL をコンパイルする設定。ふつうは CPU と同じ結果にするため、浮動小数点の近似を切る。
+// `fast kernel function` の MSL（1 行目が "// um:fast-math"。src/msl.ts の MSL_FAST_MATH_MARK）は、GPU のふつうの計算にする。
+static MTLCompileOptions *um_metal_options(const char *src, int32_t src_len) {
+  static const char mark[] = "// um:fast-math
+";
+  const BOOL fast = src_len >= (int32_t)(sizeof mark - 1) && memcmp(src, mark, sizeof mark - 1) == 0;
+  MTLCompileOptions *options = [MTLCompileOptions new];
+  if (@available(macOS 15.0, *)) {
+    options.mathMode = fast ? MTLMathModeFast : MTLMathModeSafe;
+    options.mathFloatingPointFunctions = fast ? MTLMathFloatingPointFunctionsFast : MTLMathFloatingPointFunctionsPrecise;
+  } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    options.fastMathEnabled = fast;
+#pragma clang diagnostic pop
+  }
+  return options;
+}
 static id<MTLComputePipelineState> um_pipeline(int32_t kernel, const char *src, int32_t src_len) {
   pthread_mutex_lock(&um_table_lock);
   id<MTLComputePipelineState> p = um_pipeline_locked(kernel, src, src_len);
@@ -1647,17 +1665,7 @@ static id<MTLComputePipelineState> um_pipeline_locked(int32_t kernel, const char
   if (p) return p;
   NSString *code = [[NSString alloc] initWithBytes:src length:(NSUInteger)src_len encoding:NSUTF8StringEncoding];
   if (!code) um_metal_fail("the shader source is not valid UTF-8", nil);
-  MTLCompileOptions *options = [MTLCompileOptions new];
-  // CPU と同じ結果にするため、浮動小数点の近似を切る。
-  if (@available(macOS 15.0, *)) {
-    options.mathMode = MTLMathModeSafe;
-    options.mathFloatingPointFunctions = MTLMathFloatingPointFunctionsPrecise;
-  } else {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    options.fastMathEnabled = NO;
-#pragma clang diagnostic pop
-  }
+  MTLCompileOptions *options = um_metal_options(src, src_len);
   NSError *error = nil;
   id<MTLLibrary> library = [um_device newLibraryWithSource:code options:options error:&error];
   if (!library) um_metal_fail("compiling the shader", error);
@@ -1679,16 +1687,7 @@ static id<MTLComputePipelineState> um_pipeline_bl(int32_t kernel, const char *sr
   if (!cached) {
     cached = [NSNull null];
     NSString *code = [[NSString alloc] initWithBytes:src length:(NSUInteger)src_len encoding:NSUTF8StringEncoding];
-    MTLCompileOptions *options = [MTLCompileOptions new];
-    if (@available(macOS 15.0, *)) {
-      options.mathMode = MTLMathModeSafe;
-      options.mathFloatingPointFunctions = MTLMathFloatingPointFunctionsPrecise;
-    } else {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-      options.fastMathEnabled = NO;
-#pragma clang diagnostic pop
-    }
+    MTLCompileOptions *options = um_metal_options(src, src_len);
     NSError *error = nil;
     id<MTLLibrary> library = code ? [um_device newLibraryWithSource:code options:options error:&error] : nil;
     id<MTLFunction> fn = library ? [library newFunctionWithName:@"um_main_bl"] : nil;
